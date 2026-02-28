@@ -511,23 +511,29 @@ export class WorldScene extends Phaser.Scene {
     graphics.fillRect(left, top, Math.round(HEALTH_BAR_WIDTH * ratio), HEALTH_BAR_HEIGHT);
   }
 
-  private showFloatingText(worldX: number, worldY: number, text: string, color: string): void {
+  private showFloatingText(
+    worldX: number,
+    worldY: number,
+    text: string,
+    color: string,
+    options?: { fontSize?: string; strokeThickness?: number; rise?: number; duration?: number },
+  ): void {
     const popup = this.add
       .text(worldX, worldY, text, {
         fontFamily: 'monospace',
-        fontSize: '12px',
+        fontSize: options?.fontSize ?? '12px',
         color,
         stroke: '#000000',
-        strokeThickness: 2,
+        strokeThickness: options?.strokeThickness ?? 2,
       })
       .setDepth(90)
       .setOrigin(0.5, 1);
 
     this.tweens.add({
       targets: popup,
-      y: popup.y - 16,
+      y: popup.y - (options?.rise ?? 16),
       alpha: 0,
-      duration: 650,
+      duration: options?.duration ?? 650,
       ease: 'Quad.Out',
       onComplete: () => popup.destroy(),
     });
@@ -552,6 +558,36 @@ export class WorldScene extends Phaser.Scene {
 
     if (isFailure) {
       this.showFloatingText(this.player.x, this.player.y - TILE_SIZE * 1.05, 'MISS', '#ff9b9b');
+    }
+  }
+
+  private showCombatZeroDamageOutcome(
+    previousActionText: string | null | undefined,
+    playerState: RemotePlayerState,
+  ): void {
+    const nextActionText = playerState.lastActionText;
+    if (!nextActionText || nextActionText === previousActionText) {
+      return;
+    }
+
+    if (/you block .*attack/i.test(nextActionText)) {
+      this.showFloatingText(this.player.x, this.player.y - TILE_SIZE * 0.7, '0', '#e2e2e2');
+      return;
+    }
+
+    if (/your attack glances off/i.test(nextActionText)) {
+      const targetEnemyId = playerState.combatTargetEnemyId;
+      const targetEnemy = targetEnemyId ? this.worldEnemies.get(targetEnemyId) : null;
+      if (!targetEnemy || targetEnemy.state.isDead) {
+        return;
+      }
+
+      this.showFloatingText(
+        targetEnemy.sprite.x,
+        targetEnemy.sprite.y - TILE_SIZE * 0.7,
+        '0',
+        '#e2e2e2',
+      );
     }
   }
 
@@ -781,14 +817,25 @@ export class WorldScene extends Phaser.Scene {
 
           if (previousHp > playerState.hp) {
             this.closeTransientInteractionUi();
+            const isEmpoweredIncomingHit = /crushes you for/i.test(playerState.lastActionText ?? '');
             this.showFloatingText(
               this.player.x,
               this.player.y - TILE_SIZE * 0.7,
               `-${Math.round(previousHp - playerState.hp)}`,
-              '#ffb1b1',
+              isEmpoweredIncomingHit ? '#ff7a7a' : '#ffb1b1',
+              isEmpoweredIncomingHit
+                ? {
+                    fontSize: '18px',
+                    strokeThickness: 3,
+                    rise: 22,
+                    duration: 780,
+                  }
+                : undefined,
             );
           }
         }
+
+        this.showCombatZeroDamageOutcome(previousActionText, playerState);
 
         this.showHarvestingDebugOutcome(previousActionText, playerState);
       } else {
@@ -2556,7 +2603,11 @@ export class WorldScene extends Phaser.Scene {
     if (this.localPlayerState.combatTargetEnemyId) {
       const targetEnemy = this.worldEnemies.get(this.localPlayerState.combatTargetEnemyId)?.state;
       if (targetEnemy && !targetEnemy.isDead) {
-        status = `Fighting ${targetEnemy.name} (${targetEnemy.hp}/${targetEnemy.maxHp})`;
+        const nextAttackInSeconds = Math.max(
+          0,
+          (Number(this.localPlayerState.nextCombatAt ?? 0) - Date.now()) / 1000,
+        );
+        status = `Fighting ${targetEnemy.name} (${targetEnemy.hp}/${targetEnemy.maxHp}) • Next hit ${nextAttackInSeconds.toFixed(1)}s`;
       } else {
         status = 'Searching target...';
       }
@@ -2821,7 +2872,14 @@ export class WorldScene extends Phaser.Scene {
                 this.multiplayerClient.sendEquipItem(index);
               },
             }
-          : null;
+          : slot.itemId === 'apple'
+            ? {
+                label: `Eat ${slot.name}`,
+                onSelect: () => {
+                  this.multiplayerClient.sendInventoryUse(index);
+                },
+              }
+            : null;
 
         cell.draggable = !primaryAction;
         cell.style.cursor = primaryAction ? 'pointer' : 'grab';
@@ -2912,15 +2970,6 @@ export class WorldScene extends Phaser.Scene {
             ...(primaryAction ? [primaryAction] : []),
           ];
 
-          if (slot.quantity > 1) {
-            options.push({
-              label: `Drop all ${slot.name}`,
-              onSelect: () => {
-                this.multiplayerClient.sendInventoryDrop(index, slot.quantity);
-              },
-            });
-          }
-
           options.push(
             {
               label: `Examine ${slot.name}`,
@@ -2930,9 +2979,9 @@ export class WorldScene extends Phaser.Scene {
               },
             },
             {
-              label: `Drop ${slot.name}`,
+              label: `Drop all ${slot.name}`,
               onSelect: () => {
-                this.multiplayerClient.sendInventoryDrop(index, 1);
+                this.multiplayerClient.sendInventoryDrop(index, slot.quantity);
               },
             },
           );

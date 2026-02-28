@@ -18,15 +18,15 @@
       "drops": [
         {
           "itemId": "birch_logs",
-          "weight": 75,
+          "weight": 50,
           "quantity": { "min": 1, "max": 1 },
           "xp": 20
         },
         {
-          "itemId": "leaf",
-          "weight": 25,
+          "itemId": "apple",
+          "weight": 50,
           "quantity": { "min": 1, "max": 1 },
-          "xp": 1
+          "xp": 20
         }
       ]
     },
@@ -47,15 +47,15 @@
       "drops": [
         {
           "itemId": "oak_logs",
-          "weight": 85,
+          "weight": 50,
           "quantity": { "min": 1, "max": 1 },
           "xp": 37
         },
         {
-          "itemId": "leaf",
-          "weight": 15,
-          "quantity": { "min": 1, "max": 2 },
-          "xp": 2
+          "itemId": "apple",
+          "weight": 50,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 37
         }
       ]
     }
