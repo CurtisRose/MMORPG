@@ -11,6 +11,10 @@
         "min": 3,
         "max": 5
       },
+      "depletionDurationMs": {
+        "min": 4500,
+        "max": 5500
+      },
       "drops": [
         {
           "itemId": "birch_logs",
@@ -35,6 +39,10 @@
       "depletionHits": {
         "min": 5,
         "max": 8
+      },
+      "depletionDurationMs": {
+        "min": 6000,
+        "max": 7000
       },
       "drops": [
         {

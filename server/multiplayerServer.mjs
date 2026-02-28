@@ -28,16 +28,18 @@ const DEFENSE_XP_PER_HIT_TAKEN = 12;
 const INVENTORY_MAX_SLOTS = 28;
 const BANK_MAX_SLOTS = 112;
 const STARTING_GOLD = 150;
-const PLAYER_MAX_HP = 20;
+const PLAYER_BASE_HP = 100;
+const PLAYER_HP_PER_CONSTITUTION_LEVEL = 10;
+const PLAYER_HP_REGEN_INTERVAL_MS = 10000;
 const PLAYER_ATTACK_RANGE_TILES = 1;
 const PLAYER_ATTACK_COOLDOWN_MS = 900;
-const PLAYER_ATTACK_DAMAGE_MIN = 1;
-const PLAYER_ATTACK_DAMAGE_MAX = 3;
+const PLAYER_ATTACK_DAMAGE_MIN = 4;
+const PLAYER_ATTACK_DAMAGE_MAX = 8;
 const ENEMY_AGGRO_RANGE_TILES = 5;
 const ENEMY_ATTACK_RANGE_TILES = 1;
 const ENEMY_ATTACK_COOLDOWN_MS = 1300;
-const ENEMY_ATTACK_DAMAGE_MIN = 1;
-const ENEMY_ATTACK_DAMAGE_MAX = 2;
+const ENEMY_ATTACK_DAMAGE_MIN = 3;
+const ENEMY_ATTACK_DAMAGE_MAX = 7;
 const ENEMY_RESPAWN_MS = 6000;
 const PROFILE_AUTOSAVE_INTERVAL_MS = 5000;
 
@@ -53,6 +55,23 @@ const COMBAT_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'combat');
 const CONTENT_DATA_DIR = path.join(DATA_DIR, 'content');
 const ITEM_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'items.json');
 const RESOURCE_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'resources.json');
+const GEAR_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'gear.json');
+const MINION_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'minions.json');
+const EQUIPMENT_SLOTS = [
+  'head',
+  'body',
+  'legs',
+  'hands',
+  'feet',
+  'offHand',
+  'mainHand',
+  'necklace',
+  'ring1',
+  'ring2',
+  'ring3',
+  'ring4',
+  'ring5',
+];
 
 function loadItemDefinitions() {
   const raw = loadRequiredJsonFile(ITEM_CONTENT_PATH);
@@ -153,8 +172,249 @@ function loadResourceDefinitions() {
   return map;
 }
 
+function loadGearDefinitions() {
+  const raw = loadRequiredJsonFile(GEAR_CONTENT_PATH);
+  if (!Array.isArray(raw)) {
+    throw new Error(`Gear config must be an array: ${GEAR_CONTENT_PATH}`);
+  }
+
+  const map = {};
+  for (const [index, entry] of raw.entries()) {
+    const itemId = String(entry?.itemId ?? '').trim();
+    if (!itemId) {
+      throw new Error(`Gear config entry ${index} is missing itemId`);
+    }
+
+    const itemDefinition = getItemDefinition(itemId);
+    if (!itemDefinition) {
+      throw new Error(`Gear config entry '${itemId}' references unknown item`);
+    }
+
+    if (itemDefinition.stackable) {
+      throw new Error(`Gear config entry '${itemId}' must be non-stackable`);
+    }
+
+    const slot = String(entry?.slot ?? '').trim();
+    if (!EQUIPMENT_SLOTS.includes(slot)) {
+      throw new Error(
+        `Gear config entry '${itemId}' has invalid slot '${slot}'. Expected one of: ${EQUIPMENT_SLOTS.join(', ')}`,
+      );
+    }
+
+    const normalizeNonZeroNumber = (value) => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed === 0) {
+        return undefined;
+      }
+
+      return parsed;
+    };
+
+    const normalizeAccuracyMap = (source) => {
+      const accuracy = {
+        melee: normalizeNonZeroNumber(source?.melee),
+        ranged: normalizeNonZeroNumber(source?.ranged),
+        magic: normalizeNonZeroNumber(source?.magic),
+      };
+
+      if (
+        accuracy.melee === undefined &&
+        accuracy.ranged === undefined &&
+        accuracy.magic === undefined
+      ) {
+        return undefined;
+      }
+
+      return accuracy;
+    };
+
+    const rawStats = entry?.stats ?? {};
+    const baseStats = {
+      strength: normalizeNonZeroNumber(rawStats?.baseStats?.strength),
+      constitution: normalizeNonZeroNumber(rawStats?.baseStats?.constitution),
+    };
+
+    const hasBaseStats = baseStats.strength !== undefined || baseStats.constitution !== undefined;
+
+    const armorProfileRaw = rawStats?.armorProfile;
+    const armorProfile =
+      armorProfileRaw && typeof armorProfileRaw === 'object'
+        ? {
+            style: String(armorProfileRaw.style ?? 'melee'),
+            damageReductionPct: normalizeNonZeroNumber(armorProfileRaw.damageReductionPct),
+            armor: normalizeNonZeroNumber(armorProfileRaw.armor),
+            accuracy: normalizeAccuracyMap(armorProfileRaw.accuracy),
+          }
+        : null;
+
+    const weaponProfileRaw = rawStats?.weaponProfile;
+    const weaponProfile =
+      weaponProfileRaw && typeof weaponProfileRaw === 'object'
+        ? {
+            type: String(weaponProfileRaw.type ?? ''),
+            style: String(weaponProfileRaw.style ?? ''),
+            accuracy: normalizeNonZeroNumber(weaponProfileRaw.accuracy),
+            attackRateSeconds: normalizeNonZeroNumber(weaponProfileRaw.attackRateSeconds),
+            range: normalizeNonZeroNumber(weaponProfileRaw.range),
+            baseDamage: normalizeNonZeroNumber(weaponProfileRaw.baseDamage),
+          }
+        : null;
+
+    map[itemId] = {
+      itemId,
+      slot,
+      stats: {
+        baseStats: hasBaseStats ? baseStats : undefined,
+        armorProfile,
+        weaponProfile,
+      },
+      combat: {
+        minDamageBonus: Math.floor(Number(entry?.combat?.minDamageBonus ?? 0)),
+        maxDamageBonus: Math.floor(Number(entry?.combat?.maxDamageBonus ?? 0)),
+      },
+      skills: {
+        mining: {
+          successChanceBonus: Number(entry?.skills?.mining?.successChanceBonus ?? 0),
+          gatherIntervalMultiplier: Number(entry?.skills?.mining?.gatherIntervalMultiplier ?? 1),
+        },
+        woodcutting: {
+          successChanceBonus: Number(entry?.skills?.woodcutting?.successChanceBonus ?? 0),
+          gatherIntervalMultiplier: Number(entry?.skills?.woodcutting?.gatherIntervalMultiplier ?? 1),
+        },
+      },
+    };
+  }
+
+  return map;
+}
+
+function loadMinionDefinitions() {
+  const raw = loadRequiredJsonFile(MINION_CONTENT_PATH);
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`Minion config must be a non-empty array: ${MINION_CONTENT_PATH}`);
+  }
+
+  const map = {};
+  const seenIds = new Set();
+
+  for (const [index, entry] of raw.entries()) {
+    const id = String(entry?.id ?? '').trim();
+    if (!id) {
+      throw new Error(`Minion config entry ${index} is missing id`);
+    }
+
+    if (seenIds.has(id)) {
+      throw new Error(`Minion config has duplicate id '${id}'`);
+    }
+    seenIds.add(id);
+
+    const type = String(entry?.type ?? '').trim();
+    if (type !== 'goblin') {
+      throw new Error(`Minion config entry '${id}' has unsupported type '${type}'`);
+    }
+
+    const name = String(entry?.name ?? '').trim();
+    const examineText = String(entry?.examineText ?? '').trim();
+    if (!name || !examineText) {
+      throw new Error(`Minion config entry '${id}' must include name and examineText`);
+    }
+
+    const maxHp = Math.max(1, Math.floor(Number(entry?.maxHp ?? 1)));
+    const attackDamageMin = Math.max(1, Math.floor(Number(entry?.attackDamageMin ?? ENEMY_ATTACK_DAMAGE_MIN)));
+    const attackDamageMax = Math.max(
+      attackDamageMin,
+      Math.floor(Number(entry?.attackDamageMax ?? ENEMY_ATTACK_DAMAGE_MAX)),
+    );
+    const attackCooldownMs = Math.max(200, Math.floor(Number(entry?.attackCooldownMs ?? ENEMY_ATTACK_COOLDOWN_MS)));
+    const aggroRangeTiles = Math.max(1, Math.floor(Number(entry?.aggroRangeTiles ?? ENEMY_AGGRO_RANGE_TILES)));
+    const respawnMs = Math.max(250, Math.floor(Number(entry?.respawnMs ?? ENEMY_RESPAWN_MS)));
+
+    const parseDropQuantity = (quantitySource, fallbackQuantity = 1) => {
+      if (quantitySource && typeof quantitySource === 'object') {
+        const minRaw = Number(quantitySource.min ?? fallbackQuantity);
+        const maxRaw = Number(quantitySource.max ?? fallbackQuantity);
+        const min = Math.max(1, Math.floor(Number.isFinite(minRaw) ? minRaw : fallbackQuantity));
+        const max = Math.max(min, Math.floor(Number.isFinite(maxRaw) ? maxRaw : min));
+        return { min, max };
+      }
+
+      const scalarRaw = Number(quantitySource ?? fallbackQuantity);
+      const scalar = Math.max(1, Math.floor(Number.isFinite(scalarRaw) ? scalarRaw : fallbackQuantity));
+      return { min: scalar, max: scalar };
+    };
+
+    const parseDropList = (source, label, requiresChance = false) => {
+      if (source === undefined) {
+        return [];
+      }
+
+      if (!Array.isArray(source)) {
+        throw new Error(`Minion config entry '${id}' ${label} must be an array`);
+      }
+
+      return source.map((dropEntry, dropIndex) => {
+        const dropPath = `${label}[${dropIndex}]`;
+        const itemId = String(dropEntry?.itemId ?? '').trim();
+        if (!itemId) {
+          throw new Error(`Minion config entry '${id}' ${dropPath} is missing itemId`);
+        }
+
+        const itemDefinition = getItemDefinition(itemId);
+        if (!itemDefinition) {
+          throw new Error(`Minion config entry '${id}' ${dropPath} references unknown item '${itemId}'`);
+        }
+
+        const quantity = parseDropQuantity(dropEntry?.quantity, 1);
+        if (!requiresChance) {
+          return {
+            itemId: itemDefinition.id,
+            quantity,
+          };
+        }
+
+        const chancePctRaw = Number(dropEntry?.chancePct);
+        if (!Number.isFinite(chancePctRaw) || chancePctRaw < 0 || chancePctRaw > 100) {
+          throw new Error(`Minion config entry '${id}' ${dropPath}.chancePct must be between 0 and 100`);
+        }
+
+        return {
+          itemId: itemDefinition.id,
+          chancePct: chancePctRaw,
+          quantity,
+        };
+      });
+    };
+
+    const guaranteedDrops = parseDropList(entry?.guaranteedDrops, 'guaranteedDrops');
+    const lootTable = parseDropList(entry?.lootTable, 'lootTable', true);
+
+    map[id] = {
+      id,
+      type,
+      name,
+      maxHp,
+      attackDamageMin,
+      attackDamageMax,
+      attackCooldownMs,
+      aggroRangeTiles,
+      respawnMs,
+      guaranteedDrops,
+      lootTable,
+      examineText,
+    };
+  }
+
+  return map;
+}
+
 const ITEM_DEFINITIONS = loadItemDefinitions();
 const RESOURCE_DEFINITIONS = loadResourceDefinitions();
+const GEAR_DEFINITIONS = loadGearDefinitions();
+const MINION_DEFINITIONS = loadMinionDefinitions();
+
+function getMinionDefinition(minionTypeId) {
+  return MINION_DEFINITIONS[String(minionTypeId ?? '')] ?? null;
+}
 
 function getItemDefinition(itemId) {
   return ITEM_DEFINITIONS[String(itemId ?? '')] ?? null;
@@ -176,6 +436,10 @@ function getResourceDefinition(resourceId) {
 
 function getResourceName(resourceId, fallback = 'resource') {
   return getResourceDefinition(resourceId)?.name ?? fallback;
+}
+
+function getGearDefinition(itemId) {
+  return GEAR_DEFINITIONS[String(itemId ?? '')] ?? null;
 }
 
 const NPC_DEFINITIONS = {
@@ -240,28 +504,70 @@ const SHOP_DEFINITIONS = {
         buyPrice: 50,
         sellPrice: 22,
       },
+      {
+        itemId: 'bronze_helmet',
+        name: getItemDefinition('bronze_helmet')?.name ?? 'Bronze helmet',
+        buyPrice: 70,
+        sellPrice: 30,
+      },
+      {
+        itemId: 'bronze_platebody',
+        name: getItemDefinition('bronze_platebody')?.name ?? 'Bronze platebody',
+        buyPrice: 120,
+        sellPrice: 52,
+      },
+      {
+        itemId: 'bronze_platelegs',
+        name: getItemDefinition('bronze_platelegs')?.name ?? 'Bronze platelegs',
+        buyPrice: 95,
+        sellPrice: 42,
+      },
+      {
+        itemId: 'leather_gloves',
+        name: getItemDefinition('leather_gloves')?.name ?? 'Leather gloves',
+        buyPrice: 35,
+        sellPrice: 15,
+      },
+      {
+        itemId: 'leather_boots',
+        name: getItemDefinition('leather_boots')?.name ?? 'Leather boots',
+        buyPrice: 35,
+        sellPrice: 15,
+      },
+      {
+        itemId: 'wooden_shield',
+        name: getItemDefinition('wooden_shield')?.name ?? 'Wooden shield',
+        buyPrice: 55,
+        sellPrice: 24,
+      },
+      {
+        itemId: 'copper_amulet',
+        name: getItemDefinition('copper_amulet')?.name ?? 'Copper amulet',
+        buyPrice: 90,
+        sellPrice: 39,
+      },
+      {
+        itemId: 'copper_ring',
+        name: getItemDefinition('copper_ring')?.name ?? 'Copper ring',
+        buyPrice: 45,
+        sellPrice: 19,
+      },
     ],
   },
 };
 
-const ENEMY_DEFINITIONS = [
+const MINION_SPAWN_DEFINITIONS = [
   {
     id: 'enemy-goblin-1',
-    type: 'goblin',
-    name: 'Goblin',
+    minionTypeId: 'goblin',
     tileX: 33,
     tileY: 39,
-    maxHp: 12,
-    examineText: 'A grumpy little goblin.',
   },
   {
     id: 'enemy-goblin-2',
-    type: 'goblin',
-    name: 'Goblin',
+    minionTypeId: 'goblin',
     tileX: 47,
     tileY: 41,
-    maxHp: 12,
-    examineText: 'A grumpy little goblin.',
   },
 ];
 
@@ -276,6 +582,7 @@ const DEFAULT_HARVESTING_SKILL_CONFIGS = {
         successChance: 0.25,
         gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT,
         depletionHits: { min: 3, max: 5 },
+        depletionDurationMs: { min: 4500, max: 5500 },
         drops: [
           {
             itemId: 'birch_logs',
@@ -298,6 +605,7 @@ const DEFAULT_HARVESTING_SKILL_CONFIGS = {
         successChance: 0.18,
         gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT + 150,
         depletionHits: { min: 5, max: 8 },
+        depletionDurationMs: { min: 6000, max: 7000 },
         drops: [
           {
             itemId: 'oak_logs',
@@ -332,6 +640,7 @@ const DEFAULT_HARVESTING_SKILL_CONFIGS = {
         successChance: 0.3,
         gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT,
         depletionHits: { min: 3, max: 5 },
+        depletionDurationMs: { min: 6000, max: 7000 },
         drops: [
           {
             itemId: 'copper_ore',
@@ -354,6 +663,7 @@ const DEFAULT_HARVESTING_SKILL_CONFIGS = {
         successChance: 0.2,
         gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT + 150,
         depletionHits: { min: 4, max: 7 },
+        depletionDurationMs: { min: 7000, max: 8000 },
         drops: [
           {
             itemId: 'iron_ore',
@@ -376,6 +686,7 @@ const DEFAULT_HARVESTING_SKILL_CONFIGS = {
         successChance: 0.28,
         gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT,
         depletionHits: { min: 3, max: 5 },
+        depletionDurationMs: { min: 6000, max: 7000 },
         drops: [
           {
             itemId: 'tin_ore',
@@ -527,6 +838,22 @@ function validateHarvestingConfig(rawConfig, sourceFilePath) {
         }
         if (Number.isFinite(min) && Number.isFinite(max) && max < min) {
           pushError(`${resourcePath}.depletionHits`, 'max must be >= min');
+        }
+      }
+
+      if (!resource.depletionDurationMs || typeof resource.depletionDurationMs !== 'object') {
+        pushError(`${resourcePath}.depletionDurationMs`, 'must be an object with min/max');
+      } else {
+        const min = resource.depletionDurationMs.min;
+        const max = resource.depletionDurationMs.max;
+        if (!Number.isFinite(min) || min < 250) {
+          pushError(`${resourcePath}.depletionDurationMs.min`, 'must be a number >= 250');
+        }
+        if (!Number.isFinite(max) || max < 250) {
+          pushError(`${resourcePath}.depletionDurationMs.max`, 'must be a number >= 250');
+        }
+        if (Number.isFinite(min) && Number.isFinite(max) && max < min) {
+          pushError(`${resourcePath}.depletionDurationMs`, 'max must be >= min');
         }
       }
 
@@ -771,6 +1098,12 @@ function normalizeHitRange(rawRange, fallbackRange = { min: 1, max: 1 }) {
   return { min, max };
 }
 
+function normalizeDurationRange(rawRange, fallbackRange = { min: 5000, max: 5000 }) {
+  const min = Math.max(250, Math.floor(Number(rawRange?.min ?? fallbackRange.min ?? 5000)));
+  const max = Math.max(min, Math.floor(Number(rawRange?.max ?? fallbackRange.max ?? min)));
+  return { min, max };
+}
+
 function normalizeHarvestDrops(rawDrops, fallbackDrops) {
   const sourceDrops = Array.isArray(rawDrops) && rawDrops.length > 0 ? rawDrops : fallbackDrops;
   const normalized = [];
@@ -825,6 +1158,10 @@ function normalizeHarvestResource(rawResource, fallbackResource, skill) {
     Math.floor(Number(rawResource?.gatherIntervalMs ?? fallbackResource?.gatherIntervalMs ?? 1200)),
   );
   const depletionHits = normalizeHitRange(rawResource?.depletionHits, fallbackResource?.depletionHits);
+  const depletionDurationMs = normalizeDurationRange(
+    rawResource?.depletionDurationMs,
+    fallbackResource?.depletionDurationMs,
+  );
   const drops = normalizeHarvestDrops(rawResource?.drops, fallbackResource?.drops ?? []);
 
   return {
@@ -835,6 +1172,7 @@ function normalizeHarvestResource(rawResource, fallbackResource, skill) {
     successChance,
     gatherIntervalMs,
     depletionHits,
+    depletionDurationMs,
     drops,
     messages: {
       locked: String(rawResource?.messages?.locked ?? ''),
@@ -983,6 +1321,20 @@ function rollDepletionHits(resourceConfig) {
   return randomIntBetween(resourceConfig.depletionHits.min, resourceConfig.depletionHits.max);
 }
 
+function rollDepletionDurationMs(resourceConfig, fallbackMs = 5000) {
+  const min = Number(resourceConfig?.depletionDurationMs?.min);
+  const max = Number(resourceConfig?.depletionDurationMs?.max);
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    const resolvedFallback = Math.max(250, Math.floor(Number(fallbackMs) || 5000));
+    return resolvedFallback;
+  }
+
+  const safeMin = Math.max(250, Math.floor(min));
+  const safeMax = Math.max(safeMin, Math.floor(max));
+  return randomIntBetween(safeMin, safeMax);
+}
+
 function pickWeightedDrop(drops) {
   const totalWeight = drops.reduce((sum, drop) => sum + Math.max(0, drop.weight), 0);
   if (totalWeight <= 0) {
@@ -1018,6 +1370,38 @@ function createInventory(maxSlots = INVENTORY_MAX_SLOTS) {
   };
 }
 
+function createEquipment() {
+  return {
+    head: null,
+    body: null,
+    legs: null,
+    hands: null,
+    feet: null,
+    offHand: null,
+    mainHand: null,
+    necklace: null,
+    ring1: null,
+    ring2: null,
+    ring3: null,
+    ring4: null,
+    ring5: null,
+  };
+}
+
+function createInventorySlot(itemDefinition, quantity = 1) {
+  const gearDefinition = getGearDefinition(itemDefinition.id);
+  return {
+    itemId: itemDefinition.id,
+    quantity,
+    name: itemDefinition.name,
+    stackable: itemDefinition.stackable,
+    image: itemDefinition.image,
+    examineText: itemDefinition.examineText,
+    equipSlot: gearDefinition?.slot ?? null,
+    gearStats: gearDefinition?.stats ?? null,
+  };
+}
+
 function addItemToInventory(player, itemId, quantity) {
   const itemDefinition = getItemDefinition(itemId);
   if (!itemDefinition) {
@@ -1041,26 +1425,12 @@ function addItemToInventory(player, itemId, quantity) {
   }
 
   if (itemDefinition.stackable) {
-    slots.push({
-      itemId,
-      quantity,
-      name: itemDefinition.name,
-      stackable: itemDefinition.stackable,
-      image: itemDefinition.image,
-      examineText: itemDefinition.examineText,
-    });
+    slots.push(createInventorySlot(itemDefinition, quantity));
     return true;
   }
 
   for (let index = 0; index < quantity; index += 1) {
-    slots.push({
-      itemId,
-      quantity: 1,
-      name: itemDefinition.name,
-      stackable: itemDefinition.stackable,
-      image: itemDefinition.image,
-      examineText: itemDefinition.examineText,
-    });
+    slots.push(createInventorySlot(itemDefinition, 1));
   }
 
   return true;
@@ -1152,6 +1522,98 @@ function dropInventorySlot(player, slotIndex, quantity) {
   };
 }
 
+function getPlayerGoldAmount(player) {
+  return getInventoryItemCount(player, 'gold_coins');
+}
+
+function canSpendPlayerGold(player, amount) {
+  const required = Math.max(0, Math.floor(Number(amount ?? 0)));
+  return getPlayerGoldAmount(player) >= required;
+}
+
+function spendPlayerGold(player, amount) {
+  const required = Math.max(0, Math.floor(Number(amount ?? 0)));
+  if (required <= 0) {
+    return true;
+  }
+
+  return removeItemFromInventory(player, 'gold_coins', required);
+}
+
+function addPlayerGold(player, amount) {
+  const quantity = Math.max(0, Math.floor(Number(amount ?? 0)));
+  if (quantity <= 0) {
+    return true;
+  }
+
+  return addItemToInventory(player, 'gold_coins', quantity);
+}
+
+function rollMinionDrops(minionDefinition) {
+  const rolledDrops = [];
+
+  for (const guaranteedDrop of minionDefinition?.guaranteedDrops ?? []) {
+    const quantity = randomIntBetween(guaranteedDrop.quantity.min, guaranteedDrop.quantity.max);
+    if (quantity <= 0) {
+      continue;
+    }
+
+    rolledDrops.push({
+      itemId: guaranteedDrop.itemId,
+      quantity,
+    });
+  }
+
+  for (const lootDrop of minionDefinition?.lootTable ?? []) {
+    const roll = Math.random() * 100;
+    if (roll > lootDrop.chancePct) {
+      continue;
+    }
+
+    const quantity = randomIntBetween(lootDrop.quantity.min, lootDrop.quantity.max);
+    if (quantity <= 0) {
+      continue;
+    }
+
+    rolledDrops.push({
+      itemId: lootDrop.itemId,
+      quantity,
+    });
+  }
+
+  return rolledDrops;
+}
+
+function applyMinionDropsToPlayer(player, minionDefinition) {
+  const rolledDrops = rollMinionDrops(minionDefinition);
+  if (rolledDrops.length === 0) {
+    return [];
+  }
+
+  const mergedDrops = new Map();
+  for (const drop of rolledDrops) {
+    const current = mergedDrops.get(drop.itemId) ?? 0;
+    mergedDrops.set(drop.itemId, current + drop.quantity);
+  }
+
+  const awardedDrops = [];
+  for (const [itemId, quantity] of mergedDrops.entries()) {
+    const added = addItemToInventory(player, itemId, quantity);
+    if (!added) {
+      continue;
+    }
+
+    const itemDefinition = getItemDefinition(itemId);
+    awardedDrops.push({
+      itemId,
+      quantity,
+      name: itemDefinition?.name ?? itemId,
+    });
+  }
+
+  return awardedDrops;
+}
+
 function toInventorySnapshot(inventory) {
   return {
     maxSlots: inventory.maxSlots,
@@ -1162,8 +1624,32 @@ function toInventorySnapshot(inventory) {
       stackable: slot.stackable,
       image: slot.image,
       examineText: slot.examineText,
+      equipSlot: slot.equipSlot ?? null,
+      gearStats: slot.gearStats ?? null,
     })),
   };
+}
+
+function toEquipmentSnapshot(equipment) {
+  const snapshot = createEquipment();
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const slot = equipment?.[slotName] ?? null;
+    snapshot[slotName] = slot
+      ? {
+          itemId: slot.itemId,
+          quantity: 1,
+          name: slot.name,
+          stackable: slot.stackable,
+          image: slot.image,
+          examineText: slot.examineText,
+          equipSlot: slot.equipSlot ?? slotName,
+          gearStats: slot.gearStats ?? null,
+        }
+      : null;
+  }
+
+  return snapshot;
 }
 
 function canAddItemToContainer(container, itemDefinition, quantity) {
@@ -1195,26 +1681,12 @@ function addItemToContainer(container, itemDefinition, quantity) {
       return true;
     }
 
-    container.slots.push({
-      itemId: itemDefinition.id,
-      quantity,
-      name: itemDefinition.name,
-      stackable: itemDefinition.stackable,
-      image: itemDefinition.image,
-      examineText: itemDefinition.examineText,
-    });
+    container.slots.push(createInventorySlot(itemDefinition, quantity));
     return true;
   }
 
   for (let index = 0; index < quantity; index += 1) {
-    container.slots.push({
-      itemId: itemDefinition.id,
-      quantity: 1,
-      name: itemDefinition.name,
-      stackable: itemDefinition.stackable,
-      image: itemDefinition.image,
-      examineText: itemDefinition.examineText,
-    });
+    container.slots.push(createInventorySlot(itemDefinition, 1));
   }
 
   return true;
@@ -1259,6 +1731,105 @@ function transferContainerSlot(source, destination, slotIndex, quantity) {
   };
 }
 
+function equipInventoryItem(player, slotIndex) {
+  const index = Math.floor(Number(slotIndex));
+  if (!Number.isFinite(index) || index < 0 || index >= player.inventory.slots.length) {
+    return { ok: false, reason: 'Invalid inventory slot.' };
+  }
+
+  const sourceSlot = player.inventory.slots[index];
+  if (!sourceSlot) {
+    return { ok: false, reason: 'Item not found.' };
+  }
+
+  const gearDefinition = getGearDefinition(sourceSlot.itemId);
+  if (!gearDefinition) {
+    return { ok: false, reason: 'This item is not equippable.' };
+  }
+
+  const itemDefinition = getItemDefinition(sourceSlot.itemId);
+  if (!itemDefinition) {
+    return { ok: false, reason: 'Unknown item.' };
+  }
+
+  let targetSlot = gearDefinition.slot;
+
+  if (targetSlot.startsWith('ring')) {
+    const ringSlots = ['ring1', 'ring2', 'ring3', 'ring4', 'ring5'];
+    const firstEmptyRingSlot = ringSlots.find((slotName) => !player.equipment[slotName]);
+    if (!firstEmptyRingSlot) {
+      return { ok: false, reason: 'All ring slots are full. Unequip a ring first.' };
+    }
+
+    targetSlot = firstEmptyRingSlot;
+  }
+
+  const currentlyEquipped = player.equipment[targetSlot];
+
+  if (currentlyEquipped) {
+    const equippedDefinition = getItemDefinition(currentlyEquipped.itemId);
+    if (!equippedDefinition) {
+      return { ok: false, reason: 'Equipped item is invalid.' };
+    }
+
+    if (!canAddItemToContainer(player.inventory, equippedDefinition, 1)) {
+      return { ok: false, reason: 'No inventory space to swap equipment.' };
+    }
+  }
+
+  if (sourceSlot.quantity > 1) {
+    sourceSlot.quantity -= 1;
+  } else {
+    player.inventory.slots.splice(index, 1);
+  }
+
+  if (currentlyEquipped) {
+    const equippedDefinition = getItemDefinition(currentlyEquipped.itemId);
+    if (equippedDefinition) {
+      addItemToContainer(player.inventory, equippedDefinition, 1);
+    }
+  }
+
+  player.equipment[targetSlot] = createInventorySlot(itemDefinition, 1);
+  applyPlayerMaxHpFromConstitution(player, true);
+  return {
+    ok: true,
+    itemName: itemDefinition.name,
+    slot: targetSlot,
+  };
+}
+
+function unequipItem(player, slotName) {
+  const resolvedSlot = String(slotName ?? '');
+  if (!EQUIPMENT_SLOTS.includes(resolvedSlot)) {
+    return { ok: false, reason: 'Invalid equipment slot.' };
+  }
+
+  const equipped = player.equipment[resolvedSlot];
+  if (!equipped) {
+    return { ok: false, reason: 'No item equipped there.' };
+  }
+
+  const itemDefinition = getItemDefinition(equipped.itemId);
+  if (!itemDefinition) {
+    player.equipment[resolvedSlot] = null;
+    return { ok: false, reason: 'Equipped item is invalid.' };
+  }
+
+  if (!canAddItemToContainer(player.inventory, itemDefinition, 1)) {
+    return { ok: false, reason: 'No inventory space to unequip.' };
+  }
+
+  player.equipment[resolvedSlot] = null;
+  addItemToContainer(player.inventory, itemDefinition, 1);
+  applyPlayerMaxHpFromConstitution(player, true);
+  return {
+    ok: true,
+    itemName: itemDefinition.name,
+    slot: resolvedSlot,
+  };
+}
+
 function getXpForLevel(level) {
   if (level <= 1) {
     return 0;
@@ -1286,6 +1857,10 @@ function addSkillXp(player, skillName, xpAmount) {
   skill.xp += xpAmount;
   skill.level = getLevelForXp(skill.xp);
 
+  if (skillName === 'constitution') {
+    applyPlayerMaxHpFromConstitution(player, true);
+  }
+
   const leveledUp = skill.level > previousLevel;
   return {
     leveledUp,
@@ -1303,7 +1878,7 @@ const wss = new WebSocketServer({ port: SERVER_PORT });
 function createPlayer(id) {
   const spawn = findSpawnTile();
 
-  return {
+  const player = {
     id,
     displayName: createUniqueDisplayName(id),
     tileX: spawn.tileX,
@@ -1317,45 +1892,137 @@ function createPlayer(id) {
     nextMoveAllowedAt: 0,
     nextInteractionAt: 0,
     nextCombatAt: 0,
-    hp: PLAYER_MAX_HP,
-    maxHp: PLAYER_MAX_HP,
+    nextHpRegenAt: Date.now() + PLAYER_HP_REGEN_INTERVAL_MS,
+    hp: PLAYER_BASE_HP,
+    maxHp: PLAYER_BASE_HP,
     combatTargetEnemyId: null,
     activeBankNpcId: null,
-    gold: STARTING_GOLD,
     inventory: createInventory(),
     bank: createInventory(BANK_MAX_SLOTS),
+    equipment: createEquipment(),
     skills: createSkills(),
     lastActionText: null,
     lastInputAt: Date.now(),
   };
+
+  addPlayerGold(player, STARTING_GOLD);
+  return player;
 }
 
 function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS) {
   const maxSlots = Number(inventory?.maxSlots);
   const slots = Array.isArray(inventory?.slots) ? inventory.slots : [];
   const maxAllowedSlots = Math.max(defaultMaxSlots, BANK_MAX_SLOTS);
+  const resolvedMaxSlots = Number.isFinite(maxSlots)
+    ? Math.max(1, Math.min(maxAllowedSlots, Math.floor(maxSlots)))
+    : defaultMaxSlots;
+
+  const normalizedSlots = [];
+
+  for (const slot of slots) {
+    const itemId = String(slot?.itemId ?? '');
+    const itemDefinition = getItemDefinition(itemId);
+    const gearDefinition = getGearDefinition(itemId);
+    const fallbackName = String(slot?.name ?? itemId ?? 'item');
+
+    if (itemId.length === 0 || fallbackName.length === 0) {
+      continue;
+    }
+
+    const quantity = Math.max(1, Math.floor(Number(slot?.quantity ?? 1)));
+    const stackable = itemDefinition?.stackable ?? Boolean(slot?.stackable);
+    const normalizedSlot = {
+      itemId,
+      quantity: 1,
+      name: itemDefinition?.name ?? fallbackName,
+      stackable,
+      image: itemDefinition?.image ?? String(slot?.image ?? ''),
+      examineText: itemDefinition?.examineText ?? getItemExamineText(itemId, fallbackName),
+      equipSlot: gearDefinition?.slot ?? null,
+      gearStats: gearDefinition?.stats ?? null,
+    };
+
+    if (stackable) {
+      const existing = normalizedSlots.find((entry) => entry.itemId === itemId && entry.stackable);
+      if (existing) {
+        existing.quantity += quantity;
+      } else {
+        normalizedSlots.push({
+          ...normalizedSlot,
+          quantity,
+        });
+      }
+
+      continue;
+    }
+
+    const availableSlots = Math.max(0, resolvedMaxSlots - normalizedSlots.length);
+    const copiesToAdd = Math.min(quantity, availableSlots);
+    for (let index = 0; index < copiesToAdd; index += 1) {
+      normalizedSlots.push({
+        ...normalizedSlot,
+        quantity: 1,
+      });
+    }
+  }
 
   return {
-    maxSlots: Number.isFinite(maxSlots)
-      ? Math.max(1, Math.min(maxAllowedSlots, Math.floor(maxSlots)))
-      : defaultMaxSlots,
-    slots: slots
-      .map((slot) => {
-        const itemId = String(slot?.itemId ?? '');
-        const itemDefinition = getItemDefinition(itemId);
-        const fallbackName = String(slot?.name ?? itemId ?? 'item');
-
-        return {
-          itemId,
-          quantity: Math.max(1, Math.floor(Number(slot?.quantity ?? 1))),
-          name: itemDefinition?.name ?? fallbackName,
-          stackable: itemDefinition?.stackable ?? Boolean(slot?.stackable),
-          image: itemDefinition?.image ?? String(slot?.image ?? ''),
-          examineText: itemDefinition?.examineText ?? getItemExamineText(itemId, fallbackName),
-        };
-      })
-      .filter((slot) => slot.itemId.length > 0 && slot.name.length > 0),
+    maxSlots: resolvedMaxSlots,
+    slots: normalizedSlots,
   };
+}
+
+function normalizePlayerContainersForCurrentItems(player) {
+  player.inventory = cloneInventory(player.inventory, INVENTORY_MAX_SLOTS);
+  player.bank = cloneInventory(player.bank, BANK_MAX_SLOTS);
+  applyPlayerMaxHpFromConstitution(player, true);
+}
+
+function getPlayerGearBaseStatBonus(player, statName) {
+  let total = 0;
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const equipped = player?.equipment?.[slotName] ?? null;
+    if (!equipped) {
+      continue;
+    }
+
+    const value = Number(equipped?.gearStats?.baseStats?.[statName]);
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+
+    total += value;
+  }
+
+  return total;
+}
+
+function getPlayerEffectiveConstitutionLevel(player) {
+  const constitutionLevel = Math.max(1, Math.floor(Number(player?.skills?.constitution?.level ?? 1)));
+  const gearConstitutionBonus = getPlayerGearBaseStatBonus(player, 'constitution');
+  return Math.max(1, constitutionLevel + gearConstitutionBonus);
+}
+
+function getMaxHpForConstitutionLevel(constitutionLevel) {
+  return PLAYER_BASE_HP + (constitutionLevel - 1) * PLAYER_HP_PER_CONSTITUTION_LEVEL;
+}
+
+function applyPlayerMaxHpFromConstitution(player, applyDelta = false) {
+  const previousMaxHpRaw = Number(player?.maxHp);
+  const previousMaxHp =
+    Number.isFinite(previousMaxHpRaw) && previousMaxHpRaw > 0
+      ? Math.floor(previousMaxHpRaw)
+      : PLAYER_BASE_HP;
+  const nextMaxHp = getMaxHpForConstitutionLevel(getPlayerEffectiveConstitutionLevel(player));
+  const hpRaw = Number(player?.hp);
+  const currentHp = Number.isFinite(hpRaw) ? Math.floor(hpRaw) : nextMaxHp;
+  const nextHp = applyDelta
+    ? currentHp + (nextMaxHp - previousMaxHp)
+    : currentHp;
+
+  player.maxHp = nextMaxHp;
+  player.hp = Math.max(1, Math.min(nextMaxHp, nextHp));
 }
 
 function cloneSkills(skills) {
@@ -1389,9 +2056,34 @@ function cloneSkills(skills) {
   };
 }
 
+function cloneEquipment(equipment) {
+  const normalized = createEquipment();
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const rawItem = equipment?.[slotName] ?? null;
+    if (!rawItem || typeof rawItem !== 'object') {
+      normalized[slotName] = null;
+      continue;
+    }
+
+    const itemId = String(rawItem.itemId ?? '');
+    const itemDefinition = getItemDefinition(itemId);
+    const gearDefinition = getGearDefinition(itemId);
+    if (!itemDefinition || !gearDefinition || gearDefinition.slot !== slotName) {
+      normalized[slotName] = null;
+      continue;
+    }
+
+    normalized[slotName] = createInventorySlot(itemDefinition, 1);
+  }
+
+  return normalized;
+}
+
 function sanitizePlayerProfile(rawProfile) {
   const inventory = cloneInventory(rawProfile?.inventory);
   const bank = cloneInventory(rawProfile?.bank, BANK_MAX_SLOTS);
+  const equipment = cloneEquipment(rawProfile?.equipment);
   const skills = cloneSkills(rawProfile?.skills);
   skills.woodcutting.level = getLevelForXp(skills.woodcutting.xp);
   skills.mining.level = getLevelForXp(skills.mining.xp);
@@ -1401,8 +2093,17 @@ function sanitizePlayerProfile(rawProfile) {
 
   const tileX = Math.max(1, Math.min(WORLD_WIDTH_TILES - 2, Math.round(Number(rawProfile?.tileX ?? 40))));
   const tileY = Math.max(1, Math.min(WORLD_HEIGHT_TILES - 2, Math.round(Number(rawProfile?.tileY ?? 40))));
-  const maxHp = Math.max(1, Math.min(99, Math.floor(Number(rawProfile?.maxHp ?? PLAYER_MAX_HP))));
+  const maxHp = Math.max(1, Math.floor(Number(rawProfile?.maxHp ?? PLAYER_BASE_HP)));
   const hp = Math.max(1, Math.min(maxHp, Math.floor(Number(rawProfile?.hp ?? maxHp))));
+
+  const legacyGold = Math.max(0, Math.floor(Number(rawProfile?.gold ?? 0)));
+  const hasCoinStack = inventory.slots.some((slot) => slot.itemId === 'gold_coins');
+  if (!hasCoinStack && legacyGold > 0) {
+    const goldItemDefinition = getItemDefinition('gold_coins');
+    if (goldItemDefinition) {
+      addItemToContainer(inventory, goldItemDefinition, legacyGold);
+    }
+  }
 
   return {
     displayName: String(rawProfile?.displayName ?? '').trim(),
@@ -1410,9 +2111,9 @@ function sanitizePlayerProfile(rawProfile) {
     tileY,
     hp,
     maxHp,
-    gold: Math.max(0, Math.floor(Number(rawProfile?.gold ?? STARTING_GOLD))),
     inventory,
     bank,
+    equipment,
     skills,
   };
 }
@@ -1454,9 +2155,9 @@ function capturePlayerProfile(player) {
     tileY: player.tileY,
     hp: player.hp,
     maxHp: player.maxHp,
-    gold: player.gold,
     inventory: player.inventory,
     bank: player.bank,
+    equipment: player.equipment,
     skills: player.skills,
   });
 }
@@ -1477,15 +2178,17 @@ function applyPersistedProfile(player, profile) {
   player.tileY = safeProfile.tileY;
   player.hp = safeProfile.hp;
   player.maxHp = safeProfile.maxHp;
-  player.gold = safeProfile.gold;
   player.inventory = cloneInventory(safeProfile.inventory);
   player.bank = cloneInventory(safeProfile.bank, BANK_MAX_SLOTS);
+  player.equipment = cloneEquipment(safeProfile.equipment);
   player.skills = cloneSkills(safeProfile.skills);
   player.skills.woodcutting.level = getLevelForXp(player.skills.woodcutting.xp);
   player.skills.mining.level = getLevelForXp(player.skills.mining.xp);
   player.skills.strength.level = getLevelForXp(player.skills.strength.xp);
   player.skills.defense.level = getLevelForXp(player.skills.defense.xp);
   player.skills.constitution.level = getLevelForXp(player.skills.constitution.xp);
+  applyPlayerMaxHpFromConstitution(player, true);
+  player.nextHpRegenAt = Date.now() + PLAYER_HP_REGEN_INTERVAL_MS;
 }
 
 function resolveProfileIdFromRequest(request) {
@@ -1503,23 +2206,31 @@ function resolveProfileIdFromRequest(request) {
 function createWorldEnemies() {
   const enemies = new Map();
 
-  for (const definition of ENEMY_DEFINITIONS) {
-    if (!isBaseWalkableTile(definition.tileX, definition.tileY)) {
+  for (const spawnDefinition of MINION_SPAWN_DEFINITIONS) {
+    if (!isBaseWalkableTile(spawnDefinition.tileX, spawnDefinition.tileY)) {
       continue;
     }
 
-    enemies.set(definition.id, {
-      ...definition,
-      spawnTileX: definition.tileX,
-      spawnTileY: definition.tileY,
+    const minionDefinition = getMinionDefinition(spawnDefinition.minionTypeId);
+    if (!minionDefinition) {
+      continue;
+    }
+
+    enemies.set(spawnDefinition.id, {
+      ...minionDefinition,
+      id: spawnDefinition.id,
+      tileX: spawnDefinition.tileX,
+      tileY: spawnDefinition.tileY,
+      spawnTileX: spawnDefinition.tileX,
+      spawnTileY: spawnDefinition.tileY,
       directionX: 0,
       directionY: 0,
       targetTileX: null,
       targetTileY: null,
       targetPath: [],
       nextMoveAllowedAt: 0,
-      hp: definition.maxHp,
-      maxHp: definition.maxHp,
+      hp: minionDefinition.maxHp,
+      maxHp: minionDefinition.maxHp,
       targetPlayerId: null,
       nextAttackAt: 0,
       deadUntil: 0,
@@ -1838,6 +2549,138 @@ function isPlayerMoving(player) {
   );
 }
 
+function getPlayerSkillActionBonuses(player, skillName) {
+  let successChanceBonus = 0;
+  let gatherIntervalMultiplier = 1;
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const equipped = player.equipment?.[slotName] ?? null;
+    if (!equipped) {
+      continue;
+    }
+
+    const gearDefinition = getGearDefinition(equipped.itemId);
+    const skillBonuses = gearDefinition?.skills?.[skillName] ?? null;
+    if (!skillBonuses) {
+      continue;
+    }
+
+    successChanceBonus += Number(skillBonuses.successChanceBonus ?? 0);
+    const multiplier = Number(skillBonuses.gatherIntervalMultiplier ?? 1);
+    if (Number.isFinite(multiplier) && multiplier > 0) {
+      gatherIntervalMultiplier *= multiplier;
+    }
+  }
+
+  return {
+    successChanceBonus,
+    gatherIntervalMultiplier,
+  };
+}
+
+function getPlayerCombatBonuses(player) {
+  let minDamageBonus = 0;
+  let maxDamageBonus = 0;
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const equipped = player.equipment?.[slotName] ?? null;
+    if (!equipped) {
+      continue;
+    }
+
+    const gearDefinition = getGearDefinition(equipped.itemId);
+    if (!gearDefinition?.combat) {
+      continue;
+    }
+
+    minDamageBonus += Math.floor(Number(gearDefinition.combat.minDamageBonus ?? 0));
+    maxDamageBonus += Math.floor(Number(gearDefinition.combat.maxDamageBonus ?? 0));
+  }
+
+  return {
+    minDamageBonus,
+    maxDamageBonus,
+  };
+}
+
+function getPlayerWeaponBaseDamageTotal(player) {
+  let total = 0;
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const equipped = player.equipment?.[slotName] ?? null;
+    if (!equipped) {
+      continue;
+    }
+
+    const baseDamage = Number(equipped?.gearStats?.weaponProfile?.baseDamage);
+    if (!Number.isFinite(baseDamage) || baseDamage <= 0) {
+      continue;
+    }
+
+    total += baseDamage;
+  }
+
+  return total;
+}
+
+function getPlayerAttackCooldownMs(player) {
+  let attackRateSeconds = PLAYER_ATTACK_COOLDOWN_MS / 1000;
+
+  for (const slotName of EQUIPMENT_SLOTS) {
+    const equipped = player.equipment?.[slotName] ?? null;
+    if (!equipped) {
+      continue;
+    }
+
+    const weaponAttackRateSeconds = Number(equipped?.gearStats?.weaponProfile?.attackRateSeconds);
+    if (!Number.isFinite(weaponAttackRateSeconds) || weaponAttackRateSeconds <= 0) {
+      continue;
+    }
+
+    attackRateSeconds = Math.min(attackRateSeconds, weaponAttackRateSeconds);
+  }
+
+  return Math.max(250, Math.floor(attackRateSeconds * 1000));
+}
+
+function beginPlayerCombatTarget(player, enemyId, nowMs) {
+  const isNewTarget = player.combatTargetEnemyId !== enemyId;
+  player.combatTargetEnemyId = enemyId;
+
+  if (isNewTarget) {
+    player.nextCombatAt = nowMs + getPlayerAttackCooldownMs(player);
+  }
+}
+
+function getPlayerEffectiveStrength(player) {
+  const strengthLevel = Math.max(1, Math.floor(Number(player?.skills?.strength?.level ?? 1)));
+  const gearStrengthBonus = getPlayerGearBaseStatBonus(player, 'strength');
+  return Math.max(1, strengthLevel + gearStrengthBonus);
+}
+
+function processPlayerHealthRegeneration(player, nowMs) {
+  if (player.hp >= player.maxHp) {
+    player.nextHpRegenAt = nowMs + PLAYER_HP_REGEN_INTERVAL_MS;
+    return;
+  }
+
+  if (!Number.isFinite(player.nextHpRegenAt) || player.nextHpRegenAt <= 0) {
+    player.nextHpRegenAt = nowMs + PLAYER_HP_REGEN_INTERVAL_MS;
+    return;
+  }
+
+  if (nowMs < player.nextHpRegenAt) {
+    return;
+  }
+
+  const effectiveConstitution = getPlayerEffectiveConstitutionLevel(player);
+  const constitutionBonus = Math.floor(effectiveConstitution * 0.2);
+  const regenAmount = Math.max(1, 1 + constitutionBonus);
+
+  player.hp = Math.min(player.maxHp, player.hp + regenAmount);
+  player.nextHpRegenAt = nowMs + PLAYER_HP_REGEN_INTERVAL_MS;
+}
+
 function randomIntBetween(minValue, maxValue) {
   return Math.floor(Math.random() * (maxValue - minValue + 1)) + minValue;
 }
@@ -2149,7 +2992,7 @@ function makeSnapshot(now) {
       maxHp: client.player.maxHp,
       combatTargetEnemyId: client.player.combatTargetEnemyId,
       activeInteractionNodeId: client.player.activeInteractionNodeId,
-      gold: client.player.gold,
+      gold: getPlayerGoldAmount(client.player),
       skills: {
         woodcutting: {
           xp: client.player.skills.woodcutting.xp,
@@ -2175,6 +3018,7 @@ function makeSnapshot(now) {
       inventory: {
         ...toInventorySnapshot(client.player.inventory),
       },
+      equipment: toEquipmentSnapshot(client.player.equipment),
       lastActionText: client.player.lastActionText,
     };
   }
@@ -2355,19 +3199,29 @@ function processInteraction(player, nowMs) {
     node.hitsRemaining = rollDepletionHits(resourceConfig);
   }
 
-  node.gatherIntervalMs = resourceConfig.gatherIntervalMs;
-  player.nextInteractionAt = nowMs + resourceConfig.gatherIntervalMs;
+  const skillBonuses = getPlayerSkillActionBonuses(player, resourceConfig.skill);
+  const adjustedSuccessChance = clamp01(
+    resourceConfig.successChance + skillBonuses.successChanceBonus,
+    resourceConfig.successChance,
+  );
+  const adjustedGatherIntervalMs = Math.max(
+    250,
+    Math.floor(resourceConfig.gatherIntervalMs * skillBonuses.gatherIntervalMultiplier),
+  );
+
+  node.gatherIntervalMs = adjustedGatherIntervalMs;
+  player.nextInteractionAt = nowMs + adjustedGatherIntervalMs;
 
   node.hitsRemaining -= 1;
   const depletedAfterThisHit = node.hitsRemaining <= 0;
 
-  if (Math.random() > resourceConfig.successChance) {
+  if (Math.random() > adjustedSuccessChance) {
     player.lastActionText = interpolateTemplate(resourceConfig.messages.gatherFail, {
       resourceName: getResourceName(resourceConfig.id, resourceConfig.id.replaceAll('_', ' ')),
     });
 
     if (depletedAfterThisHit) {
-      node.depletedUntil = nowMs + node.respawnMs;
+      node.depletedUntil = nowMs + rollDepletionDurationMs(resourceConfig, node.respawnMs);
       node.hitsRemaining = rollDepletionHits(resourceConfig);
     }
 
@@ -2402,7 +3256,7 @@ function processInteraction(player, nowMs) {
   });
 
   if (depletedAfterThisHit) {
-    node.depletedUntil = nowMs + node.respawnMs;
+    node.depletedUntil = nowMs + rollDepletionDurationMs(resourceConfig, node.respawnMs);
     node.hitsRemaining = rollDepletionHits(resourceConfig);
   }
 
@@ -2442,7 +3296,16 @@ function processPlayerCombat(player, nowMs) {
   player.targetTileY = null;
   player.targetPath = [];
 
-  const damage = randomIntBetween(PLAYER_ATTACK_DAMAGE_MIN, PLAYER_ATTACK_DAMAGE_MAX);
+  const combatBonuses = getPlayerCombatBonuses(player);
+  const weaponBaseDamageTotal = getPlayerWeaponBaseDamageTotal(player);
+  const effectiveStrength = getPlayerEffectiveStrength(player);
+  const strengthMaxHitBonus = Math.floor((effectiveStrength * weaponBaseDamageTotal) / 100);
+  const attackMin = Math.max(1, PLAYER_ATTACK_DAMAGE_MIN + combatBonuses.minDamageBonus);
+  const attackMax = Math.max(
+    attackMin,
+    PLAYER_ATTACK_DAMAGE_MAX + combatBonuses.maxDamageBonus + strengthMaxHitBonus,
+  );
+  const damage = randomIntBetween(attackMin, attackMax);
   enemy.hp = Math.max(0, enemy.hp - damage);
   player.nextCombatAt = nowMs + PLAYER_ATTACK_COOLDOWN_MS;
 
@@ -2452,7 +3315,8 @@ function processPlayerCombat(player, nowMs) {
   player.lastActionText = `You hit ${enemy.name} for ${damage}.`;
 
   if (enemy.hp <= 0) {
-    enemy.deadUntil = nowMs + ENEMY_RESPAWN_MS;
+    const awardedDrops = applyMinionDropsToPlayer(player, enemy);
+    enemy.deadUntil = nowMs + enemy.respawnMs;
     enemy.hp = 0;
     enemy.targetPlayerId = null;
     enemy.targetTileX = null;
@@ -2460,7 +3324,14 @@ function processPlayerCombat(player, nowMs) {
     enemy.targetPath = [];
     enemy.nextMoveAllowedAt = nowMs;
     player.combatTargetEnemyId = null;
-    player.lastActionText = `You defeated ${enemy.name}.`;
+    if (awardedDrops.length > 0) {
+      const dropSummary = awardedDrops
+        .map((drop) => `${drop.quantity > 1 ? `${drop.quantity} ` : ''}${drop.name.toLowerCase()}`)
+        .join(', ');
+      player.lastActionText = `You defeated ${enemy.name}. Loot: ${dropSummary}.`;
+    } else {
+      player.lastActionText = `You defeated ${enemy.name}.`;
+    }
 
     for (const client of clients.values()) {
       if (client.player.combatTargetEnemyId === enemy.id) {
@@ -2500,7 +3371,7 @@ function processEnemyAi(nowMs) {
       const distance =
         Math.abs(client.player.tileX - enemy.tileX) + Math.abs(client.player.tileY - enemy.tileY);
 
-      if (distance < bestDistance && distance <= ENEMY_AGGRO_RANGE_TILES) {
+      if (distance < bestDistance && distance <= enemy.aggroRangeTiles) {
         bestDistance = distance;
         targetEntry = { playerId, player: client.player };
       }
@@ -2529,23 +3400,21 @@ function processEnemyAi(nowMs) {
       enemy.targetPath = [];
 
       if (nowMs >= enemy.nextAttackAt) {
-        const damage = randomIntBetween(ENEMY_ATTACK_DAMAGE_MIN, ENEMY_ATTACK_DAMAGE_MAX);
+        const damage = randomIntBetween(enemy.attackDamageMin, enemy.attackDamageMax);
         targetPlayer.hp = Math.max(1, targetPlayer.hp - damage);
         addSkillXp(targetPlayer, 'defense', DEFENSE_XP_PER_HIT_TAKEN);
         targetPlayer.lastActionText = `${enemy.name} hits you for ${damage}.`;
-        enemy.nextAttackAt = nowMs + ENEMY_ATTACK_COOLDOWN_MS;
+        enemy.nextAttackAt = nowMs + enemy.attackCooldownMs;
 
         if (!isPlayerMoving(targetPlayer)) {
           targetPlayer.activeInteractionNodeId = null;
-          targetPlayer.combatTargetEnemyId = enemy.id;
-          targetPlayer.nextCombatAt = 0;
+          beginPlayerCombatTarget(targetPlayer, enemy.id, nowMs);
           continue;
         }
 
         if (canAutoRetaliate(targetPlayer)) {
           targetPlayer.activeInteractionNodeId = null;
-          targetPlayer.combatTargetEnemyId = enemy.id;
-          targetPlayer.nextCombatAt = 0;
+          beginPlayerCombatTarget(targetPlayer, enemy.id, nowMs);
         }
       }
       continue;
@@ -2577,9 +3446,11 @@ setInterval(() => {
   previousTick = now;
 
   for (const client of clients.values()) {
+    normalizePlayerContainersForCurrentItems(client.player);
     stepPlayerIfPossible(client.player, now);
     processInteraction(client.player, now);
     processPlayerCombat(client.player, now);
+    processPlayerHealthRegeneration(client.player, now);
   }
 
   processEnemyAi(now);
@@ -2643,7 +3514,7 @@ wss.on('connection', (socket, request) => {
       maxHp: player.maxHp,
       combatTargetEnemyId: player.combatTargetEnemyId,
       activeInteractionNodeId: player.activeInteractionNodeId,
-      gold: player.gold,
+      gold: getPlayerGoldAmount(player),
       skills: {
         woodcutting: {
           xp: player.skills.woodcutting.xp,
@@ -2669,6 +3540,7 @@ wss.on('connection', (socket, request) => {
       inventory: {
         ...toInventorySnapshot(player.inventory),
       },
+      equipment: toEquipmentSnapshot(player.equipment),
       lastActionText: player.lastActionText,
     },
   });
@@ -2778,17 +3650,16 @@ wss.on('connection', (socket, request) => {
       }
 
       if (message.type === 'combatAttack') {
+        const nowMs = Date.now();
         const enemyId = String(message.enemyId ?? '');
         const enemy = worldEnemies.get(enemyId);
-        if (!enemy || enemy.deadUntil > Date.now()) {
+        if (!enemy || enemy.deadUntil > nowMs) {
           return;
         }
 
         player.activeInteractionNodeId = null;
-        player.combatTargetEnemyId = enemy.id;
         player.activeBankNpcId = null;
-        player.nextCombatAt = 0;
-        processPlayerCombat(player, Date.now());
+        beginPlayerCombatTarget(player, enemy.id, nowMs);
 
         log('player_combat_attack', {
           id,
@@ -2820,6 +3691,30 @@ wss.on('connection', (socket, request) => {
         const quantityText = dropped.quantity > 1 ? ` x${dropped.quantity}` : '';
         player.lastActionText = `Dropped ${dropped.name}${quantityText}`;
         sendChatToSocket(socket, `[Inventory] Dropped ${dropped.name}${quantityText}.`);
+        return;
+      }
+
+      if (message.type === 'equipItem') {
+        const result = equipInventoryItem(player, message.slotIndex);
+        if (!result.ok) {
+          sendChatToSocket(socket, `[Gear] ${result.reason}`);
+          return;
+        }
+
+        player.lastActionText = `Equipped ${result.itemName}`;
+        sendChatToSocket(socket, `[Gear] Equipped ${result.itemName}.`);
+        return;
+      }
+
+      if (message.type === 'unequipItem') {
+        const result = unequipItem(player, message.slot);
+        if (!result.ok) {
+          sendChatToSocket(socket, `[Gear] ${result.reason}`);
+          return;
+        }
+
+        player.lastActionText = `Unequipped ${result.itemName}`;
+        sendChatToSocket(socket, `[Gear] Unequipped ${result.itemName}.`);
         return;
       }
 
@@ -2928,7 +3823,7 @@ wss.on('connection', (socket, request) => {
         }
 
         const totalCost = listing.buyPrice * quantity;
-        if (player.gold < totalCost) {
+        if (!canSpendPlayerGold(player, totalCost)) {
           sendChatToSocket(socket, '[Shop] Not enough gold.');
           return;
         }
@@ -2939,7 +3834,7 @@ wss.on('connection', (socket, request) => {
           return;
         }
 
-        player.gold -= totalCost;
+        spendPlayerGold(player, totalCost);
         player.lastActionText = `Bought ${listing.name} x${quantity}`;
         sendChatToSocket(socket, `[Shop] Bought ${listing.name} x${quantity}.`);
         return;
@@ -2979,7 +3874,7 @@ wss.on('connection', (socket, request) => {
         }
 
         const totalGold = listing.sellPrice * quantity;
-        player.gold += totalGold;
+        addPlayerGold(player, totalGold);
         player.lastActionText = `Sold ${listing.name} x${quantity}`;
         sendChatToSocket(socket, `[Shop] Sold ${listing.name} x${quantity}.`);
       }
