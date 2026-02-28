@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deeperskilling.local/schema/combat-skill.schema.json",
+  "title": "Combat Skill Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["skill", "abilities", "scaling"],
+  "properties": {
+    "skill": {
+      "type": "string",
+      "minLength": 1
+    },
+    "abilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "requiredLevel", "cooldownMs", "accuracy", "xp"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "requiredLevel": { "type": "integer", "minimum": 1 },
+          "cooldownMs": { "type": "number", "minimum": 0 },
+          "accuracy": { "type": "number", "minimum": 0, "maximum": 1 },
+          "xp": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "scaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseMaxHit", "bonusPerLevel"],
+      "properties": {
+        "baseMaxHit": { "type": "number", "minimum": 0 },
+        "bonusPerLevel": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,8 +19,9 @@ const DEBUG_MULTIPLAYER =
   String(process.env.DEBUG_MULTIPLAYER ?? '').toLowerCase() === 'true';
 const STATE_LOG_INTERVAL_MS = 2000;
 const MAX_CHAT_MESSAGE_LENGTH = 120;
-const WOODCUTTING_XP_PER_GATHER = 22;
-const MINING_XP_PER_GATHER = 26;
+const WOODCUTTING_XP_PER_GATHER_DEFAULT = 22;
+const MINING_XP_PER_GATHER_DEFAULT = 26;
+const GATHER_INTERVAL_MS_DEFAULT = 1200;
 const STRENGTH_XP_PER_HIT = 16;
 const CONSTITUTION_XP_PER_HIT = 6;
 const DEFENSE_XP_PER_HIT_TAKEN = 12;
@@ -40,44 +41,122 @@ const ENEMY_RESPAWN_MS = 6000;
 const PROFILE_AUTOSAVE_INTERVAL_MS = 5000;
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT_DIR = path.dirname(SERVER_DIR);
+const PUBLIC_DIR = path.join(PROJECT_ROOT_DIR, 'public');
 const DATA_DIR = path.join(SERVER_DIR, 'data');
 const PLAYER_PROFILES_PATH = path.join(DATA_DIR, 'playerProfiles.json');
+const SKILL_DATA_DIR = path.join(DATA_DIR, 'skills');
+const HARVESTING_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'harvesting');
+const CRAFTING_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'crafting');
+const COMBAT_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'combat');
+const CONTENT_DATA_DIR = path.join(DATA_DIR, 'content');
+const ITEM_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'items.json');
+const RESOURCE_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'resources.json');
 
-const ITEM_DEFINITIONS = {
-  logs: {
-    id: 'logs',
-    name: 'Logs',
-    stackable: true,
-    examineText: 'A bundle of sturdy logs.',
-  },
-  copperOre: {
-    id: 'copper_ore',
-    name: 'Copper ore',
-    stackable: true,
-    examineText: 'A chunk of copper-bearing ore.',
-  },
-  tinderbox: {
-    id: 'tinderbox',
-    name: 'Tinderbox',
-    stackable: false,
-    examineText: 'Useful for starting fires.',
-  },
-  bronzeAxe: {
-    id: 'bronze_axe',
-    name: 'Bronze axe',
-    stackable: false,
-    examineText: 'A basic axe for chopping trees.',
-  },
-  bronzePickaxe: {
-    id: 'bronze_pickaxe',
-    name: 'Bronze pickaxe',
-    stackable: false,
-    examineText: 'A basic pickaxe for mining rocks.',
-  },
-};
+function loadItemDefinitions() {
+  const raw = loadRequiredJsonFile(ITEM_CONTENT_PATH);
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`Item catalog must be a non-empty array: ${ITEM_CONTENT_PATH}`);
+  }
+
+  const map = {};
+  for (const [index, entry] of raw.entries()) {
+    const itemId = String(entry?.id ?? '').trim();
+    if (!itemId) {
+      throw new Error(`Item catalog entry ${index} is missing a valid id`);
+    }
+
+    if (map[itemId]) {
+      throw new Error(`Item catalog has duplicate id '${itemId}'`);
+    }
+
+    const itemName = String(entry?.name ?? '').trim();
+    const examineText = String(entry?.examineText ?? '').trim();
+    const image = String(entry?.image ?? '').trim();
+    if (!itemName || !examineText || !image) {
+      throw new Error(`Item catalog entry '${itemId}' must include name, image, and examineText`);
+    }
+
+    if (!image.startsWith('/')) {
+      throw new Error(`Item catalog entry '${itemId}' image must start with '/' (web path)`);
+    }
+
+    const imagePath = path.join(PUBLIC_DIR, image.slice(1));
+    if (!existsSync(imagePath)) {
+      throw new Error(`Item catalog entry '${itemId}' image file not found: ${imagePath}`);
+    }
+
+    map[itemId] = {
+      id: itemId,
+      name: itemName,
+      stackable: Boolean(entry?.stackable),
+      image,
+      examineText,
+    };
+  }
+
+  return map;
+}
+
+function loadResourceDefinitions() {
+  const raw = loadRequiredJsonFile(RESOURCE_CONTENT_PATH);
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`Resource catalog must be a non-empty array: ${RESOURCE_CONTENT_PATH}`);
+  }
+
+  const map = {};
+  for (const [index, entry] of raw.entries()) {
+    const resourceId = String(entry?.id ?? '').trim();
+    if (!resourceId) {
+      throw new Error(`Resource catalog entry ${index} is missing a valid id`);
+    }
+
+    if (map[resourceId]) {
+      throw new Error(`Resource catalog has duplicate id '${resourceId}'`);
+    }
+
+    const nodeType = String(entry?.nodeType ?? '').trim();
+    if (nodeType !== 'tree' && nodeType !== 'rock') {
+      throw new Error(`Resource catalog '${resourceId}' has invalid nodeType '${nodeType}'`);
+    }
+
+    const resourceName = String(entry?.name ?? '').trim();
+    const examineText = String(entry?.examineText ?? '').trim();
+    const image = String(entry?.image ?? '').trim();
+    if (!resourceName || !examineText || !image) {
+      throw new Error(
+        `Resource catalog entry '${resourceId}' must include name, image, and examineText`,
+      );
+    }
+
+    if (!image.startsWith('/')) {
+      throw new Error(`Resource catalog entry '${resourceId}' image must start with '/' (web path)`);
+    }
+
+    const imagePath = path.join(PUBLIC_DIR, image.slice(1));
+    if (!existsSync(imagePath)) {
+      throw new Error(`Resource catalog entry '${resourceId}' image file not found: ${imagePath}`);
+    }
+
+    map[resourceId] = {
+      id: resourceId,
+      name: resourceName,
+      nodeType,
+      tier: Math.max(1, Math.floor(Number(entry?.tier ?? 1))),
+      actionLabel: String(entry?.actionLabel ?? '').trim(),
+      image,
+      examineText,
+    };
+  }
+
+  return map;
+}
+
+const ITEM_DEFINITIONS = loadItemDefinitions();
+const RESOURCE_DEFINITIONS = loadResourceDefinitions();
 
 function getItemDefinition(itemId) {
-  return Object.values(ITEM_DEFINITIONS).find((item) => item.id === itemId) ?? null;
+  return ITEM_DEFINITIONS[String(itemId ?? '')] ?? null;
 }
 
 function getItemExamineText(itemId, fallbackName = 'item') {
@@ -88,6 +167,14 @@ function getItemExamineText(itemId, fallbackName = 'item') {
 
   const name = String(fallbackName || 'item').toLowerCase();
   return `It's ${name}.`;
+}
+
+function getResourceDefinition(resourceId) {
+  return RESOURCE_DEFINITIONS[String(resourceId ?? '')] ?? null;
+}
+
+function getResourceName(resourceId, fallback = 'resource') {
+  return getResourceDefinition(resourceId)?.name ?? fallback;
 }
 
 const NPC_DEFINITIONS = {
@@ -108,28 +195,39 @@ const SHOP_DEFINITIONS = {
     npcId: NPC_DEFINITIONS.shopkeeperBob.id,
     name: 'Bob\'s General Store',
     listings: [
-      { itemId: ITEM_DEFINITIONS.logs.id, name: ITEM_DEFINITIONS.logs.name, buyPrice: 10, sellPrice: 4 },
       {
-        itemId: ITEM_DEFINITIONS.copperOre.id,
-        name: ITEM_DEFINITIONS.copperOre.name,
+        itemId: 'birch_logs',
+        name: getItemDefinition('birch_logs')?.name ?? 'Birch logs',
+        buyPrice: 10,
+        sellPrice: 4,
+      },
+      {
+        itemId: 'copper_ore',
+        name: getItemDefinition('copper_ore')?.name ?? 'Copper ore',
         buyPrice: 16,
         sellPrice: 7,
       },
       {
-        itemId: ITEM_DEFINITIONS.tinderbox.id,
-        name: ITEM_DEFINITIONS.tinderbox.name,
+        itemId: 'tin_ore',
+        name: getItemDefinition('tin_ore')?.name ?? 'Tin ore',
+        buyPrice: 16,
+        sellPrice: 7,
+      },
+      {
+        itemId: 'tinderbox',
+        name: getItemDefinition('tinderbox')?.name ?? 'Tinderbox',
         buyPrice: 20,
         sellPrice: 8,
       },
       {
-        itemId: ITEM_DEFINITIONS.bronzeAxe.id,
-        name: ITEM_DEFINITIONS.bronzeAxe.name,
+        itemId: 'bronze_axe',
+        name: getItemDefinition('bronze_axe')?.name ?? 'Bronze axe',
         buyPrice: 50,
         sellPrice: 22,
       },
       {
-        itemId: ITEM_DEFINITIONS.bronzePickaxe.id,
-        name: ITEM_DEFINITIONS.bronzePickaxe.name,
+        itemId: 'bronze_pickaxe',
+        name: getItemDefinition('bronze_pickaxe')?.name ?? 'Bronze pickaxe',
         buyPrice: 50,
         sellPrice: 22,
       },
@@ -157,6 +255,742 @@ const ENEMY_DEFINITIONS = [
     examineText: 'A grumpy little goblin.',
   },
 ];
+
+const DEFAULT_HARVESTING_SKILL_CONFIGS = {
+  woodcutting: {
+    skill: 'woodcutting',
+    resources: [
+      {
+        id: 'birch_tree',
+        nodeType: 'tree',
+        requiredLevel: 1,
+        successChance: 0.25,
+        gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT,
+        depletionHits: { min: 3, max: 5 },
+        drops: [
+          {
+            itemId: 'birch_logs',
+            weight: 75,
+            quantity: { min: 1, max: 1 },
+            xp: WOODCUTTING_XP_PER_GATHER_DEFAULT,
+          },
+          {
+            itemId: 'leaf',
+            weight: 25,
+            quantity: { min: 1, max: 1 },
+            xp: 1,
+          },
+        ],
+      },
+      {
+        id: 'oak_tree',
+        nodeType: 'tree',
+        requiredLevel: 15,
+        successChance: 0.18,
+        gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT + 150,
+        depletionHits: { min: 5, max: 8 },
+        drops: [
+          {
+            itemId: 'oak_logs',
+            weight: 85,
+            quantity: { min: 1, max: 1 },
+            xp: 37,
+          },
+          {
+            itemId: 'leaf',
+            weight: 15,
+            quantity: { min: 1, max: 2 },
+            xp: 2,
+          },
+        ],
+      },
+    ],
+    messages: {
+      locked: 'Requires Woodcutting level {requiredLevel}.',
+      gatherFail: 'You fail to chop any usable material from the tree.',
+      success: '+{quantity} {itemName} (+{xp} XP)',
+      levelUp: 'Woodcutting level up! Level {level}',
+      depleted: '{resourceName} is depleted.',
+    },
+  },
+  mining: {
+    skill: 'mining',
+    resources: [
+      {
+        id: 'copper_rock',
+        nodeType: 'rock',
+        requiredLevel: 1,
+        successChance: 0.3,
+        gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT,
+        depletionHits: { min: 3, max: 5 },
+        drops: [
+          {
+            itemId: 'copper_ore',
+            weight: 80,
+            quantity: { min: 1, max: 1 },
+            xp: MINING_XP_PER_GATHER_DEFAULT,
+          },
+          {
+            itemId: 'stone',
+            weight: 20,
+            quantity: { min: 1, max: 1 },
+            xp: 4,
+          },
+        ],
+      },
+      {
+        id: 'iron_rock',
+        nodeType: 'rock',
+        requiredLevel: 15,
+        successChance: 0.2,
+        gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT + 150,
+        depletionHits: { min: 4, max: 7 },
+        drops: [
+          {
+            itemId: 'iron_ore',
+            weight: 75,
+            quantity: { min: 1, max: 1 },
+            xp: 35,
+          },
+          {
+            itemId: 'stone',
+            weight: 25,
+            quantity: { min: 1, max: 2 },
+            xp: 5,
+          },
+        ],
+      },
+      {
+        id: 'tin_rock',
+        nodeType: 'rock',
+        requiredLevel: 1,
+        successChance: 0.28,
+        gatherIntervalMs: GATHER_INTERVAL_MS_DEFAULT,
+        depletionHits: { min: 3, max: 5 },
+        drops: [
+          {
+            itemId: 'tin_ore',
+            weight: 80,
+            quantity: { min: 1, max: 1 },
+            xp: 24,
+          },
+          {
+            itemId: 'stone',
+            weight: 20,
+            quantity: { min: 1, max: 1 },
+            xp: 4,
+          },
+        ],
+      },
+    ],
+    messages: {
+      locked: 'Requires Mining level {requiredLevel}.',
+      gatherFail: 'Your swing glances off and yields nothing useful.',
+      success: '+{quantity} {itemName} (+{xp} XP)',
+      levelUp: 'Mining level up! Level {level}',
+      depleted: '{resourceName} is depleted.',
+    },
+  },
+};
+
+function interpolateTemplate(template, values) {
+  let result = String(template ?? '');
+
+  for (const [key, value] of Object.entries(values)) {
+    result = result.replaceAll(`{${key}}`, String(value));
+  }
+
+  return result;
+}
+
+function loadJsonFile(filePath) {
+  try {
+    const raw = readFileSync(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function loadRequiredJsonFile(filePath) {
+  if (!existsSync(filePath)) {
+    throw new Error(`Missing required config file: ${filePath}`);
+  }
+
+  try {
+    const raw = readFileSync(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown parse error';
+    throw new Error(`Invalid JSON in ${filePath}: ${message}`);
+  }
+}
+
+function validateHarvestingConfig(rawConfig, sourceFilePath) {
+  const errors = [];
+  const pushError = (pathLabel, message) => {
+    errors.push(`${pathLabel}: ${message}`);
+  };
+
+  const skillNames = Object.keys(createSkills());
+
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    pushError('$', 'must be an object');
+    return errors;
+  }
+
+  if (typeof rawConfig.skill !== 'string' || rawConfig.skill.trim().length === 0) {
+    pushError('skill', 'must be a non-empty string');
+  } else if (!skillNames.includes(rawConfig.skill)) {
+    pushError('skill', `must be one of: ${skillNames.join(', ')}`);
+  }
+
+  if (!Array.isArray(rawConfig.resources) || rawConfig.resources.length === 0) {
+    pushError('resources', 'must be a non-empty array');
+  }
+
+  if (!rawConfig.messages || typeof rawConfig.messages !== 'object' || Array.isArray(rawConfig.messages)) {
+    pushError('messages', 'must be an object');
+  } else {
+    for (const field of ['locked', 'gatherFail', 'success', 'levelUp', 'depleted']) {
+      const value = rawConfig.messages[field];
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        pushError(`messages.${field}`, 'must be a non-empty string');
+      }
+    }
+  }
+
+  if (Array.isArray(rawConfig.resources)) {
+    const seenResourceIds = new Set();
+
+    rawConfig.resources.forEach((resource, resourceIndex) => {
+      const resourcePath = `resources[${resourceIndex}]`;
+
+      if (!resource || typeof resource !== 'object' || Array.isArray(resource)) {
+        pushError(resourcePath, 'must be an object');
+        return;
+      }
+
+      if (typeof resource.id !== 'string' || resource.id.trim().length === 0) {
+        pushError(`${resourcePath}.id`, 'must be a non-empty string');
+      } else if (seenResourceIds.has(resource.id)) {
+        pushError(`${resourcePath}.id`, `duplicate resource id '${resource.id}'`);
+      } else {
+        seenResourceIds.add(resource.id);
+
+        const resourceDefinition = getResourceDefinition(resource.id);
+        if (!resourceDefinition) {
+          pushError(`${resourcePath}.id`, `unknown resource '${resource.id}'`);
+        } else if (resource.nodeType !== resourceDefinition.nodeType) {
+          pushError(
+            `${resourcePath}.nodeType`,
+            `must match resource catalog nodeType '${resourceDefinition.nodeType}'`,
+          );
+        }
+      }
+
+      if (typeof resource.nodeType !== 'string' || resource.nodeType.trim().length === 0) {
+        pushError(`${resourcePath}.nodeType`, 'must be a non-empty string');
+      }
+
+      if (!Number.isFinite(resource.requiredLevel) || resource.requiredLevel < 1) {
+        pushError(`${resourcePath}.requiredLevel`, 'must be a number >= 1');
+      }
+
+      if (!Number.isFinite(resource.successChance) || resource.successChance < 0 || resource.successChance > 1) {
+        pushError(`${resourcePath}.successChance`, 'must be a number between 0 and 1');
+      }
+
+      if (!Number.isFinite(resource.gatherIntervalMs) || resource.gatherIntervalMs < 250) {
+        pushError(`${resourcePath}.gatherIntervalMs`, 'must be a number >= 250');
+      }
+
+      if (!resource.depletionHits || typeof resource.depletionHits !== 'object') {
+        pushError(`${resourcePath}.depletionHits`, 'must be an object with min/max');
+      } else {
+        const min = resource.depletionHits.min;
+        const max = resource.depletionHits.max;
+        if (!Number.isFinite(min) || min < 1) {
+          pushError(`${resourcePath}.depletionHits.min`, 'must be a number >= 1');
+        }
+        if (!Number.isFinite(max) || max < 1) {
+          pushError(`${resourcePath}.depletionHits.max`, 'must be a number >= 1');
+        }
+        if (Number.isFinite(min) && Number.isFinite(max) && max < min) {
+          pushError(`${resourcePath}.depletionHits`, 'max must be >= min');
+        }
+      }
+
+      if (!Array.isArray(resource.drops) || resource.drops.length === 0) {
+        pushError(`${resourcePath}.drops`, 'must be a non-empty array');
+      } else {
+        resource.drops.forEach((drop, dropIndex) => {
+          const dropPath = `${resourcePath}.drops[${dropIndex}]`;
+
+          if (!drop || typeof drop !== 'object' || Array.isArray(drop)) {
+            pushError(dropPath, 'must be an object');
+            return;
+          }
+
+          if (typeof drop.itemId !== 'string' || drop.itemId.trim().length === 0) {
+            pushError(`${dropPath}.itemId`, 'must be a non-empty string');
+          } else if (!getItemDefinition(drop.itemId)) {
+            pushError(`${dropPath}.itemId`, `unknown item '${drop.itemId}'`);
+          }
+
+          if (!Number.isFinite(drop.weight) || drop.weight <= 0) {
+            pushError(`${dropPath}.weight`, 'must be a number > 0');
+          }
+
+          if (!drop.quantity || typeof drop.quantity !== 'object') {
+            pushError(`${dropPath}.quantity`, 'must be an object with min/max');
+          } else {
+            const min = drop.quantity.min;
+            const max = drop.quantity.max;
+            if (!Number.isFinite(min) || min < 1) {
+              pushError(`${dropPath}.quantity.min`, 'must be a number >= 1');
+            }
+            if (!Number.isFinite(max) || max < 1) {
+              pushError(`${dropPath}.quantity.max`, 'must be a number >= 1');
+            }
+            if (Number.isFinite(min) && Number.isFinite(max) && max < min) {
+              pushError(`${dropPath}.quantity`, 'max must be >= min');
+            }
+          }
+
+          if (!Number.isFinite(drop.xp) || drop.xp < 0) {
+            pushError(`${dropPath}.xp`, 'must be a number >= 0');
+          }
+        });
+      }
+    });
+  }
+
+  if (errors.length > 0) {
+    const details = errors.map((error) => `- ${error}`).join('\n');
+    throw new Error(`Harvesting config validation failed for ${sourceFilePath}:\n${details}`);
+  }
+}
+
+function validateCraftingConfig(rawConfig, sourceFilePath) {
+  const errors = [];
+  const pushError = (pathLabel, message) => {
+    errors.push(`${pathLabel}: ${message}`);
+  };
+
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    pushError('$', 'must be an object');
+    return errors;
+  }
+
+  if (typeof rawConfig.skill !== 'string' || rawConfig.skill.trim().length === 0) {
+    pushError('skill', 'must be a non-empty string');
+  }
+
+  if (!Array.isArray(rawConfig.recipes) || rawConfig.recipes.length === 0) {
+    pushError('recipes', 'must be a non-empty array');
+  }
+
+  if (rawConfig.messages !== undefined) {
+    if (!rawConfig.messages || typeof rawConfig.messages !== 'object' || Array.isArray(rawConfig.messages)) {
+      pushError('messages', 'must be an object when present');
+    }
+  }
+
+  if (Array.isArray(rawConfig.recipes)) {
+    const seenRecipeIds = new Set();
+
+    rawConfig.recipes.forEach((recipe, recipeIndex) => {
+      const recipePath = `recipes[${recipeIndex}]`;
+      if (!recipe || typeof recipe !== 'object' || Array.isArray(recipe)) {
+        pushError(recipePath, 'must be an object');
+        return;
+      }
+
+      if (typeof recipe.id !== 'string' || recipe.id.trim().length === 0) {
+        pushError(`${recipePath}.id`, 'must be a non-empty string');
+      } else if (seenRecipeIds.has(recipe.id)) {
+        pushError(`${recipePath}.id`, `duplicate recipe id '${recipe.id}'`);
+      } else {
+        seenRecipeIds.add(recipe.id);
+      }
+
+      if (!Number.isFinite(recipe.requiredLevel) || recipe.requiredLevel < 1) {
+        pushError(`${recipePath}.requiredLevel`, 'must be a number >= 1');
+      }
+
+      if (!Number.isFinite(recipe.durationMs) || recipe.durationMs < 100) {
+        pushError(`${recipePath}.durationMs`, 'must be a number >= 100');
+      }
+
+      if (!Number.isFinite(recipe.successChance) || recipe.successChance < 0 || recipe.successChance > 1) {
+        pushError(`${recipePath}.successChance`, 'must be a number between 0 and 1');
+      }
+
+      if (!Number.isFinite(recipe.xp) || recipe.xp < 0) {
+        pushError(`${recipePath}.xp`, 'must be a number >= 0');
+      }
+
+      for (const listName of ['inputs', 'outputs']) {
+        const list = recipe[listName];
+        if (!Array.isArray(list) || list.length === 0) {
+          pushError(`${recipePath}.${listName}`, 'must be a non-empty array');
+          continue;
+        }
+
+        list.forEach((entry, entryIndex) => {
+          const entryPath = `${recipePath}.${listName}[${entryIndex}]`;
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            pushError(entryPath, 'must be an object');
+            return;
+          }
+
+          if (typeof entry.itemId !== 'string' || entry.itemId.trim().length === 0) {
+            pushError(`${entryPath}.itemId`, 'must be a non-empty string');
+          } else if (!getItemDefinition(entry.itemId)) {
+            pushError(`${entryPath}.itemId`, `unknown item '${entry.itemId}'`);
+          }
+
+          if (!Number.isFinite(entry.quantity) || entry.quantity < 1) {
+            pushError(`${entryPath}.quantity`, 'must be a number >= 1');
+          }
+        });
+      }
+    });
+  }
+
+  if (errors.length > 0) {
+    const details = errors.map((error) => `- ${error}`).join('\n');
+    throw new Error(`Crafting config validation failed for ${sourceFilePath}:\n${details}`);
+  }
+}
+
+function validateCombatConfig(rawConfig, sourceFilePath) {
+  const errors = [];
+  const pushError = (pathLabel, message) => {
+    errors.push(`${pathLabel}: ${message}`);
+  };
+
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    pushError('$', 'must be an object');
+    return errors;
+  }
+
+  if (typeof rawConfig.skill !== 'string' || rawConfig.skill.trim().length === 0) {
+    pushError('skill', 'must be a non-empty string');
+  }
+
+  if (!Array.isArray(rawConfig.abilities) || rawConfig.abilities.length === 0) {
+    pushError('abilities', 'must be a non-empty array');
+  }
+
+  if (!rawConfig.scaling || typeof rawConfig.scaling !== 'object' || Array.isArray(rawConfig.scaling)) {
+    pushError('scaling', 'must be an object');
+  } else {
+    for (const field of ['baseMaxHit', 'bonusPerLevel']) {
+      const value = rawConfig.scaling[field];
+      if (!Number.isFinite(value) || value < 0) {
+        pushError(`scaling.${field}`, 'must be a number >= 0');
+      }
+    }
+  }
+
+  if (Array.isArray(rawConfig.abilities)) {
+    const seenAbilityIds = new Set();
+
+    rawConfig.abilities.forEach((ability, abilityIndex) => {
+      const abilityPath = `abilities[${abilityIndex}]`;
+      if (!ability || typeof ability !== 'object' || Array.isArray(ability)) {
+        pushError(abilityPath, 'must be an object');
+        return;
+      }
+
+      if (typeof ability.id !== 'string' || ability.id.trim().length === 0) {
+        pushError(`${abilityPath}.id`, 'must be a non-empty string');
+      } else if (seenAbilityIds.has(ability.id)) {
+        pushError(`${abilityPath}.id`, `duplicate ability id '${ability.id}'`);
+      } else {
+        seenAbilityIds.add(ability.id);
+      }
+
+      if (typeof ability.name !== 'string' || ability.name.trim().length === 0) {
+        pushError(`${abilityPath}.name`, 'must be a non-empty string');
+      }
+
+      if (!Number.isFinite(ability.requiredLevel) || ability.requiredLevel < 1) {
+        pushError(`${abilityPath}.requiredLevel`, 'must be a number >= 1');
+      }
+
+      if (!Number.isFinite(ability.cooldownMs) || ability.cooldownMs < 0) {
+        pushError(`${abilityPath}.cooldownMs`, 'must be a number >= 0');
+      }
+
+      if (!Number.isFinite(ability.accuracy) || ability.accuracy < 0 || ability.accuracy > 1) {
+        pushError(`${abilityPath}.accuracy`, 'must be a number between 0 and 1');
+      }
+
+      if (!Number.isFinite(ability.xp) || ability.xp < 0) {
+        pushError(`${abilityPath}.xp`, 'must be a number >= 0');
+      }
+    });
+  }
+
+  if (errors.length > 0) {
+    const details = errors.map((error) => `- ${error}`).join('\n');
+    throw new Error(`Combat config validation failed for ${sourceFilePath}:\n${details}`);
+  }
+}
+
+function clamp01(value, fallbackValue) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallbackValue;
+  }
+
+  return Math.max(0, Math.min(1, parsed));
+}
+
+function normalizeQuantityRange(rawQuantity, fallbackQuantity = { min: 1, max: 1 }) {
+  const min = Math.max(1, Math.floor(Number(rawQuantity?.min ?? fallbackQuantity.min ?? 1)));
+  const max = Math.max(min, Math.floor(Number(rawQuantity?.max ?? fallbackQuantity.max ?? min)));
+  return { min, max };
+}
+
+function normalizeHitRange(rawRange, fallbackRange = { min: 1, max: 1 }) {
+  const min = Math.max(1, Math.floor(Number(rawRange?.min ?? fallbackRange.min ?? 1)));
+  const max = Math.max(min, Math.floor(Number(rawRange?.max ?? fallbackRange.max ?? min)));
+  return { min, max };
+}
+
+function normalizeHarvestDrops(rawDrops, fallbackDrops) {
+  const sourceDrops = Array.isArray(rawDrops) && rawDrops.length > 0 ? rawDrops : fallbackDrops;
+  const normalized = [];
+
+  for (const drop of sourceDrops) {
+    const itemId = String(drop?.itemId ?? '');
+    const itemDefinition = getItemDefinition(itemId);
+    if (!itemDefinition) {
+      continue;
+    }
+
+    const weight = Math.max(0, Number(drop?.weight ?? 0));
+    const quantity = normalizeQuantityRange(drop?.quantity, { min: 1, max: 1 });
+    const xp = Math.max(0, Math.floor(Number(drop?.xp ?? 0)));
+
+    normalized.push({
+      itemId: itemDefinition.id,
+      weight,
+      quantity,
+      xp,
+    });
+  }
+
+  if (normalized.length === 0) {
+    const fallbackItem = getItemDefinition('birch_logs');
+    if (fallbackItem) {
+      normalized.push({
+        itemId: fallbackItem.id,
+        weight: 1,
+        quantity: { min: 1, max: 1 },
+        xp: 1,
+      });
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeHarvestResource(rawResource, fallbackResource, skill) {
+  const id = String(rawResource?.id ?? fallbackResource?.id ?? `${skill}_resource`);
+  const nodeType = String(rawResource?.nodeType ?? fallbackResource?.nodeType ?? 'tree');
+  const requiredLevel = Math.max(
+    1,
+    Math.floor(Number(rawResource?.requiredLevel ?? fallbackResource?.requiredLevel ?? 1)),
+  );
+  const successChance = clamp01(
+    rawResource?.successChance,
+    clamp01(fallbackResource?.successChance, 0.25),
+  );
+  const gatherIntervalMs = Math.max(
+    250,
+    Math.floor(Number(rawResource?.gatherIntervalMs ?? fallbackResource?.gatherIntervalMs ?? 1200)),
+  );
+  const depletionHits = normalizeHitRange(rawResource?.depletionHits, fallbackResource?.depletionHits);
+  const drops = normalizeHarvestDrops(rawResource?.drops, fallbackResource?.drops ?? []);
+
+  return {
+    id,
+    skill,
+    nodeType,
+    requiredLevel,
+    successChance,
+    gatherIntervalMs,
+    depletionHits,
+    drops,
+    messages: {
+      locked: String(rawResource?.messages?.locked ?? ''),
+      gatherFail: String(rawResource?.messages?.gatherFail ?? ''),
+      success: String(rawResource?.messages?.success ?? ''),
+      levelUp: String(rawResource?.messages?.levelUp ?? ''),
+      depleted: String(rawResource?.messages?.depleted ?? ''),
+    },
+  };
+}
+
+function normalizeHarvestingSkillConfig(rawConfig, fallbackConfig) {
+  const configuredSkill = String(rawConfig?.skill ?? fallbackConfig.skill);
+  const skill = configuredSkill in createSkills() ? configuredSkill : fallbackConfig.skill;
+  const sourceResources =
+    Array.isArray(rawConfig?.resources) && rawConfig.resources.length > 0
+      ? rawConfig.resources
+      : fallbackConfig.resources;
+
+  const resources = sourceResources.map((resource, index) => {
+    const fallbackResource = fallbackConfig.resources[Math.min(index, fallbackConfig.resources.length - 1)];
+    return normalizeHarvestResource(resource, fallbackResource, skill);
+  });
+
+  return {
+    skill,
+    resources,
+    messages: {
+      locked: String(rawConfig?.messages?.locked ?? fallbackConfig.messages.locked),
+      gatherFail: String(rawConfig?.messages?.gatherFail ?? fallbackConfig.messages.gatherFail),
+      success: String(rawConfig?.messages?.success ?? fallbackConfig.messages.success),
+      levelUp: String(rawConfig?.messages?.levelUp ?? fallbackConfig.messages.levelUp),
+      depleted: String(rawConfig?.messages?.depleted ?? fallbackConfig.messages.depleted),
+    },
+  };
+}
+
+function loadHarvestingSkillConfigs() {
+  const woodcuttingPath = path.join(HARVESTING_SKILL_DATA_DIR, 'woodcutting.json');
+  const miningPath = path.join(HARVESTING_SKILL_DATA_DIR, 'mining.json');
+
+  const woodcuttingRaw = loadRequiredJsonFile(woodcuttingPath);
+  validateHarvestingConfig(woodcuttingRaw, woodcuttingPath);
+
+  const miningRaw = loadRequiredJsonFile(miningPath);
+  validateHarvestingConfig(miningRaw, miningPath);
+
+  return {
+    woodcutting: normalizeHarvestingSkillConfig(
+      woodcuttingRaw,
+      DEFAULT_HARVESTING_SKILL_CONFIGS.woodcutting,
+    ),
+    mining: normalizeHarvestingSkillConfig(
+      miningRaw,
+      DEFAULT_HARVESTING_SKILL_CONFIGS.mining,
+    ),
+  };
+}
+
+function loadCraftingSkillConfigs() {
+  if (!existsSync(CRAFTING_SKILL_DATA_DIR)) {
+    return {};
+  }
+
+  const craftingConfigs = {};
+  const entries = readdirSync(CRAFTING_SKILL_DATA_DIR, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name === 'schema.json') {
+      continue;
+    }
+
+    const filePath = path.join(CRAFTING_SKILL_DATA_DIR, entry.name);
+    const raw = loadRequiredJsonFile(filePath);
+    validateCraftingConfig(raw, filePath);
+
+    const skillKey = String(raw.skill || path.basename(entry.name, '.json'));
+    craftingConfigs[skillKey] = raw;
+  }
+
+  return craftingConfigs;
+}
+
+function loadCombatSkillConfigs() {
+  if (!existsSync(COMBAT_SKILL_DATA_DIR)) {
+    return {};
+  }
+
+  const combatConfigs = {};
+  const entries = readdirSync(COMBAT_SKILL_DATA_DIR, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name === 'schema.json') {
+      continue;
+    }
+
+    const filePath = path.join(COMBAT_SKILL_DATA_DIR, entry.name);
+    const raw = loadRequiredJsonFile(filePath);
+    validateCombatConfig(raw, filePath);
+
+    const skillKey = String(raw.skill || path.basename(entry.name, '.json'));
+    combatConfigs[skillKey] = raw;
+  }
+
+  return combatConfigs;
+}
+
+function buildHarvestResourceConfigMap(harvestingSkillConfigs) {
+  const resourcesById = {};
+
+  for (const skillConfig of Object.values(harvestingSkillConfigs)) {
+    for (const resource of skillConfig.resources) {
+      const skillMessages = skillConfig.messages;
+      resourcesById[resource.id] = {
+        ...resource,
+        messages: {
+          locked: resource.messages.locked || skillMessages.locked,
+          gatherFail: resource.messages.gatherFail || skillMessages.gatherFail,
+          success: resource.messages.success || skillMessages.success,
+          levelUp: resource.messages.levelUp || skillMessages.levelUp,
+          depleted: resource.messages.depleted || skillMessages.depleted,
+        },
+      };
+    }
+  }
+
+  return resourcesById;
+}
+
+const HARVESTING_SKILL_CONFIGS = loadHarvestingSkillConfigs();
+const HARVEST_RESOURCE_CONFIGS = buildHarvestResourceConfigMap(HARVESTING_SKILL_CONFIGS);
+const CRAFTING_SKILL_CONFIGS = loadCraftingSkillConfigs();
+const COMBAT_SKILL_CONFIGS = loadCombatSkillConfigs();
+
+function getHarvestResourceConfig(resourceId, nodeType) {
+  if (resourceId && HARVEST_RESOURCE_CONFIGS[resourceId]) {
+    return HARVEST_RESOURCE_CONFIGS[resourceId];
+  }
+
+  return (
+    Object.values(HARVEST_RESOURCE_CONFIGS).find((resource) => resource.nodeType === nodeType) ?? null
+  );
+}
+
+function rollDepletionHits(resourceConfig) {
+  return randomIntBetween(resourceConfig.depletionHits.min, resourceConfig.depletionHits.max);
+}
+
+function pickWeightedDrop(drops) {
+  const totalWeight = drops.reduce((sum, drop) => sum + Math.max(0, drop.weight), 0);
+  if (totalWeight <= 0) {
+    return drops[0] ?? null;
+  }
+
+  let roll = Math.random() * totalWeight;
+  for (const drop of drops) {
+    const weight = Math.max(0, drop.weight);
+    roll -= weight;
+    if (roll <= 0) {
+      return drop;
+    }
+  }
+
+  return drops[drops.length - 1] ?? null;
+}
 
 function createSkills() {
   return {
@@ -203,6 +1037,7 @@ function addItemToInventory(player, itemId, quantity) {
       quantity,
       name: itemDefinition.name,
       stackable: itemDefinition.stackable,
+      image: itemDefinition.image,
       examineText: itemDefinition.examineText,
     });
     return true;
@@ -214,6 +1049,7 @@ function addItemToInventory(player, itemId, quantity) {
       quantity: 1,
       name: itemDefinition.name,
       stackable: itemDefinition.stackable,
+      image: itemDefinition.image,
       examineText: itemDefinition.examineText,
     });
   }
@@ -383,16 +1219,20 @@ function cloneInventory(inventory) {
   return {
     maxSlots: Number.isFinite(maxSlots) ? Math.max(1, Math.min(56, Math.floor(maxSlots))) : INVENTORY_MAX_SLOTS,
     slots: slots
-      .map((slot) => ({
-        itemId: String(slot?.itemId ?? ''),
-        quantity: Math.max(1, Math.floor(Number(slot?.quantity ?? 1))),
-        name: String(slot?.name ?? ''),
-        stackable: Boolean(slot?.stackable),
-        examineText: String(
-          slot?.examineText ??
-            getItemExamineText(String(slot?.itemId ?? ''), String(slot?.name ?? 'item')),
-        ),
-      }))
+      .map((slot) => {
+        const itemId = String(slot?.itemId ?? '');
+        const itemDefinition = getItemDefinition(itemId);
+        const fallbackName = String(slot?.name ?? itemId ?? 'item');
+
+        return {
+          itemId,
+          quantity: Math.max(1, Math.floor(Number(slot?.quantity ?? 1))),
+          name: itemDefinition?.name ?? fallbackName,
+          stackable: itemDefinition?.stackable ?? Boolean(slot?.stackable),
+          image: itemDefinition?.image ?? String(slot?.image ?? ''),
+          examineText: itemDefinition?.examineText ?? getItemExamineText(itemId, fallbackName),
+        };
+      })
       .filter((slot) => slot.itemId.length > 0 && slot.name.length > 0),
   };
 }
@@ -567,10 +1407,11 @@ function createWorldEnemies() {
 function createWorldNodes() {
   const nodes = new Map();
   const definitions = [
-    { id: 'tree-1', type: 'tree', tileX: 35, tileY: 36, respawnMs: 5000 },
-    { id: 'tree-2', type: 'tree', tileX: 46, tileY: 35, respawnMs: 5000 },
-    { id: 'rock-1', type: 'rock', tileX: 34, tileY: 43, respawnMs: 6500 },
-    { id: 'rock-2', type: 'rock', tileX: 45, tileY: 44, respawnMs: 6500 },
+    { id: 'tree-1', type: 'tree', resourceId: 'birch_tree', tileX: 35, tileY: 36, respawnMs: 5000 },
+    { id: 'tree-2', type: 'tree', resourceId: 'oak_tree', tileX: 46, tileY: 35, respawnMs: 6500 },
+    { id: 'rock-1', type: 'rock', resourceId: 'copper_rock', tileX: 34, tileY: 43, respawnMs: 6500 },
+    { id: 'rock-3', type: 'rock', resourceId: 'tin_rock', tileX: 39, tileY: 44, respawnMs: 6500 },
+    { id: 'rock-2', type: 'rock', resourceId: 'iron_rock', tileX: 45, tileY: 44, respawnMs: 7500 },
   ];
 
   for (const definition of definitions) {
@@ -578,10 +1419,15 @@ function createWorldNodes() {
       continue;
     }
 
+    const resourceConfig = getHarvestResourceConfig(definition.resourceId, definition.type);
+    const gatherIntervalMs = resourceConfig?.gatherIntervalMs ?? GATHER_INTERVAL_MS_DEFAULT;
+    const hitsRemaining = resourceConfig ? rollDepletionHits(resourceConfig) : 1;
+
     nodes.set(definition.id, {
       ...definition,
       depletedUntil: 0,
-      gatherIntervalMs: 1200,
+      gatherIntervalMs,
+      hitsRemaining,
     });
   }
 
@@ -853,9 +1699,17 @@ function canAutoRetaliate(player) {
   return (
     player.hp > 0 &&
     player.combatTargetEnemyId === null &&
-    player.activeInteractionNodeId === null &&
     player.targetTileX === null &&
     player.targetTileY === null
+  );
+}
+
+function isPlayerMoving(player) {
+  return (
+    player.targetTileX !== null ||
+    player.targetTileY !== null ||
+    player.directionX !== 0 ||
+    player.directionY !== 0
   );
 }
 
@@ -1064,7 +1918,7 @@ function getShopSnapshot() {
       name: shop.name,
       listings: shop.listings.map((listing) => ({
         itemId: listing.itemId,
-        name: listing.name,
+        name: getItemDefinition(listing.itemId)?.name ?? listing.name,
         buyPrice: listing.buyPrice,
         sellPrice: listing.sellPrice,
       })),
@@ -1116,9 +1970,15 @@ function getNodeSnapshot(now) {
 
   for (const [id, node] of worldNodes.entries()) {
     const isDepleted = node.depletedUntil > now;
+    const resourceDefinition = getResourceDefinition(node.resourceId);
     nodes[id] = {
       id,
       type: node.type,
+      resourceId: node.resourceId,
+      resourceName: resourceDefinition?.name ?? node.resourceId,
+      resourceExamineText: resourceDefinition?.examineText ?? `It's a ${node.type}.`,
+      resourceActionLabel:
+        resourceDefinition?.actionLabel ?? (node.type === 'tree' ? 'Chop Tree' : 'Mine Rock'),
       tileX: node.tileX,
       tileY: node.tileY,
       isDepleted,
@@ -1180,6 +2040,7 @@ function makeSnapshot(now) {
           quantity: slot.quantity,
           name: slot.name,
           stackable: slot.stackable,
+          image: slot.image,
           examineText: slot.examineText,
         })),
       },
@@ -1324,7 +2185,7 @@ function processInteraction(player, nowMs) {
   }
 
   if (!isWithinInteractionRange(player, node)) {
-    player.lastActionText = `Out of range for ${node.type}`;
+    player.lastActionText = `Out of range for ${getResourceName(node.resourceId, node.type)}`;
     return;
   }
 
@@ -1333,41 +2194,91 @@ function processInteraction(player, nowMs) {
   }
 
   if (node.depletedUntil > nowMs) {
-    player.lastActionText = `${node.type} depleted`;
+    const depletedConfig = getHarvestResourceConfig(node.resourceId, node.type);
+    if (depletedConfig) {
+      player.lastActionText = interpolateTemplate(depletedConfig.messages.depleted, {
+        resourceName: getResourceName(depletedConfig.id, depletedConfig.id.replaceAll('_', ' ')),
+      });
+    } else {
+      player.lastActionText = `${getResourceName(node.resourceId, node.type)} depleted`;
+    }
     return;
   }
 
-  node.depletedUntil = nowMs + node.respawnMs;
-  player.nextInteractionAt = nowMs + node.gatherIntervalMs;
-
-  if (node.type === 'tree') {
-    const added = addItemToInventory(player, ITEM_DEFINITIONS.logs.id, 1);
-    if (!added) {
-      player.lastActionText = 'Inventory full';
-      return;
-    }
-
-    const xpResult = addSkillXp(player, 'woodcutting', WOODCUTTING_XP_PER_GATHER);
-    player.lastActionText = `+1 logs (+${WOODCUTTING_XP_PER_GATHER} XP)`;
-
-    if (xpResult?.leveledUp) {
-      player.lastActionText = `Woodcutting level up! Level ${xpResult.newLevel}`;
-    }
+  const resourceConfig = getHarvestResourceConfig(node.resourceId, node.type);
+  if (!resourceConfig) {
+    player.lastActionText = `No resource config for ${node.resourceId}`;
+    return;
   }
 
-  if (node.type === 'rock') {
-    const added = addItemToInventory(player, ITEM_DEFINITIONS.copperOre.id, 1);
-    if (!added) {
-      player.lastActionText = 'Inventory full';
-      return;
+  const playerSkill = player.skills[resourceConfig.skill];
+  if (!playerSkill || playerSkill.level < resourceConfig.requiredLevel) {
+    player.lastActionText = interpolateTemplate(resourceConfig.messages.locked, {
+      requiredLevel: resourceConfig.requiredLevel,
+    });
+    player.activeInteractionNodeId = null;
+    return;
+  }
+
+  if (!Number.isFinite(node.hitsRemaining) || node.hitsRemaining <= 0) {
+    node.hitsRemaining = rollDepletionHits(resourceConfig);
+  }
+
+  node.gatherIntervalMs = resourceConfig.gatherIntervalMs;
+  player.nextInteractionAt = nowMs + resourceConfig.gatherIntervalMs;
+
+  node.hitsRemaining -= 1;
+  const depletedAfterThisHit = node.hitsRemaining <= 0;
+
+  if (Math.random() > resourceConfig.successChance) {
+    player.lastActionText = interpolateTemplate(resourceConfig.messages.gatherFail, {
+      resourceName: getResourceName(resourceConfig.id, resourceConfig.id.replaceAll('_', ' ')),
+    });
+
+    if (depletedAfterThisHit) {
+      node.depletedUntil = nowMs + node.respawnMs;
+      node.hitsRemaining = rollDepletionHits(resourceConfig);
     }
 
-    const xpResult = addSkillXp(player, 'mining', MINING_XP_PER_GATHER);
-    player.lastActionText = `+1 copper ore (+${MINING_XP_PER_GATHER} XP)`;
+    return;
+  }
 
-    if (xpResult?.leveledUp) {
-      player.lastActionText = `Mining level up! Level ${xpResult.newLevel}`;
-    }
+  const selectedDrop = pickWeightedDrop(resourceConfig.drops);
+  if (!selectedDrop) {
+    player.lastActionText = 'No drop config for resource';
+    return;
+  }
+
+  const rewardItem = getItemDefinition(selectedDrop.itemId);
+  if (!rewardItem) {
+    player.lastActionText = 'Invalid reward item config';
+    return;
+  }
+
+  const rewardQuantity = randomIntBetween(selectedDrop.quantity.min, selectedDrop.quantity.max);
+
+  const added = addItemToInventory(player, rewardItem.id, rewardQuantity);
+  if (!added) {
+    player.lastActionText = 'Inventory full';
+    return;
+  }
+
+  const xpResult = addSkillXp(player, resourceConfig.skill, selectedDrop.xp);
+  player.lastActionText = interpolateTemplate(resourceConfig.messages.success, {
+    quantity: rewardQuantity,
+    itemName: rewardItem.name.toLowerCase(),
+    xp: selectedDrop.xp,
+  });
+
+  if (depletedAfterThisHit) {
+    node.depletedUntil = nowMs + node.respawnMs;
+    node.hitsRemaining = rollDepletionHits(resourceConfig);
+  }
+
+  if (xpResult?.leveledUp) {
+    player.lastActionText = interpolateTemplate(resourceConfig.messages.levelUp, {
+      level: xpResult.newLevel,
+    });
   }
 }
 
@@ -1493,7 +2404,15 @@ function processEnemyAi(nowMs) {
         targetPlayer.lastActionText = `${enemy.name} hits you for ${damage}.`;
         enemy.nextAttackAt = nowMs + ENEMY_ATTACK_COOLDOWN_MS;
 
+        if (!isPlayerMoving(targetPlayer)) {
+          targetPlayer.activeInteractionNodeId = null;
+          targetPlayer.combatTargetEnemyId = enemy.id;
+          targetPlayer.nextCombatAt = 0;
+          continue;
+        }
+
         if (canAutoRetaliate(targetPlayer)) {
+          targetPlayer.activeInteractionNodeId = null;
           targetPlayer.combatTargetEnemyId = enemy.id;
           targetPlayer.nextCombatAt = 0;
         }
@@ -1623,6 +2542,7 @@ wss.on('connection', (socket, request) => {
           quantity: slot.quantity,
           name: slot.name,
           stackable: slot.stackable,
+          image: slot.image,
           examineText: slot.examineText,
         })),
       },

@@ -1,0 +1,62 @@
+{
+  "skill": "woodcutting",
+  "resources": [
+    {
+      "id": "birch_tree",
+      "nodeType": "tree",
+      "requiredLevel": 1,
+      "successChance": 0.25,
+      "gatherIntervalMs": 1200,
+      "depletionHits": {
+        "min": 3,
+        "max": 5
+      },
+      "drops": [
+        {
+          "itemId": "birch_logs",
+          "weight": 75,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 20
+        },
+        {
+          "itemId": "leaf",
+          "weight": 25,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 1
+        }
+      ]
+    },
+    {
+      "id": "oak_tree",
+      "nodeType": "tree",
+      "requiredLevel": 15,
+      "successChance": 0.18,
+      "gatherIntervalMs": 1350,
+      "depletionHits": {
+        "min": 5,
+        "max": 8
+      },
+      "drops": [
+        {
+          "itemId": "oak_logs",
+          "weight": 85,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 37
+        },
+        {
+          "itemId": "leaf",
+          "weight": 15,
+          "quantity": { "min": 1, "max": 2 },
+          "xp": 2
+        }
+      ]
+    }
+  ],
+  "messages": {
+    "locked": "Requires Woodcutting level {requiredLevel}.",
+    "gatherFail": "You fail to chop any usable material from the tree.",
+    "success": "+{quantity} {itemName} (+{xp} XP)",
+    "levelUp": "Woodcutting level up! Level {level}",
+    "depleted": "{resourceName} is depleted."
+  }
+}

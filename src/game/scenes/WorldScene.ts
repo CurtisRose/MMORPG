@@ -21,6 +21,8 @@ const PLAYER_TEXTURE_KEY = 'player';
 const TREE_TEXTURE_KEY = 'resource-tree';
 const ROCK_TEXTURE_KEY = 'resource-rock';
 const ENEMY_TEXTURE_KEY = 'player';
+const HARVEST_AXE_TEXTURE_KEY = 'harvest-indicator-axe';
+const HARVEST_PICKAXE_TEXTURE_KEY = 'harvest-indicator-pickaxe';
 const WATER_TILE_ID = 2;
 const INPUT_SEND_INTERVAL_MS = 50;
 const CARDINAL_MOVE_DURATION_MS = 200;
@@ -41,6 +43,8 @@ interface RemotePlayerVisual {
   pathWaypoints: Phaser.Math.Vector2[];
   healthBar: Phaser.GameObjects.Graphics;
   healthBarVisibleUntil: number;
+  harvestingIndicator: Phaser.GameObjects.Image;
+  harvestingIndicatorPhase: number;
 }
 
 interface WorldNodeVisual {
@@ -125,6 +129,8 @@ export class WorldScene extends Phaser.Scene {
   private pendingNpcAction: PendingNpcAction | null = null;
   private localHealthBar: Phaser.GameObjects.Graphics | null = null;
   private localHealthBarVisibleUntil = 0;
+  private harvestingActionIndicator: Phaser.GameObjects.Image | null = null;
+  private harvestingIndicatorPhase = 0;
   private previousSkillLevels: SkillLevelSnapshot | null = null;
   private timeSinceInputSendMs = 0;
   private lastSentDirection = new Phaser.Math.Vector2(0, 0);
@@ -173,6 +179,13 @@ export class WorldScene extends Phaser.Scene {
     this.player.setTint(0xb8f0ff);
     this.localHealthBar = this.add.graphics().setDepth(60);
     this.localHealthBar.setVisible(false);
+    this.createHarvestIndicatorTextures();
+    this.harvestingActionIndicator = this.add
+      .image(this.player.x, this.player.y - TILE_SIZE * 0.95, HARVEST_AXE_TEXTURE_KEY)
+      .setDepth(70)
+      .setOrigin(0.5, 1)
+      .setDisplaySize(12, 12)
+      .setVisible(false);
 
     this.cameras.main.setBounds(
       0,
@@ -270,9 +283,124 @@ export class WorldScene extends Phaser.Scene {
 
     this.updatePlayerSmoothing(delta);
     this.renderHealthBars(Date.now());
+    this.updateHarvestingActionIndicator(delta);
+    this.updateRemoteHarvestingActionIndicators(delta);
 
     this.renderActionStatus();
     this.renderDebugHud();
+  }
+
+  private createHarvestIndicatorTextures(): void {
+    const createTexture = (key: string, draw: (context: CanvasRenderingContext2D) => void): void => {
+      if (this.textures.exists(key)) {
+        return;
+      }
+
+      const texture = this.textures.createCanvas(key, 12, 12);
+      if (!texture) {
+        return;
+      }
+
+      const context = texture.context;
+      context.clearRect(0, 0, 12, 12);
+      context.imageSmoothingEnabled = false;
+      draw(context);
+      texture.refresh();
+    };
+
+    createTexture(HARVEST_AXE_TEXTURE_KEY, (context) => {
+      context.fillStyle = '#754f2d';
+      context.fillRect(5, 3, 2, 8);
+      context.fillStyle = '#b48345';
+      context.fillRect(2, 3, 4, 3);
+      context.fillRect(1, 4, 2, 2);
+      context.fillStyle = '#000000';
+      context.fillRect(5, 3, 2, 1);
+    });
+
+    createTexture(HARVEST_PICKAXE_TEXTURE_KEY, (context) => {
+      context.fillStyle = '#754f2d';
+      context.fillRect(5, 3, 2, 8);
+      context.fillStyle = '#aab3bb';
+      context.fillRect(2, 3, 8, 2);
+      context.fillRect(3, 5, 2, 1);
+      context.fillRect(7, 5, 2, 1);
+      context.fillStyle = '#000000';
+      context.fillRect(5, 3, 2, 1);
+    });
+  }
+
+  private getHarvestIndicatorTextureKey(nodeType: WorldNodeState['type']): string {
+    return nodeType === 'rock' ? HARVEST_PICKAXE_TEXTURE_KEY : HARVEST_AXE_TEXTURE_KEY;
+  }
+
+  private updateHarvestingActionIndicator(deltaMs: number): void {
+    if (!this.harvestingActionIndicator || !this.localPlayerState || !this.localTilePosition) {
+      this.harvestingActionIndicator?.setVisible(false);
+      return;
+    }
+
+    const activeNodeId = this.localPlayerState.activeInteractionNodeId;
+    if (!activeNodeId) {
+      this.harvestingActionIndicator.setVisible(false);
+      return;
+    }
+
+    const activeNode = this.worldNodes.get(activeNodeId)?.state;
+    if (!activeNode || activeNode.isDepleted) {
+      this.harvestingActionIndicator.setVisible(false);
+      return;
+    }
+
+    const manhattanDistance =
+      Math.abs(Math.round(this.localTilePosition.x) - activeNode.tileX) +
+      Math.abs(Math.round(this.localTilePosition.y) - activeNode.tileY);
+    const isActivelyGathering = manhattanDistance <= 1;
+    if (!isActivelyGathering) {
+      this.harvestingActionIndicator.setVisible(false);
+      return;
+    }
+
+    this.harvestingIndicatorPhase += deltaMs * 0.012;
+    const bobOffset = Math.sin(this.harvestingIndicatorPhase) * 2;
+    this.harvestingActionIndicator
+      .setTexture(this.getHarvestIndicatorTextureKey(activeNode.type))
+      .setPosition(this.player.x, this.player.y - TILE_SIZE * 0.95 + bobOffset)
+      .setVisible(true)
+      .setAlpha(0.78 + (Math.sin(this.harvestingIndicatorPhase * 1.8) + 1) * 0.11);
+  }
+
+  private updateRemoteHarvestingActionIndicators(deltaMs: number): void {
+    for (const remotePlayer of this.remotePlayers.values()) {
+      const activeNodeId = remotePlayer.state.activeInteractionNodeId;
+      if (!activeNodeId) {
+        remotePlayer.harvestingIndicator.setVisible(false);
+        continue;
+      }
+
+      const activeNode = this.worldNodes.get(activeNodeId)?.state;
+      if (!activeNode || activeNode.isDepleted) {
+        remotePlayer.harvestingIndicator.setVisible(false);
+        continue;
+      }
+
+      const manhattanDistance =
+        Math.abs(Math.round(remotePlayer.renderedTilePosition.x) - activeNode.tileX) +
+        Math.abs(Math.round(remotePlayer.renderedTilePosition.y) - activeNode.tileY);
+      const isActivelyGathering = manhattanDistance <= 1;
+      if (!isActivelyGathering) {
+        remotePlayer.harvestingIndicator.setVisible(false);
+        continue;
+      }
+
+      remotePlayer.harvestingIndicatorPhase += deltaMs * 0.012;
+      const bobOffset = Math.sin(remotePlayer.harvestingIndicatorPhase) * 2;
+      remotePlayer.harvestingIndicator
+        .setTexture(this.getHarvestIndicatorTextureKey(activeNode.type))
+        .setPosition(remotePlayer.sprite.x, remotePlayer.sprite.y - TILE_SIZE * 0.95 + bobOffset)
+        .setVisible(true)
+        .setAlpha(0.7 + (Math.sin(remotePlayer.harvestingIndicatorPhase * 1.8) + 1) * 0.12);
+    }
   }
 
   private renderHealthBars(nowMs: number): void {
@@ -372,6 +500,28 @@ export class WorldScene extends Phaser.Scene {
       ease: 'Quad.Out',
       onComplete: () => popup.destroy(),
     });
+  }
+
+  private showHarvestingDebugOutcome(
+    previousActionText: string | null | undefined,
+    playerState: RemotePlayerState,
+  ): void {
+    const nextActionText = playerState.lastActionText;
+    if (!playerState.activeInteractionNodeId || !nextActionText || nextActionText === previousActionText) {
+      return;
+    }
+
+    const isSuccess = /\(\+\d+\s*XP\)|level up/i.test(nextActionText);
+    const isFailure = /(fail|yields nothing|glances off)/i.test(nextActionText);
+
+    if (isSuccess) {
+      this.showFloatingText(this.player.x, this.player.y - TILE_SIZE * 1.05, 'HIT', '#b4ff9f');
+      return;
+    }
+
+    if (isFailure) {
+      this.showFloatingText(this.player.x, this.player.y - TILE_SIZE * 1.05, 'MISS', '#ff9b9b');
+    }
   }
 
   private updatePlayerSmoothing(deltaMs: number): void {
@@ -521,6 +671,7 @@ export class WorldScene extends Phaser.Scene {
       if (playerState.id === this.localPlayerId) {
         const previousLevels = this.previousSkillLevels;
         const previousHp = this.localPlayerState?.hp;
+        const previousActionText = this.localPlayerState?.lastActionText;
         this.localPlayerState = playerState;
 
         if (!this.localTilePosition) {
@@ -594,6 +745,8 @@ export class WorldScene extends Phaser.Scene {
             );
           }
         }
+
+        this.showHarvestingDebugOutcome(previousActionText, playerState);
       } else {
         this.upsertRemotePlayer(playerState);
       }
@@ -606,6 +759,8 @@ export class WorldScene extends Phaser.Scene {
       }
 
       remotePlayer.sprite.destroy();
+      remotePlayer.healthBar.destroy();
+      remotePlayer.harvestingIndicator.destroy();
       this.remotePlayers.delete(id);
     }
   }
@@ -775,6 +930,19 @@ export class WorldScene extends Phaser.Scene {
     sprite.setAlpha(nodeState.isDepleted ? 0.35 : 1);
     sprite.clearTint();
 
+    const resourceTintById: Record<string, number> = {
+      birch_tree: 0x9ed37c,
+      oak_tree: 0x4a8f3a,
+      copper_rock: 0xc9834f,
+      tin_rock: 0xa8b7c7,
+      iron_rock: 0x7f8c98,
+    };
+
+    const resourceTint = resourceTintById[nodeState.resourceId];
+    if (resourceTint !== undefined) {
+      sprite.setTint(resourceTint);
+    }
+
     if (nodeState.isDepleted) {
       sprite.setTint(0x7a7a7a);
     }
@@ -827,6 +995,12 @@ export class WorldScene extends Phaser.Scene {
       .setTint(0xffd38f);
     const healthBar = this.add.graphics().setDepth(60);
     healthBar.setVisible(false);
+    const harvestingIndicator = this.add
+      .image(worldPosition.x, worldPosition.y - TILE_SIZE * 0.95, HARVEST_AXE_TEXTURE_KEY)
+      .setDepth(68)
+      .setOrigin(0.5, 1)
+      .setDisplaySize(11, 11)
+      .setVisible(false);
 
     this.remotePlayers.set(playerState.id, {
       state: playerState,
@@ -836,6 +1010,8 @@ export class WorldScene extends Phaser.Scene {
       pathWaypoints: this.buildPathWaypoints(playerState),
       healthBar,
       healthBarVisibleUntil: 0,
+      harvestingIndicator,
+      harvestingIndicatorPhase: 0,
     });
   }
 
@@ -878,6 +1054,7 @@ export class WorldScene extends Phaser.Scene {
 
     remotePlayer.sprite.destroy();
     remotePlayer.healthBar.destroy();
+    remotePlayer.harvestingIndicator.destroy();
     this.remotePlayers.delete(id);
   }
 
@@ -942,10 +1119,10 @@ export class WorldScene extends Phaser.Scene {
     });
 
     if (nodeAtTile) {
-      const name = nodeAtTile.state.type === 'tree' ? 'Tree' : 'Rock';
+      const name = nodeAtTile.state.resourceName;
 
       options.push({
-        label: nodeAtTile.state.type === 'tree' ? 'Cut Tree' : 'Mine Rock',
+        label: nodeAtTile.state.resourceActionLabel,
         onSelect: () => {
           this.startNodeInteraction(nodeAtTile.state.id);
         },
@@ -954,7 +1131,7 @@ export class WorldScene extends Phaser.Scene {
       options.push({
         label: `Examine ${name}`,
         onSelect: () => {
-          this.appendSystemChatMessage(`It's a ${name.toLowerCase()}.`);
+          this.appendSystemChatMessage(nodeAtTile.state.resourceExamineText);
         },
       });
     }
@@ -1485,8 +1662,8 @@ export class WorldScene extends Phaser.Scene {
     root.style.position = 'fixed';
     root.style.right = '12px';
     root.style.top = '12px';
-    root.style.width = '230px';
-    root.style.maxHeight = '260px';
+    root.style.width = '250px';
+    root.style.height = '440px';
     root.style.background = 'rgba(0, 0, 0, 0.72)';
     root.style.border = '1px solid rgba(183, 170, 129, 0.85)';
     root.style.display = 'flex';
@@ -1535,6 +1712,8 @@ export class WorldScene extends Phaser.Scene {
     inventoryContent.style.display = 'flex';
     inventoryContent.style.flexDirection = 'column';
     inventoryContent.style.gap = '6px';
+    inventoryContent.style.height = '100%';
+    inventoryContent.style.overflow = 'hidden';
 
     const inventoryHeader = document.createElement('div');
     inventoryHeader.textContent = 'HP: 0/0  Gold: 0  Slots: 0/0';
@@ -1568,7 +1747,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (this.inventoryContentElement) {
-      this.inventoryContentElement.style.display = skillsVisible ? 'none' : 'block';
+      this.inventoryContentElement.style.display = skillsVisible ? 'none' : 'flex';
     }
 
     const tabButtons = this.characterTabBarElement?.querySelectorAll<HTMLButtonElement>('button');
@@ -1834,12 +2013,12 @@ export class WorldScene extends Phaser.Scene {
           Math.abs(this.localTilePosition.y - activeNode.tileY);
 
         if (distance > 1) {
-          status = `Out of range: ${activeNode.type}`;
+          status = `Out of range: ${activeNode.resourceName}`;
         } else if (activeNode.isDepleted && activeNode.respawnAt) {
           const seconds = Math.max(0, (activeNode.respawnAt - Date.now()) / 1000);
-          status = `${activeNode.type} respawns in ${seconds.toFixed(1)}s`;
+          status = `${activeNode.resourceName} respawns in ${seconds.toFixed(1)}s`;
         } else {
-          status = `Gathering ${activeNode.type}...`;
+          status = `Gathering ${activeNode.resourceName}...`;
         }
       }
     } else if (
@@ -1897,7 +2076,8 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private getInventoryItemIcon(itemId: string): string {
-    const existing = this.inventoryIconDataUrls.get(itemId);
+    const resolvedKey = String(itemId || 'unknown-item');
+    const existing = this.inventoryIconDataUrls.get(resolvedKey);
     if (existing) {
       return existing;
     }
@@ -1916,34 +2096,59 @@ export class WorldScene extends Phaser.Scene {
     context.fillStyle = '#302c21';
     context.fillRect(1, 1, 14, 14);
 
-    if (itemId === 'logs') {
+    if (resolvedKey === 'logs' || resolvedKey === 'birch_logs') {
       context.fillStyle = '#6e4f2f';
       context.fillRect(3, 8, 10, 3);
       context.fillStyle = '#9a7444';
       context.fillRect(2, 5, 10, 3);
       context.fillStyle = '#c79b62';
       context.fillRect(4, 3, 8, 2);
-    } else if (itemId === 'copper_ore') {
+      if (resolvedKey === 'birch_logs') {
+        context.fillStyle = '#9bbd6f';
+        context.fillRect(2, 11, 12, 1);
+      }
+    } else if (resolvedKey === 'oak_logs') {
+      context.fillStyle = '#5d3f23';
+      context.fillRect(3, 8, 10, 3);
+      context.fillStyle = '#7b5431';
+      context.fillRect(2, 5, 10, 3);
+      context.fillStyle = '#a07341';
+      context.fillRect(4, 3, 8, 2);
+    } else if (resolvedKey === 'copper_ore') {
       context.fillStyle = '#6f6764';
       context.fillRect(4, 4, 8, 8);
       context.fillStyle = '#b87333';
       context.fillRect(5, 5, 2, 2);
       context.fillRect(9, 6, 2, 2);
       context.fillRect(7, 9, 2, 2);
-    } else if (itemId === 'tinderbox') {
+    } else if (resolvedKey === 'tin_ore') {
+      context.fillStyle = '#6f767d';
+      context.fillRect(4, 4, 8, 8);
+      context.fillStyle = '#b7c4cf';
+      context.fillRect(5, 5, 2, 2);
+      context.fillRect(9, 6, 2, 2);
+      context.fillRect(7, 9, 2, 2);
+    } else if (resolvedKey === 'iron_ore') {
+      context.fillStyle = '#5f676d';
+      context.fillRect(4, 4, 8, 8);
+      context.fillStyle = '#8f9da8';
+      context.fillRect(5, 5, 2, 2);
+      context.fillRect(9, 6, 2, 2);
+      context.fillRect(7, 9, 2, 2);
+    } else if (resolvedKey === 'tinderbox') {
       context.fillStyle = '#8a5a3a';
       context.fillRect(4, 4, 8, 8);
       context.fillStyle = '#d6a23f';
       context.fillRect(5, 6, 6, 2);
       context.fillStyle = '#f2d58a';
       context.fillRect(6, 5, 3, 1);
-    } else if (itemId === 'bronze_axe') {
+    } else if (resolvedKey === 'bronze_axe') {
       context.fillStyle = '#7b5937';
       context.fillRect(7, 3, 2, 10);
       context.fillStyle = '#b48345';
       context.fillRect(4, 4, 4, 3);
       context.fillRect(3, 5, 2, 2);
-    } else if (itemId === 'bronze_pickaxe') {
+    } else if (resolvedKey === 'bronze_pickaxe') {
       context.fillStyle = '#7b5937';
       context.fillRect(7, 4, 2, 9);
       context.fillStyle = '#8c9499';
@@ -1958,7 +2163,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     const dataUrl = canvas.toDataURL('image/png');
-    this.inventoryIconDataUrls.set(itemId, dataUrl);
+    this.inventoryIconDataUrls.set(resolvedKey, dataUrl);
     return dataUrl;
   }
 
@@ -1983,7 +2188,7 @@ export class WorldScene extends Phaser.Scene {
       maxHp,
       gold,
       inventory.maxSlots,
-      inventory.slots.map((slot) => `${slot.itemId}:${slot.quantity}`).join('|'),
+      inventory.slots.map((slot) => `${slot.image || '/assets/items/unknown.svg'}:${slot.itemId}:${slot.quantity}`).join('|'),
     ].join('::');
 
     if (this.lastRenderedInventorySignature === inventorySignature) {
@@ -2052,7 +2257,10 @@ export class WorldScene extends Phaser.Scene {
         cell.title = slot.name;
 
         const icon = document.createElement('img');
-        icon.src = this.getInventoryItemIcon(slot.itemId);
+        icon.src = slot.image;
+        icon.addEventListener('error', () => {
+          icon.src = this.getInventoryItemIcon(slot.itemId);
+        });
         icon.alt = slot.name;
         icon.width = 44;
         icon.height = 44;
@@ -2282,6 +2490,7 @@ export class WorldScene extends Phaser.Scene {
     for (const remotePlayer of this.remotePlayers.values()) {
       remotePlayer.sprite.destroy();
       remotePlayer.healthBar.destroy();
+      remotePlayer.harvestingIndicator.destroy();
     }
 
     for (const nodeVisual of this.worldNodes.values()) {
@@ -2334,6 +2543,9 @@ export class WorldScene extends Phaser.Scene {
     this.localHealthBar?.destroy();
     this.localHealthBar = null;
     this.localHealthBarVisibleUntil = 0;
+    this.harvestingActionIndicator?.destroy();
+    this.harvestingActionIndicator = null;
+    this.harvestingIndicatorPhase = 0;
     this.debugHudText?.destroy();
     this.actionStatusText?.destroy();
     this.snapshotCount = 0;
