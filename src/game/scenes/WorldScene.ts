@@ -6,7 +6,9 @@ import {
 } from '../config/gameConfig';
 import {
   type ChatMessageState,
+  type EquipmentSlotName,
   type EnemyState,
+  type ItemGearStats,
   type InventoryState,
   MultiplayerClient,
   type NpcState,
@@ -109,19 +111,24 @@ export class WorldScene extends Phaser.Scene {
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
   private contextMenuCloseListener: ((event: PointerEvent) => void) | null = null;
+  private itemTooltipElement: HTMLDivElement | null = null;
   private chatRootElement: HTMLDivElement | null = null;
   private chatLogElement: HTMLDivElement | null = null;
   private chatInputElement: HTMLInputElement | null = null;
   private chatMessages: string[] = [];
   private characterRootElement: HTMLDivElement | null = null;
   private characterTabBarElement: HTMLDivElement | null = null;
-  private activeCharacterTab: 'skills' | 'inventory' = 'skills';
+  private activeCharacterTab: 'skills' | 'inventory' | 'gear' = 'skills';
   private skillsRootElement: HTMLDivElement | null = null;
   private skillsContentElement: HTMLDivElement | null = null;
   private inventoryContentElement: HTMLDivElement | null = null;
   private inventoryHeaderElement: HTMLDivElement | null = null;
   private inventoryGridElement: HTMLDivElement | null = null;
   private lastRenderedInventorySignature: string | null = null;
+  private gearContentElement: HTMLDivElement | null = null;
+  private gearGridElement: HTMLDivElement | null = null;
+  private gearSummaryElement: HTMLDivElement | null = null;
+  private lastRenderedGearSignature: string | null = null;
   private draggingInventoryIndex: number | null = null;
   private inventoryIconDataUrls = new Map<string, string>();
   private shopRootElement: HTMLDivElement | null = null;
@@ -1261,6 +1268,7 @@ export class WorldScene extends Phaser.Scene {
 
   private showContextMenu(pointer: Phaser.Input.Pointer, options: ContextMenuOption[]): void {
     this.hideContextMenu();
+    this.hideItemTooltip();
 
     const pointerPosition = this.getPointerClientPosition(pointer);
     this.showContextMenuAt(pointerPosition.x, pointerPosition.y, options);
@@ -1268,6 +1276,7 @@ export class WorldScene extends Phaser.Scene {
 
   private showContextMenuAt(clientX: number, clientY: number, options: ContextMenuOption[]): void {
     this.hideContextMenu();
+    this.hideItemTooltip();
 
     const appElement = document.querySelector<HTMLDivElement>('#app');
     if (!appElement) {
@@ -1365,6 +1374,151 @@ export class WorldScene extends Phaser.Scene {
 
     this.contextMenuElement.remove();
     this.contextMenuElement = null;
+  }
+
+  private ensureItemTooltipElement(): HTMLDivElement | null {
+    if (this.itemTooltipElement) {
+      return this.itemTooltipElement;
+    }
+
+    const appElement = document.querySelector<HTMLDivElement>('#app');
+    if (!appElement) {
+      return null;
+    }
+
+    const tooltip = document.createElement('div');
+    tooltip.style.position = 'fixed';
+    tooltip.style.display = 'none';
+    tooltip.style.maxWidth = '260px';
+    tooltip.style.background = 'rgba(19, 19, 19, 0.96)';
+    tooltip.style.border = '1px solid rgba(154, 144, 107, 1)';
+    tooltip.style.padding = '6px 8px';
+    tooltip.style.color = '#efe8cc';
+    tooltip.style.fontFamily = 'monospace';
+    tooltip.style.fontSize = '12px';
+    tooltip.style.whiteSpace = 'pre-line';
+    tooltip.style.pointerEvents = 'none';
+    tooltip.style.userSelect = 'none';
+    tooltip.style.zIndex = '3200';
+    tooltip.style.boxShadow = '0 2px 10px rgba(0, 0, 0, 0.45)';
+
+    appElement.appendChild(tooltip);
+    this.itemTooltipElement = tooltip;
+    return tooltip;
+  }
+
+  private hideItemTooltip(): void {
+    if (!this.itemTooltipElement) {
+      return;
+    }
+
+    this.itemTooltipElement.style.display = 'none';
+  }
+
+  private formatItemStatsTooltip(name: string, gearStats: ItemGearStats | null): string {
+    const lines: string[] = [name];
+
+    if (!gearStats) {
+      return lines.join('\n');
+    }
+
+    const pushStatLine = (label: string, value: number | undefined, includePlus = false): void => {
+      if (!Number.isFinite(value) || value === 0) {
+        return;
+      }
+
+      const numericValue = Number(value);
+      const text = includePlus && numericValue > 0 ? `+${numericValue}` : String(numericValue);
+      lines.push(`${label} ${text}`);
+    };
+
+    pushStatLine('STR', gearStats.baseStats?.strength, true);
+    pushStatLine('CON', gearStats.baseStats?.constitution, true);
+
+    if (gearStats.armorProfile) {
+      pushStatLine('Armor:', gearStats.armorProfile.armor);
+      if (
+        Number.isFinite(gearStats.armorProfile.damageReductionPct) &&
+        gearStats.armorProfile.damageReductionPct !== 0
+      ) {
+        lines.push(`Damage Reduction (DR): ${gearStats.armorProfile.damageReductionPct}%`);
+      }
+
+      const armorAccuracy = gearStats.armorProfile.accuracy;
+      const melee = armorAccuracy?.melee;
+      const ranged = armorAccuracy?.ranged;
+      const magic = armorAccuracy?.magic;
+      if (
+        Number.isFinite(melee) ||
+        Number.isFinite(ranged) ||
+        Number.isFinite(magic)
+      ) {
+        lines.push(
+          `Accuracy M/R/Mg: ${Number.isFinite(melee) ? melee : '-'} / ${Number.isFinite(ranged) ? ranged : '-'} / ${Number.isFinite(magic) ? magic : '-'}`,
+        );
+      }
+    }
+
+    if (gearStats.weaponProfile) {
+      lines.push(`Weapon: ${gearStats.weaponProfile.type} (${gearStats.weaponProfile.style})`);
+      pushStatLine('Damage:', gearStats.weaponProfile.baseDamage);
+      pushStatLine('Accuracy:', gearStats.weaponProfile.accuracy);
+      if (
+        Number.isFinite(gearStats.weaponProfile.attackRateSeconds) &&
+        gearStats.weaponProfile.attackRateSeconds !== 0
+      ) {
+        lines.push(`Speed: ${gearStats.weaponProfile.attackRateSeconds}s`);
+      }
+      pushStatLine('Range:', gearStats.weaponProfile.range);
+    }
+
+    return lines.join('\n');
+  }
+
+  private showItemTooltip(clientX: number, clientY: number, text: string): void {
+    const tooltip = this.ensureItemTooltipElement();
+    if (!tooltip) {
+      return;
+    }
+
+    tooltip.textContent = text;
+    tooltip.style.display = 'block';
+
+    const margin = 8;
+    const offset = 12;
+    let left = clientX + offset;
+    let top = clientY + offset;
+
+    if (left + tooltip.offsetWidth + margin > window.innerWidth) {
+      left = window.innerWidth - tooltip.offsetWidth - margin;
+    }
+
+    if (top + tooltip.offsetHeight + margin > window.innerHeight) {
+      top = clientY - tooltip.offsetHeight - offset;
+    }
+
+    tooltip.style.left = `${Math.max(margin, left)}px`;
+    tooltip.style.top = `${Math.max(margin, top)}px`;
+  }
+
+  private bindItemTooltip(
+    element: HTMLElement,
+    name: string,
+    gearStats: ItemGearStats | null,
+  ): void {
+    const tooltipText = this.formatItemStatsTooltip(name, gearStats);
+
+    element.addEventListener('pointerenter', (event: PointerEvent) => {
+      this.showItemTooltip(event.clientX, event.clientY, tooltipText);
+    });
+
+    element.addEventListener('pointermove', (event: PointerEvent) => {
+      this.showItemTooltip(event.clientX, event.clientY, tooltipText);
+    });
+
+    element.addEventListener('pointerleave', () => {
+      this.hideItemTooltip();
+    });
   }
 
   private getPointerClientPosition(pointer: Phaser.Input.Pointer): { x: number; y: number } {
@@ -1765,7 +1919,10 @@ export class WorldScene extends Phaser.Scene {
     tabBar.style.display = 'flex';
     tabBar.style.gap = '4px';
 
-    const createTabButton = (label: string, tab: 'skills' | 'inventory'): HTMLButtonElement => {
+    const createTabButton = (
+      label: string,
+      tab: 'skills' | 'inventory' | 'gear',
+    ): HTMLButtonElement => {
       const button = document.createElement('button');
       button.textContent = label;
       button.style.flex = '1';
@@ -1787,7 +1944,8 @@ export class WorldScene extends Phaser.Scene {
 
     const skillsTabButton = createTabButton('Skills', 'skills');
     const inventoryTabButton = createTabButton('Inventory', 'inventory');
-    tabBar.append(skillsTabButton, inventoryTabButton);
+    const gearTabButton = createTabButton('Gear', 'gear');
+    tabBar.append(skillsTabButton, inventoryTabButton, gearTabButton);
 
     const skillsContent = document.createElement('div');
     skillsContent.style.whiteSpace = 'pre-line';
@@ -1813,7 +1971,49 @@ export class WorldScene extends Phaser.Scene {
 
     inventoryContent.append(inventoryHeader, inventoryGrid);
 
-    root.append(tabBar, skillsContent, inventoryContent);
+    const gearContent = document.createElement('div');
+    gearContent.style.display = 'none';
+    gearContent.style.flexDirection = 'column';
+    gearContent.style.flex = '1';
+    gearContent.style.minHeight = '0';
+    gearContent.style.gap = '6px';
+    gearContent.style.overflow = 'hidden';
+
+    const gearHeader = document.createElement('div');
+    gearHeader.textContent = 'Equipped gear';
+    gearHeader.style.color = '#fff4c7';
+
+    const gearGrid = document.createElement('div');
+    gearGrid.style.display = 'block';
+    gearGrid.style.flex = '0 0 auto';
+    gearGrid.style.overflow = 'visible';
+    gearGrid.style.minHeight = '0';
+
+    const gearSummary = document.createElement('div');
+    gearSummary.style.flex = '1 1 auto';
+    gearSummary.style.minHeight = '0';
+    gearSummary.style.borderTop = '1px solid rgba(150, 138, 102, 0.9)';
+    gearSummary.style.paddingTop = '4px';
+    gearSummary.style.color = '#fff4c7';
+    gearSummary.style.fontSize = '11px';
+    gearSummary.style.whiteSpace = 'pre-line';
+    gearSummary.style.overflowY = 'auto';
+    gearSummary.style.overflowX = 'hidden';
+    gearSummary.textContent = [
+      'Totals',
+      'STR +0',
+      'CON +0',
+      'Armor 0',
+      'Damage Reduction (DR) 0%',
+      'Accuracy Melee 0',
+      'Accuracy Ranged 0',
+      'Accuracy Magic 0',
+      'Regen +1 HP / 10s',
+    ].join('\n');
+
+    gearContent.append(gearHeader, gearGrid, gearSummary);
+
+    root.append(tabBar, skillsContent, inventoryContent, gearContent);
     appElement.append(root);
 
     this.characterRootElement = root;
@@ -1823,23 +2023,37 @@ export class WorldScene extends Phaser.Scene {
     this.inventoryContentElement = inventoryContent;
     this.inventoryHeaderElement = inventoryHeader;
     this.inventoryGridElement = inventoryGrid;
+    this.gearContentElement = gearContent;
+    this.gearGridElement = gearGrid;
+    this.gearSummaryElement = gearSummary;
     this.updateCharacterTabState();
   }
 
   private updateCharacterTabState(): void {
     const skillsVisible = this.activeCharacterTab === 'skills';
+    const inventoryVisible = this.activeCharacterTab === 'inventory';
+    const gearVisible = this.activeCharacterTab === 'gear';
 
     if (this.skillsContentElement) {
       this.skillsContentElement.style.display = skillsVisible ? 'block' : 'none';
     }
 
     if (this.inventoryContentElement) {
-      this.inventoryContentElement.style.display = skillsVisible ? 'none' : 'flex';
+      this.inventoryContentElement.style.display = inventoryVisible ? 'flex' : 'none';
     }
 
-    if (!skillsVisible) {
+    if (this.gearContentElement) {
+      this.gearContentElement.style.display = gearVisible ? 'flex' : 'none';
+    }
+
+    if (inventoryVisible) {
       this.lastRenderedInventorySignature = null;
       this.renderInventoryPanel();
+    }
+
+    if (gearVisible) {
+      this.lastRenderedGearSignature = null;
+      this.renderGearPanel();
     }
 
     const tabButtons = this.characterTabBarElement?.querySelectorAll<HTMLButtonElement>('button');
@@ -1850,7 +2064,8 @@ export class WorldScene extends Phaser.Scene {
     for (const button of tabButtons) {
       const isActive =
         (skillsVisible && button.textContent === 'Skills') ||
-        (!skillsVisible && button.textContent === 'Inventory');
+        (inventoryVisible && button.textContent === 'Inventory') ||
+        (gearVisible && button.textContent === 'Gear');
 
       button.style.background = isActive ? 'rgba(90, 82, 56, 0.98)' : 'rgba(64, 58, 41, 0.95)';
       button.style.color = isActive ? '#fff4c7' : '#f0e5c1';
@@ -2377,6 +2592,7 @@ export class WorldScene extends Phaser.Scene {
 
     this.renderSkillsPanel();
     this.renderInventoryPanel();
+    this.renderGearPanel();
     this.renderShopPanel();
     this.renderBankPanel();
   }
@@ -2532,7 +2748,9 @@ export class WorldScene extends Phaser.Scene {
       gold,
       slotSize,
       inventory.maxSlots,
-      inventory.slots.map((slot) => `${slot.image || '/assets/items/unknown.svg'}:${slot.itemId}:${slot.quantity}`).join('|'),
+      inventory.slots
+        .map((slot) => `${slot.image || '/assets/items/unknown.svg'}:${slot.itemId}:${slot.quantity}:${JSON.stringify(slot.gearStats)}`)
+        .join('|'),
     ].join('::');
 
     if (this.lastRenderedInventorySignature === inventorySignature) {
@@ -2596,9 +2814,18 @@ export class WorldScene extends Phaser.Scene {
       });
 
       if (slot) {
-        cell.draggable = true;
-        cell.style.cursor = 'grab';
-        cell.title = slot.name;
+        const primaryAction: ContextMenuOption | null = slot.equipSlot
+          ? {
+              label: `Equip ${slot.name}`,
+              onSelect: () => {
+                this.multiplayerClient.sendEquipItem(index);
+              },
+            }
+          : null;
+
+        cell.draggable = !primaryAction;
+        cell.style.cursor = primaryAction ? 'pointer' : 'grab';
+        this.bindItemTooltip(cell, slot.name, slot.gearStats ?? null);
 
         const icon = document.createElement('img');
         icon.src = slot.image;
@@ -2643,7 +2870,25 @@ export class WorldScene extends Phaser.Scene {
 
         cell.append(icon, quantity, name);
 
+        if (primaryAction) {
+          cell.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0) {
+              return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            this.hideContextMenu();
+            primaryAction.onSelect?.();
+          });
+        }
+
         cell.addEventListener('dragstart', (event) => {
+          if (primaryAction) {
+            event.preventDefault();
+            return;
+          }
+
           this.hideContextMenu();
           this.draggingInventoryIndex = index;
           cell.style.opacity = '0.5';
@@ -2664,6 +2909,19 @@ export class WorldScene extends Phaser.Scene {
           event.stopPropagation();
 
           const options: ContextMenuOption[] = [
+            ...(primaryAction ? [primaryAction] : []),
+          ];
+
+          if (slot.quantity > 1) {
+            options.push({
+              label: `Drop all ${slot.name}`,
+              onSelect: () => {
+                this.multiplayerClient.sendInventoryDrop(index, slot.quantity);
+              },
+            });
+          }
+
+          options.push(
             {
               label: `Examine ${slot.name}`,
               onSelect: () => {
@@ -2677,16 +2935,7 @@ export class WorldScene extends Phaser.Scene {
                 this.multiplayerClient.sendInventoryDrop(index, 1);
               },
             },
-          ];
-
-          if (slot.quantity > 1) {
-            options.push({
-              label: `Drop all ${slot.name}`,
-              onSelect: () => {
-                this.multiplayerClient.sendInventoryDrop(index, slot.quantity);
-              },
-            });
-          }
+          );
 
           this.showContextMenuAt(event.clientX, event.clientY, options);
         });
@@ -2694,6 +2943,306 @@ export class WorldScene extends Phaser.Scene {
 
       this.inventoryGridElement.appendChild(cell);
     }
+  }
+
+  private renderGearPanel(): void {
+    if (!this.gearGridElement || !this.gearSummaryElement || !this.localPlayerState) {
+      return;
+    }
+
+    const equipment = this.localPlayerState.equipment;
+    const slotOrder: EquipmentSlotName[] = [
+      'head',
+      'necklace',
+      'mainHand',
+      'body',
+      'offHand',
+      'hands',
+      'legs',
+      'feet',
+      'ring1',
+      'ring2',
+      'ring3',
+      'ring4',
+      'ring5',
+    ];
+    const signature = slotOrder
+      .map((slotName) => {
+        const item = equipment[slotName];
+        return `${slotName}:${item?.itemId ?? '-'}:${item?.quantity ?? 0}:${JSON.stringify(item?.gearStats ?? null)}`;
+      })
+      .join('|');
+
+    if (this.lastRenderedGearSignature === signature) {
+      return;
+    }
+
+    this.lastRenderedGearSignature = signature;
+    this.gearGridElement.innerHTML = '';
+
+    const layout = document.createElement('div');
+    layout.style.display = 'grid';
+    layout.style.gridTemplateColumns = 'repeat(5, 48px)';
+    layout.style.gridAutoRows = '48px';
+    layout.style.gap = '6px';
+    layout.style.padding = '2px';
+    layout.style.justifyContent = 'center';
+
+    const slotPositions: Record<EquipmentSlotName, { row: number; column: number }> = {
+      head: { row: 2, column: 3 },
+      necklace: { row: 3, column: 3 },
+      mainHand: { row: 4, column: 1 },
+      body: { row: 4, column: 3 },
+      offHand: { row: 4, column: 5 },
+      hands: { row: 5, column: 1 },
+      legs: { row: 5, column: 3 },
+      feet: { row: 6, column: 3 },
+      ring1: { row: 7, column: 1 },
+      ring2: { row: 7, column: 2 },
+      ring3: { row: 7, column: 3 },
+      ring4: { row: 7, column: 4 },
+      ring5: { row: 7, column: 5 },
+    };
+
+    for (const slotName of slotOrder) {
+      const equipped = equipment[slotName];
+      const slotCard = document.createElement('div');
+      slotCard.style.display = 'flex';
+      slotCard.style.flexDirection = 'column';
+      slotCard.style.justifyContent = 'space-between';
+      slotCard.style.width = '100%';
+      slotCard.style.height = '100%';
+      slotCard.style.boxSizing = 'border-box';
+      slotCard.style.padding = '4px';
+      slotCard.style.background = equipped ? 'rgba(68, 62, 44, 0.92)' : 'rgba(30, 30, 30, 0.75)';
+      slotCard.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      slotCard.style.gridRow = String(slotPositions[slotName].row);
+      slotCard.style.gridColumn = String(slotPositions[slotName].column);
+      slotCard.style.userSelect = 'none';
+      slotCard.style.position = 'relative';
+      slotCard.style.overflow = 'hidden';
+
+      const itemLabel = document.createElement('div');
+      itemLabel.style.position = 'absolute';
+      itemLabel.style.left = '0';
+      itemLabel.style.right = '0';
+      itemLabel.style.bottom = '0';
+      itemLabel.style.zIndex = '2';
+      itemLabel.style.background = 'rgba(0, 0, 0, 0.55)';
+      itemLabel.style.padding = '0 2px';
+      itemLabel.style.color = equipped ? '#f0e5c1' : '#90876b';
+      itemLabel.style.fontSize = '9px';
+      itemLabel.style.whiteSpace = 'nowrap';
+      itemLabel.style.overflow = 'hidden';
+      itemLabel.style.textOverflow = 'ellipsis';
+      itemLabel.textContent = equipped ? equipped.name : '';
+
+      if (equipped) {
+        const icon = document.createElement('img');
+        icon.src = equipped.image;
+        icon.alt = equipped.name;
+        icon.width = 1;
+        icon.height = 1;
+        icon.style.position = 'absolute';
+        icon.style.left = '0';
+        icon.style.top = '0';
+        icon.style.width = '100%';
+        icon.style.height = '100%';
+        icon.style.zIndex = '1';
+        icon.style.objectFit = 'contain';
+        icon.style.display = 'block';
+        icon.style.imageRendering = 'pixelated';
+        icon.draggable = false;
+        icon.addEventListener('error', () => {
+          icon.src = this.getInventoryItemIcon(equipped.itemId);
+        });
+
+        slotCard.append(icon);
+      }
+
+      slotCard.append(itemLabel);
+
+      if (!equipped) {
+        const ghostIcon = document.createElement('div');
+        ghostIcon.textContent = this.getEquipmentSlotGhostIcon(slotName);
+        ghostIcon.style.position = 'absolute';
+        ghostIcon.style.left = '50%';
+        ghostIcon.style.top = '50%';
+        ghostIcon.style.transform = 'translate(-50%, -50%)';
+        ghostIcon.style.fontSize = '16px';
+        ghostIcon.style.opacity = '0.45';
+        ghostIcon.style.color = 'rgba(185, 185, 185, 0.8)';
+        ghostIcon.style.filter = 'grayscale(1) saturate(0) brightness(0.9)';
+        ghostIcon.style.pointerEvents = 'none';
+        slotCard.appendChild(ghostIcon);
+      }
+
+      if (equipped) {
+        slotCard.style.cursor = 'pointer';
+        this.bindItemTooltip(slotCard, equipped.name, equipped.gearStats ?? null);
+        slotCard.addEventListener('pointerdown', (event) => {
+          if (event.button !== 0) {
+            return;
+          }
+
+          event.preventDefault();
+          event.stopPropagation();
+          this.multiplayerClient.sendUnequipItem(slotName);
+        });
+
+        slotCard.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+
+          const options: ContextMenuOption[] = [
+            {
+              label: `Examine ${equipped.name}`,
+              onSelect: () => {
+                const text = equipped.examineText || `It's ${equipped.name.toLowerCase()}.`;
+                this.appendSystemChatMessage(text);
+              },
+            },
+            {
+              label: `Unequip ${equipped.name}`,
+              onSelect: () => {
+                this.multiplayerClient.sendUnequipItem(slotName);
+              },
+            },
+          ];
+
+          this.showContextMenuAt(event.clientX, event.clientY, options);
+        });
+      }
+
+      layout.appendChild(slotCard);
+    }
+
+    this.gearGridElement.appendChild(layout);
+
+    const totals = {
+      strength: 0,
+      constitution: 0,
+      armor: 0,
+      damageReductionPct: 0,
+      weaponBaseDamage: 0,
+      accuracy: {
+        melee: 0,
+        ranged: 0,
+        magic: 0,
+      },
+    };
+
+    for (const slotName of slotOrder) {
+      const equipped = equipment[slotName];
+      const stats = equipped?.gearStats;
+      if (!stats) {
+        continue;
+      }
+
+      if (Number.isFinite(stats.baseStats?.strength)) {
+        totals.strength += Number(stats.baseStats?.strength ?? 0);
+      }
+
+      if (Number.isFinite(stats.baseStats?.constitution)) {
+        totals.constitution += Number(stats.baseStats?.constitution ?? 0);
+      }
+
+      if (Number.isFinite(stats.armorProfile?.armor)) {
+        totals.armor += Number(stats.armorProfile?.armor ?? 0);
+      }
+
+      if (Number.isFinite(stats.armorProfile?.damageReductionPct)) {
+        totals.damageReductionPct += Number(stats.armorProfile?.damageReductionPct ?? 0);
+      }
+
+      if (Number.isFinite(stats.weaponProfile?.baseDamage)) {
+        totals.weaponBaseDamage += Number(stats.weaponProfile?.baseDamage ?? 0);
+      }
+
+      if (Number.isFinite(stats.armorProfile?.accuracy?.melee)) {
+        totals.accuracy.melee += Number(stats.armorProfile?.accuracy?.melee ?? 0);
+      }
+
+      if (Number.isFinite(stats.armorProfile?.accuracy?.ranged)) {
+        totals.accuracy.ranged += Number(stats.armorProfile?.accuracy?.ranged ?? 0);
+      }
+
+      if (Number.isFinite(stats.armorProfile?.accuracy?.magic)) {
+        totals.accuracy.magic += Number(stats.armorProfile?.accuracy?.magic ?? 0);
+      }
+    }
+
+    const formatSigned = (value: number): string => {
+      if (value > 0) {
+        return `+${value}`;
+      }
+
+      return String(value);
+    };
+
+    const effectiveConstitution = Math.max(
+      1,
+      this.localPlayerState.skills.constitution.level + totals.constitution,
+    );
+    const effectiveStrength = Math.max(1, this.localPlayerState.skills.strength.level + totals.strength);
+    const strengthMaxHitBonus = Math.floor((effectiveStrength * totals.weaponBaseDamage) / 100);
+    const attackMin = 4;
+    const attackMax = Math.max(attackMin, 8 + strengthMaxHitBonus);
+    const regenPerTick = 1 + Math.floor(effectiveConstitution * 0.2);
+
+    this.gearSummaryElement.textContent = [
+      'Totals',
+      `STR ${formatSigned(totals.strength)}`,
+      `CON ${formatSigned(totals.constitution)}`,
+      `Armor ${totals.armor}`,
+      `Damage Reduction (DR) ${(totals.damageReductionPct * 100).toFixed(1)}%`,
+      `Accuracy Melee ${formatSigned(totals.accuracy.melee)}`,
+      `Accuracy Ranged ${formatSigned(totals.accuracy.ranged)}`,
+      `Accuracy Magic ${formatSigned(totals.accuracy.magic)}`,
+      `Combat Damage ${attackMin}-${attackMax} (Base ${totals.weaponBaseDamage.toFixed(1)}, STR bonus +${strengthMaxHitBonus})`,
+      `Effective CON Lv ${effectiveConstitution} (Max HP ${100 + (effectiveConstitution - 1) * 10})`,
+      `Regen +${regenPerTick} HP / 10s`,
+    ].join('\n');
+  }
+
+  private getEquipmentSlotGhostIcon(slotName: EquipmentSlotName): string {
+    if (slotName.startsWith('ring')) {
+      return '💍';
+    }
+
+    if (slotName === 'necklace') {
+      return '📿';
+    }
+
+    if (slotName === 'head') {
+      return '⛑️';
+    }
+
+    if (slotName === 'body') {
+      return '🦺';
+    }
+
+    if (slotName === 'legs') {
+      return '👖';
+    }
+
+    if (slotName === 'hands') {
+      return '🧤';
+    }
+
+    if (slotName === 'feet') {
+      return '🥾';
+    }
+
+    if (slotName === 'offHand') {
+      return '🛡️';
+    }
+
+    if (slotName === 'mainHand') {
+      return '⚔️';
+    }
+
+    return '◌';
   }
 
   private renderBankPanel(): void {
@@ -2756,7 +3305,7 @@ export class WorldScene extends Phaser.Scene {
 
       if (slot) {
         cell.style.cursor = 'pointer';
-        cell.title = slot.name;
+        this.bindItemTooltip(cell, slot.name, slot.gearStats ?? null);
 
         const icon = document.createElement('img');
         icon.src = slot.image;
@@ -3004,6 +3553,7 @@ export class WorldScene extends Phaser.Scene {
     this.lastRenderedShopSignature = null;
     this.pendingNpcAction = null;
     this.hideContextMenu();
+    this.hideItemTooltip();
     this.localPlayerState = null;
     this.localTilePosition = null;
     this.localRenderedTilePosition = null;
@@ -3024,6 +3574,10 @@ export class WorldScene extends Phaser.Scene {
     this.inventoryGridElement = null;
     this.inventoryContentElement = null;
     this.lastRenderedInventorySignature = null;
+    this.gearContentElement = null;
+    this.gearGridElement = null;
+    this.gearSummaryElement = null;
+    this.lastRenderedGearSignature = null;
     this.draggingInventoryIndex = null;
     this.inventoryIconDataUrls.clear();
     this.shopRootElement?.remove();
@@ -3039,6 +3593,8 @@ export class WorldScene extends Phaser.Scene {
     this.bankVisible = false;
     this.lastRenderedBankSignature = null;
     this.hideBankQuantityPrompt();
+    this.itemTooltipElement?.remove();
+    this.itemTooltipElement = null;
     this.localHealthBar?.destroy();
     this.localHealthBar = null;
     this.localHealthBarVisibleUntil = 0;

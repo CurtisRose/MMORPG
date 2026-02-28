@@ -5,6 +5,64 @@ export interface InventorySlotState {
   stackable: boolean;
   image: string;
   examineText: string;
+  equipSlot: EquipmentSlotName | null;
+  gearStats: ItemGearStats | null;
+}
+
+export interface ItemGearStats {
+  baseStats?: {
+    strength?: number;
+    constitution?: number;
+  };
+  armorProfile: {
+    style: string;
+    damageReductionPct?: number;
+    armor?: number;
+    accuracy?: {
+      melee?: number;
+      ranged?: number;
+      magic?: number;
+    };
+  } | null;
+  weaponProfile: {
+    type: string;
+    style: string;
+    accuracy?: number;
+    attackRateSeconds?: number;
+    range?: number;
+    baseDamage?: number;
+  } | null;
+}
+
+export type EquipmentSlotName =
+  | 'head'
+  | 'body'
+  | 'legs'
+  | 'hands'
+  | 'feet'
+  | 'offHand'
+  | 'mainHand'
+  | 'necklace'
+  | 'ring1'
+  | 'ring2'
+  | 'ring3'
+  | 'ring4'
+  | 'ring5';
+
+export interface EquipmentState {
+  head: InventorySlotState | null;
+  body: InventorySlotState | null;
+  legs: InventorySlotState | null;
+  hands: InventorySlotState | null;
+  feet: InventorySlotState | null;
+  offHand: InventorySlotState | null;
+  mainHand: InventorySlotState | null;
+  necklace: InventorySlotState | null;
+  ring1: InventorySlotState | null;
+  ring2: InventorySlotState | null;
+  ring3: InventorySlotState | null;
+  ring4: InventorySlotState | null;
+  ring5: InventorySlotState | null;
 }
 
 export interface InventoryState {
@@ -53,6 +111,7 @@ export interface RemotePlayerState {
     };
   };
   inventory: InventoryState;
+  equipment: EquipmentState;
   lastActionText: string | null;
 }
 
@@ -525,6 +584,34 @@ export class MultiplayerClient {
         to,
         slotIndex,
         quantity,
+      }),
+    );
+  }
+
+  sendEquipItem(slotIndex: number): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'equipItem',
+        slotIndex,
+      }),
+    );
+  }
+
+  sendUnequipItem(slot: EquipmentSlotName): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'unequipItem',
+        slot,
       }),
     );
   }

@@ -11,6 +11,10 @@
         "min": 3,
         "max": 5
       },
+      "depletionDurationMs": {
+        "min": 6000,
+        "max": 7000
+      },
       "drops": [
         {
           "itemId": "copper_ore",
@@ -36,6 +40,10 @@
         "min": 4,
         "max": 7
       },
+      "depletionDurationMs": {
+        "min": 7000,
+        "max": 8000
+      },
       "drops": [
         {
           "itemId": "iron_ore",
@@ -60,6 +68,10 @@
       "depletionHits": {
         "min": 3,
         "max": 5
+      },
+      "depletionDurationMs": {
+        "min": 6000,
+        "max": 7000
       },
       "drops": [
         {
