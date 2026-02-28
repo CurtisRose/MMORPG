@@ -1,0 +1,25 @@
+{
+  "skill": "strength",
+  "abilities": [
+    {
+      "id": "basic_strike",
+      "name": "Basic Strike",
+      "requiredLevel": 1,
+      "cooldownMs": 900,
+      "accuracy": 0.9,
+      "xp": 16
+    },
+    {
+      "id": "heavy_swing",
+      "name": "Heavy Swing",
+      "requiredLevel": 10,
+      "cooldownMs": 1400,
+      "accuracy": 0.75,
+      "xp": 24
+    }
+  ],
+  "scaling": {
+    "baseMaxHit": 3,
+    "bonusPerLevel": 0.08
+  }
+}

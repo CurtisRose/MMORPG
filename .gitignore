@@ -23,7 +23,11 @@ dist-ssr
 coverage
 
 # Local multiplayer persistence data
-server/data/
+server/data/*
+!server/data/skills/
+!server/data/skills/**
+server/data/skills/**/playerProfiles.json
+server/data/playerProfiles.json
 
 # Editor directories and files
 .vscode/*

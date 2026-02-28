@@ -45,6 +45,7 @@ export interface RemotePlayerState {
       quantity: number;
       name: string;
       stackable: boolean;
+      image: string;
       examineText: string;
     }>;
   };
@@ -54,6 +55,10 @@ export interface RemotePlayerState {
 export interface WorldNodeState {
   id: string;
   type: 'tree' | 'rock';
+  resourceId: string;
+  resourceName: string;
+  resourceExamineText: string;
+  resourceActionLabel: string;
   tileX: number;
   tileY: number;
   isDepleted: boolean;

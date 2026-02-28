@@ -1,0 +1,87 @@
+{
+  "skill": "mining",
+  "resources": [
+    {
+      "id": "copper_rock",
+      "nodeType": "rock",
+      "requiredLevel": 1,
+      "successChance": 0.3,
+      "gatherIntervalMs": 1200,
+      "depletionHits": {
+        "min": 3,
+        "max": 5
+      },
+      "drops": [
+        {
+          "itemId": "copper_ore",
+          "weight": 80,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 26
+        },
+        {
+          "itemId": "stone",
+          "weight": 20,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 4
+        }
+      ]
+    },
+    {
+      "id": "iron_rock",
+      "nodeType": "rock",
+      "requiredLevel": 15,
+      "successChance": 0.2,
+      "gatherIntervalMs": 1350,
+      "depletionHits": {
+        "min": 4,
+        "max": 7
+      },
+      "drops": [
+        {
+          "itemId": "iron_ore",
+          "weight": 75,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 35
+        },
+        {
+          "itemId": "stone",
+          "weight": 25,
+          "quantity": { "min": 1, "max": 2 },
+          "xp": 5
+        }
+      ]
+    },
+    {
+      "id": "tin_rock",
+      "nodeType": "rock",
+      "requiredLevel": 1,
+      "successChance": 0.28,
+      "gatherIntervalMs": 1200,
+      "depletionHits": {
+        "min": 3,
+        "max": 5
+      },
+      "drops": [
+        {
+          "itemId": "tin_ore",
+          "weight": 80,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 24
+        },
+        {
+          "itemId": "stone",
+          "weight": 20,
+          "quantity": { "min": 1, "max": 1 },
+          "xp": 4
+        }
+      ]
+    }
+  ],
+  "messages": {
+    "locked": "Requires Mining level {requiredLevel}.",
+    "gatherFail": "Your swing glances off and yields nothing useful.",
+    "success": "+{quantity} {itemName} (+{xp} XP)",
+    "levelUp": "Mining level up! Level {level}",
+    "depleted": "{resourceName} is depleted."
+  }
+}

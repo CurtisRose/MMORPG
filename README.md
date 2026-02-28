@@ -53,6 +53,32 @@ npm run preview
 - The browser keeps a stable profile ID in localStorage (`game-profile-id`) and sends it on connect.
 - To start a fresh character in the same browser, remove that localStorage key and reconnect.
 
+## Data-Driven Skilling Config
+- Shared content catalogs:
+	- `server/data/content/items.json`
+	- `server/data/content/resources.json`
+	- Skills and game systems reference these IDs (instead of hard-coded names/details).
+- Skill data is split by category:
+	- `server/data/skills/harvesting`
+	- `server/data/skills/crafting`
+	- `server/data/skills/combat`
+- Crafting schema and startup validation:
+	- `server/data/skills/crafting/schema.json`
+- Combat schema and startup validation:
+	- `server/data/skills/combat/schema.json`
+- Woodcutting and mining harvesting values are editable in:
+	- `server/data/skills/harvesting/woodcutting.json`
+	- `server/data/skills/harvesting/mining.json`
+- Harvesting schema reference is in `server/data/skills/harvesting/schema.json`.
+- Server startup validates harvesting files and fails fast with field-level errors when JSON is missing/invalid.
+- Harvesting resources define:
+	- catalog resource ID (`id`, resolved via `server/data/content/resources.json`)
+	- map resource requirement (`requiredLevel`)
+	- hit success chance (`successChance`)
+	- depletion hit range (`depletionHits.min/max`)
+	- weighted drop table (`drops[].itemId`, `drops[].weight`)
+	- per-drop quantity and XP (`drops[].quantity`, `drops[].xp`)
+
 ## Multiplayer Playtest Checklist
 - Open two clients and confirm movement/combat sync (targeting, chasing, hits, health bars).
 - Verify auto-retaliate only triggers while idle (not while gathering or actively moving elsewhere).

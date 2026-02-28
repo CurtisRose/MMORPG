@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deeperskilling.local/schema/harvesting-skill.schema.json",
+  "title": "Harvesting Skill Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["skill", "resources", "messages"],
+  "properties": {
+    "skill": {
+      "type": "string",
+      "description": "Skill id (ex: woodcutting, mining)"
+    },
+    "resources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "nodeType",
+          "requiredLevel",
+          "successChance",
+          "gatherIntervalMs",
+          "depletionHits",
+          "drops"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "nodeType": { "type": "string", "minLength": 1 },
+          "requiredLevel": { "type": "integer", "minimum": 1 },
+          "successChance": { "type": "number", "minimum": 0, "maximum": 1 },
+          "gatherIntervalMs": { "type": "integer", "minimum": 250 },
+          "depletionHits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["min", "max"],
+            "properties": {
+              "min": { "type": "integer", "minimum": 1 },
+              "max": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "drops": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["itemId", "weight", "quantity", "xp"],
+              "properties": {
+                "itemId": { "type": "string", "minLength": 1 },
+                "weight": { "type": "number", "exclusiveMinimum": 0 },
+                "quantity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["min", "max"],
+                  "properties": {
+                    "min": { "type": "integer", "minimum": 1 },
+                    "max": { "type": "integer", "minimum": 1 }
+                  }
+                },
+                "xp": { "type": "number", "minimum": 0 }
+              }
+            }
+          },
+          "messages": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "locked": { "type": "string" },
+              "gatherFail": { "type": "string" },
+              "success": { "type": "string" },
+              "levelUp": { "type": "string" },
+              "depleted": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "messages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locked", "gatherFail", "success", "levelUp", "depleted"],
+      "properties": {
+        "locked": { "type": "string", "minLength": 1 },
+        "gatherFail": { "type": "string", "minLength": 1 },
+        "success": { "type": "string", "minLength": 1 },
+        "levelUp": { "type": "string", "minLength": 1 },
+        "depleted": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
