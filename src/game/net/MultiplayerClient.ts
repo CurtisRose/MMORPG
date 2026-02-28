@@ -86,6 +86,7 @@ export interface RemotePlayerState {
   hp: number;
   maxHp: number;
   combatTargetEnemyId: string | null;
+  nextCombatAt: number;
   activeInteractionNodeId: string | null;
   gold: number;
   skills: {
@@ -548,6 +549,20 @@ export class MultiplayerClient {
         type: 'inventoryDrop',
         slotIndex,
         quantity,
+      }),
+    );
+  }
+
+  sendInventoryUse(slotIndex: number): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'inventoryUse',
+        slotIndex,
       }),
     );
   }

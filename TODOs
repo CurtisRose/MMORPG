@@ -1,8 +1,39 @@
-I am making the game like runescape but I want to add some dungeon crawler carl aspects to it.
+Next Roadmap (in order)
 
-I like the idea that you can level up a skill like runescape, but also abilities like dungeon crawler carl, but also I'd like proficienies in gear. So just because you are good at a long sword doesn't mean you are good at a short sword. But If you are good at melee, then it's not like you will be ASS at shortsword just because you've never used it. That sort of thing. Then maybe even go deeper into specific items.
+1) Combat clarity pass
+- [x] Add player attack timer feedback in UI (time to next hit).
+- [x] Add enemy hit feedback (floating damage text / hit splats).
+- [x] Add clearer combat status text (target + attack cadence).
 
-Maybe it will look like:
-    50% of skill comes from category (swords/daggers/spears)
-    40% from type of sword (short/long/et cetera)
-    10% from actual item (bastard sword [a type of longsword] or the devils plaything [a special type of dagger])
+2) Enemy progression
+- [x] Add 3-5 minion archetypes (melee / ranged / tank variants).
+- [x] Add per-minion tier scaling for minions.
+
+3) Ground item drops
+- [ ] Drop monster loot to world tiles instead of direct inventory award.
+- [ ] Drop player-discarded items to world tiles instead of deleting.
+- [ ] Add ground-item pickup interaction and inventory-capacity handling.
+- [ ] Add ownership visibility window: only owner sees item for first 60s.
+- [ ] Open visibility to all players after 60s if still on ground.
+- [ ] Despawn ground items after 120s total lifetime.
+
+4) Quest / task loop
+- [ ] Add basic kill tasks.
+- [ ] Add basic gather tasks.
+- [ ] Add coin/xp/gear reward hooks.
+
+5) Economy balancing
+- [ ] Re-tune buy/sell pricing curves.
+- [ ] Add at least one coin sink (repair, fees, etc.).
+- [ ] Add economy telemetry counters for tuning.
+
+6) Save/profile hardening
+- [ ] Add profile schema version field.
+- [ ] Add migration pipeline for old profiles.
+- [ ] Add migration safety/fallback logging.
+
+Started now:
+- [x] Combat clarity: attack timer feedback in UI
+- [x] Combat clarity: status shows target + next hit timer
+- [x] Enemy progression: added goblin archetype definitions (base/brute/archer)
+- [x] Enemy progression: added per-minion tier scaling + tier examine text overrides
