@@ -7,6 +7,7 @@ import {
 import {
   type ChatMessageState,
   type EnemyState,
+  type InventoryState,
   MultiplayerClient,
   type NpcState,
   type RemotePlayerState,
@@ -76,7 +77,7 @@ type ClickFeedbackKind = 'walk' | 'interact' | 'npc-interact';
 
 interface PendingNpcAction {
   npcId: string;
-  action: 'talk' | 'trade';
+  action: 'talk' | 'trade' | 'bank';
 }
 
 interface SkillLevelSnapshot {
@@ -107,6 +108,7 @@ export class WorldScene extends Phaser.Scene {
   private worldEnemies = new Map<string, EnemyVisual>();
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
+  private contextMenuCloseListener: ((event: PointerEvent) => void) | null = null;
   private chatRootElement: HTMLDivElement | null = null;
   private chatLogElement: HTMLDivElement | null = null;
   private chatInputElement: HTMLInputElement | null = null;
@@ -126,6 +128,15 @@ export class WorldScene extends Phaser.Scene {
   private shopContentElement: HTMLDivElement | null = null;
   private activeShopId: string | null = null;
   private lastRenderedShopSignature: string | null = null;
+  private bankRootElement: HTMLDivElement | null = null;
+  private bankInventoryHeaderElement: HTMLDivElement | null = null;
+  private bankStorageHeaderElement: HTMLDivElement | null = null;
+  private bankInventoryGridElement: HTMLDivElement | null = null;
+  private bankStorageGridElement: HTMLDivElement | null = null;
+  private bankInventoryState: InventoryState | null = null;
+  private bankVisible = false;
+  private lastRenderedBankSignature: string | null = null;
+  private bankQuantityPromptElement: HTMLDivElement | null = null;
   private pendingNpcAction: PendingNpcAction | null = null;
   private localHealthBar: Phaser.GameObjects.Graphics | null = null;
   private localHealthBarVisibleUntil = 0;
@@ -230,6 +241,7 @@ export class WorldScene extends Phaser.Scene {
     this.initChatUi();
     this.initCharacterUi();
     this.initShopUi();
+    this.initBankUi();
     this.appendSystemChatMessage('Welcome to the world.');
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
@@ -258,6 +270,9 @@ export class WorldScene extends Phaser.Scene {
       (shopId) => {
         this.openShop(shopId);
       },
+      (inventory, bank) => {
+        this.openBank(inventory, bank);
+      },
     );
 
     this.multiplayerClient.connect();
@@ -282,6 +297,15 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.updatePlayerSmoothing(delta);
+
+    if (
+      this.contextMenuElement &&
+      this.localPlayerState &&
+      (this.localPlayerState.targetTileX !== null || this.localPlayerState.targetTileY !== null)
+    ) {
+      this.hideContextMenu();
+    }
+
     this.renderHealthBars(Date.now());
     this.updateHarvestingActionIndicator(delta);
     this.updateRemoteHarvestingActionIndicators(delta);
@@ -646,8 +670,15 @@ export class WorldScene extends Phaser.Scene {
 
     if (directionX !== 0 || directionY !== 0) {
       this.pendingNpcAction = null;
+      this.closeTransientInteractionUi();
       this.multiplayerClient.sendInteractStop();
     }
+  }
+
+  private closeTransientInteractionUi(): void {
+    this.hideContextMenu();
+    this.closeBank();
+    this.closeShop();
   }
 
   private applySnapshot(snapshot: WorldSnapshot): void {
@@ -671,8 +702,13 @@ export class WorldScene extends Phaser.Scene {
       if (playerState.id === this.localPlayerId) {
         const previousLevels = this.previousSkillLevels;
         const previousHp = this.localPlayerState?.hp;
+        const previousCombatTargetEnemyId = this.localPlayerState?.combatTargetEnemyId ?? null;
         const previousActionText = this.localPlayerState?.lastActionText;
         this.localPlayerState = playerState;
+
+        if (!previousCombatTargetEnemyId && playerState.combatTargetEnemyId) {
+          this.closeTransientInteractionUi();
+        }
 
         if (!this.localTilePosition) {
           this.localTilePosition = tilePosition.clone();
@@ -737,6 +773,7 @@ export class WorldScene extends Phaser.Scene {
           this.localHealthBarVisibleUntil = Date.now() + HEALTH_BAR_VISIBLE_MS;
 
           if (previousHp > playerState.hp) {
+            this.closeTransientInteractionUi();
             this.showFloatingText(
               this.player.x,
               this.player.y - TILE_SIZE * 0.7,
@@ -825,12 +862,21 @@ export class WorldScene extends Phaser.Scene {
       if (existingNpc) {
         existingNpc.state = npcState;
         existingNpc.sprite.setPosition(position.x, position.y);
+        if (npcState.type === 'bank_chest') {
+          existingNpc.sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0xb08b4f);
+        } else {
+          existingNpc.sprite.setTexture(PLAYER_TEXTURE_KEY).setTint(0xc9a4ff);
+        }
         continue;
       }
 
       const npcSprite = this.add
-        .sprite(position.x, position.y, PLAYER_TEXTURE_KEY)
-        .setTint(0xc9a4ff)
+        .sprite(
+          position.x,
+          position.y,
+          npcState.type === 'bank_chest' ? ROCK_TEXTURE_KEY : PLAYER_TEXTURE_KEY,
+        )
+        .setTint(npcState.type === 'bank_chest' ? 0xb08b4f : 0xc9a4ff)
         .setDepth(2);
 
       this.worldNpcs.set(npcState.id, {
@@ -1059,6 +1105,8 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private handlePointerDown(pointer: Phaser.Input.Pointer): void {
+    this.hideBankQuantityPrompt();
+
     if (pointer.rightButtonDown()) {
       this.openExamineContextMenu(pointer);
       return;
@@ -1081,7 +1129,11 @@ export class WorldScene extends Phaser.Scene {
     const clickedNpc = this.findNpcAtTile(tileX, tileY);
     if (clickedNpc) {
       this.showTileClickFeedback(tileX, tileY, 'npc-interact');
-      this.talkToNpc(clickedNpc.state.id);
+      if (clickedNpc.state.type === 'bank_chest') {
+        this.useBankChest(clickedNpc.state.id);
+      } else {
+        this.talkToNpc(clickedNpc.state.id);
+      }
       return;
     }
 
@@ -1137,19 +1189,28 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (npcAtTile) {
-      options.push({
-        label: `Talk-to ${npcAtTile.state.name}`,
-        onSelect: () => {
-          this.talkToNpc(npcAtTile.state.id);
-        },
-      });
+      if (npcAtTile.state.type === 'bank_chest') {
+        options.push({
+          label: `Use ${npcAtTile.state.name}`,
+          onSelect: () => {
+            this.useBankChest(npcAtTile.state.id);
+          },
+        });
+      } else {
+        options.push({
+          label: `Talk-to ${npcAtTile.state.name}`,
+          onSelect: () => {
+            this.talkToNpc(npcAtTile.state.id);
+          },
+        });
 
-      options.push({
-        label: `Trade with ${npcAtTile.state.name}`,
-        onSelect: () => {
-          this.tradeWithNpc(npcAtTile.state.id);
-        },
-      });
+        options.push({
+          label: `Trade with ${npcAtTile.state.name}`,
+          onSelect: () => {
+            this.tradeWithNpc(npcAtTile.state.id);
+          },
+        });
+      }
 
       options.push({
         label: `Examine ${npcAtTile.state.name}`,
@@ -1218,6 +1279,15 @@ export class WorldScene extends Phaser.Scene {
     this.positionContextMenu(menu, clientX, clientY + 8);
 
     this.contextMenuElement = menu;
+    this.contextMenuCloseListener = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && this.contextMenuElement?.contains(target)) {
+        return;
+      }
+
+      this.hideContextMenu();
+    };
+    window.addEventListener('pointerdown', this.contextMenuCloseListener, true);
   }
 
   private createContextMenuElement(options: ContextMenuOption[]): HTMLDivElement {
@@ -1284,6 +1354,11 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private hideContextMenu(): void {
+    if (this.contextMenuCloseListener) {
+      window.removeEventListener('pointerdown', this.contextMenuCloseListener, true);
+      this.contextMenuCloseListener = null;
+    }
+
     if (!this.contextMenuElement) {
       return;
     }
@@ -1320,7 +1395,7 @@ export class WorldScene extends Phaser.Scene {
       this.pendingNpcAction = null;
     }
 
-    this.hideContextMenu();
+    this.closeTransientInteractionUi();
     if (showClickFeedback) {
       this.showTileClickFeedback(destination.x, destination.y, 'walk');
     }
@@ -1507,6 +1582,11 @@ export class WorldScene extends Phaser.Scene {
     this.startNpcAction(npcId, 'trade');
   }
 
+  private useBankChest(npcId: string): void {
+    this.hideContextMenu();
+    this.startNpcAction(npcId, 'bank');
+  }
+
   private startNpcAction(npcId: string, action: PendingNpcAction['action']): void {
     const npcVisual = this.worldNpcs.get(npcId);
     if (!npcVisual) {
@@ -1560,6 +1640,11 @@ export class WorldScene extends Phaser.Scene {
   private executeNpcAction(npcId: string, action: PendingNpcAction['action']): void {
     if (action === 'talk') {
       this.multiplayerClient.sendNpcTalk(npcId);
+      return;
+    }
+
+    if (action === 'bank') {
+      this.multiplayerClient.sendBankOpen(npcId);
       return;
     }
 
@@ -1662,8 +1747,8 @@ export class WorldScene extends Phaser.Scene {
     root.style.position = 'fixed';
     root.style.right = '12px';
     root.style.top = '12px';
-    root.style.width = '250px';
-    root.style.height = '440px';
+    root.style.width = '280px';
+    root.style.height = '545px';
     root.style.background = 'rgba(0, 0, 0, 0.72)';
     root.style.border = '1px solid rgba(183, 170, 129, 0.85)';
     root.style.display = 'flex';
@@ -1723,6 +1808,8 @@ export class WorldScene extends Phaser.Scene {
     inventoryGrid.style.display = 'grid';
     inventoryGrid.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
     inventoryGrid.style.gap = '4px';
+    inventoryGrid.style.padding = '0';
+    inventoryGrid.style.boxSizing = 'border-box';
 
     inventoryContent.append(inventoryHeader, inventoryGrid);
 
@@ -1750,6 +1837,11 @@ export class WorldScene extends Phaser.Scene {
       this.inventoryContentElement.style.display = skillsVisible ? 'none' : 'flex';
     }
 
+    if (!skillsVisible) {
+      this.lastRenderedInventorySignature = null;
+      this.renderInventoryPanel();
+    }
+
     const tabButtons = this.characterTabBarElement?.querySelectorAll<HTMLButtonElement>('button');
     if (!tabButtons) {
       return;
@@ -1771,30 +1863,17 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
 
-    const root = document.createElement('div');
-    root.style.position = 'fixed';
-    root.style.right = '12px';
-    root.style.top = '320px';
-    root.style.width = '260px';
-    root.style.maxHeight = '300px';
-    root.style.background = 'rgba(0, 0, 0, 0.8)';
-    root.style.border = '1px solid rgba(183, 170, 129, 0.9)';
-    root.style.display = 'none';
-    root.style.flexDirection = 'column';
-    root.style.padding = '6px';
-    root.style.gap = '6px';
-    root.style.zIndex = '2600';
-    root.style.pointerEvents = 'auto';
-    root.style.color = '#f0e5c1';
-    root.style.fontFamily = 'monospace';
-    root.style.fontSize = '12px';
+    const { root, body } = this.createStandardPanel('Trade', 560, 420, 2700, () => {
+      this.closeShop();
+    });
 
     const content = document.createElement('div');
+    content.style.flex = '1';
+    content.style.minHeight = '0';
     content.style.overflowY = 'auto';
-    content.style.maxHeight = '260px';
     content.style.whiteSpace = 'pre-line';
 
-    root.append(content);
+    body.append(content);
     appElement.append(root);
 
     this.shopRootElement = root;
@@ -1835,6 +1914,268 @@ export class WorldScene extends Phaser.Scene {
     if (this.shopRootElement) {
       this.shopRootElement.style.display = 'none';
     }
+  }
+
+  private initBankUi(): void {
+    const appElement = document.querySelector<HTMLDivElement>('#app');
+    if (!appElement) {
+      return;
+    }
+
+    const { root, body } = this.createStandardPanel('Bank', 700, 470, 2800, () => {
+      this.closeBank();
+    });
+
+    const columns = document.createElement('div');
+    columns.style.display = 'grid';
+    columns.style.gridTemplateColumns = '1fr 1fr';
+    columns.style.gap = '10px';
+    columns.style.flex = '1';
+    columns.style.minHeight = '0';
+
+    const inventoryPanel = document.createElement('div');
+    inventoryPanel.style.display = 'flex';
+    inventoryPanel.style.flexDirection = 'column';
+    inventoryPanel.style.gap = '6px';
+    inventoryPanel.style.minHeight = '0';
+
+    const inventoryHeader = document.createElement('div');
+    inventoryHeader.textContent = 'Inventory';
+    inventoryHeader.style.color = '#fff4c7';
+
+    const inventoryGrid = document.createElement('div');
+    inventoryGrid.style.display = 'grid';
+    inventoryGrid.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
+    inventoryGrid.style.gap = '4px';
+    inventoryGrid.style.alignContent = 'start';
+    inventoryGrid.style.overflowY = 'auto';
+    inventoryGrid.style.paddingRight = '2px';
+
+    inventoryPanel.append(inventoryHeader, inventoryGrid);
+
+    const bankPanel = document.createElement('div');
+    bankPanel.style.display = 'flex';
+    bankPanel.style.flexDirection = 'column';
+    bankPanel.style.gap = '6px';
+    bankPanel.style.minHeight = '0';
+
+    const bankHeader = document.createElement('div');
+    bankHeader.textContent = 'Bank storage';
+    bankHeader.style.color = '#fff4c7';
+
+    const bankGrid = document.createElement('div');
+    bankGrid.style.display = 'grid';
+    bankGrid.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
+    bankGrid.style.gap = '4px';
+    bankGrid.style.alignContent = 'start';
+    bankGrid.style.overflowY = 'auto';
+    bankGrid.style.paddingRight = '2px';
+
+    bankPanel.append(bankHeader, bankGrid);
+
+    columns.append(inventoryPanel, bankPanel);
+    body.append(columns);
+    appElement.append(root);
+
+    this.bankRootElement = root;
+    this.bankInventoryHeaderElement = inventoryHeader;
+    this.bankStorageHeaderElement = bankHeader;
+    this.bankInventoryGridElement = inventoryGrid;
+    this.bankStorageGridElement = bankGrid;
+  }
+
+  private openBank(inventory: InventoryState, bank: InventoryState): void {
+    if (this.localPlayerState) {
+      this.localPlayerState.inventory = inventory;
+    }
+
+    this.closeShop();
+    this.bankInventoryState = bank;
+    this.bankVisible = true;
+    this.lastRenderedBankSignature = null;
+
+    if (this.bankRootElement) {
+      this.bankRootElement.style.display = 'flex';
+    }
+
+    this.renderBankPanel();
+  }
+
+  private closeBank(): void {
+    this.bankVisible = false;
+    this.lastRenderedBankSignature = null;
+    this.hideBankQuantityPrompt();
+    if (this.bankRootElement) {
+      this.bankRootElement.style.display = 'none';
+    }
+  }
+
+  private showBankQuantityPrompt(
+    clientX: number,
+    clientY: number,
+    maxQuantity: number,
+    onConfirm: (quantity: number) => void,
+  ): void {
+    this.hideBankQuantityPrompt();
+
+    const root = document.createElement('div');
+    root.style.position = 'fixed';
+    root.style.left = `${clientX}px`;
+    root.style.top = `${clientY}px`;
+    root.style.background = 'rgba(0, 0, 0, 0.95)';
+    root.style.border = '1px solid rgba(183, 170, 129, 0.92)';
+    root.style.padding = '6px';
+    root.style.display = 'flex';
+    root.style.alignItems = 'center';
+    root.style.gap = '6px';
+    root.style.zIndex = '2900';
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = String(maxQuantity);
+    input.value = String(Math.min(1, maxQuantity));
+    input.style.width = '86px';
+    input.style.background = 'rgba(23, 23, 23, 0.95)';
+    input.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+    input.style.color = '#f0e5c1';
+    input.style.fontFamily = 'monospace';
+    input.style.fontSize = '12px';
+    input.style.padding = '2px 4px';
+
+    const moveButton = document.createElement('button');
+    moveButton.textContent = 'Move';
+    moveButton.style.fontFamily = 'monospace';
+    moveButton.style.fontSize = '11px';
+    moveButton.style.cursor = 'pointer';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.textContent = 'Cancel';
+    cancelButton.style.fontFamily = 'monospace';
+    cancelButton.style.fontSize = '11px';
+    cancelButton.style.cursor = 'pointer';
+
+    const confirm = () => {
+      const parsed = Math.floor(Number(input.value));
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        return;
+      }
+
+      onConfirm(Math.min(maxQuantity, parsed));
+      this.hideBankQuantityPrompt();
+    };
+
+    moveButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      confirm();
+    });
+
+    cancelButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.hideBankQuantityPrompt();
+    });
+
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        confirm();
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.hideBankQuantityPrompt();
+      }
+    });
+
+    root.append(input, moveButton, cancelButton);
+    document.body.appendChild(root);
+    this.bankQuantityPromptElement = root;
+    input.focus();
+    input.select();
+  }
+
+  private hideBankQuantityPrompt(): void {
+    if (!this.bankQuantityPromptElement) {
+      return;
+    }
+
+    this.bankQuantityPromptElement.remove();
+    this.bankQuantityPromptElement = null;
+  }
+
+  private createStandardPanel(
+    titleText: string,
+    widthPx: number,
+    heightPx: number,
+    zIndex: number,
+    onClose: () => void,
+  ): { root: HTMLDivElement; body: HTMLDivElement } {
+    const root = document.createElement('div');
+    this.applyStandardPanelShell(root, widthPx, heightPx, zIndex);
+
+    const header = this.createStandardPanelHeader(titleText, onClose);
+
+    const body = document.createElement('div');
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.flex = '1';
+    body.style.minHeight = '0';
+
+    root.append(header, body);
+    return { root, body };
+  }
+
+  private createStandardPanelHeader(titleText: string, onClose: () => void): HTMLDivElement {
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.justifyContent = 'space-between';
+    row.style.alignItems = 'center';
+
+    const title = document.createElement('div');
+    title.textContent = titleText;
+    title.style.color = '#fff4c7';
+    title.style.fontWeight = 'bold';
+
+    const closeButton = document.createElement('button');
+    closeButton.textContent = 'Close';
+    closeButton.style.fontFamily = 'monospace';
+    closeButton.style.fontSize = '11px';
+    closeButton.style.cursor = 'pointer';
+    closeButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    });
+
+    row.append(title, closeButton);
+    return row;
+  }
+
+  private applyStandardPanelShell(
+    root: HTMLDivElement,
+    widthPx: number,
+    heightPx: number,
+    zIndex: number,
+  ): void {
+    root.style.position = 'fixed';
+    root.style.left = '50%';
+    root.style.top = '50%';
+    root.style.transform = 'translate(-50%, -50%)';
+    root.style.width = `${widthPx}px`;
+    root.style.height = `${heightPx}px`;
+    root.style.background = 'rgba(0, 0, 0, 0.86)';
+    root.style.border = '1px solid rgba(183, 170, 129, 0.92)';
+    root.style.display = 'none';
+    root.style.flexDirection = 'column';
+    root.style.padding = '8px';
+    root.style.gap = '8px';
+    root.style.zIndex = String(zIndex);
+    root.style.pointerEvents = 'auto';
+    root.style.color = '#f0e5c1';
+    root.style.fontFamily = 'monospace';
+    root.style.fontSize = '12px';
   }
 
   private appendSystemChatMessage(text: string): void {
@@ -2037,6 +2378,7 @@ export class WorldScene extends Phaser.Scene {
     this.renderSkillsPanel();
     this.renderInventoryPanel();
     this.renderShopPanel();
+    this.renderBankPanel();
   }
 
   private renderSkillsPanel(): void {
@@ -2182,11 +2524,13 @@ export class WorldScene extends Phaser.Scene {
     const gold = this.localPlayerState.gold;
     const hp = this.localPlayerState.hp;
     const maxHp = this.localPlayerState.maxHp;
+    const slotSize = this.applySquareGridSizing(this.inventoryGridElement, 999);
 
     const inventorySignature = [
       hp,
       maxHp,
       gold,
+      slotSize,
       inventory.maxSlots,
       inventory.slots.map((slot) => `${slot.image || '/assets/items/unknown.svg'}:${slot.itemId}:${slot.quantity}`).join('|'),
     ].join('::');
@@ -2204,7 +2548,7 @@ export class WorldScene extends Phaser.Scene {
     for (let index = 0; index < totalSlots; index += 1) {
       const slot = inventory.slots[index];
       const cell = document.createElement('div');
-      cell.style.minHeight = '44px';
+      cell.style.height = '100%';
       cell.style.background = slot ? 'rgba(68, 62, 44, 0.92)' : 'rgba(30, 30, 30, 0.75)';
       cell.style.border = '1px solid rgba(150, 138, 102, 0.9)';
       cell.style.padding = '0';
@@ -2262,11 +2606,11 @@ export class WorldScene extends Phaser.Scene {
           icon.src = this.getInventoryItemIcon(slot.itemId);
         });
         icon.alt = slot.name;
-        icon.width = 44;
-        icon.height = 44;
+        icon.width = 1;
+        icon.height = 1;
         icon.style.width = '100%';
         icon.style.height = '100%';
-        icon.style.objectFit = 'cover';
+        icon.style.objectFit = 'contain';
         icon.style.display = 'block';
         icon.style.imageRendering = 'pixelated';
         icon.draggable = false;
@@ -2350,6 +2694,163 @@ export class WorldScene extends Phaser.Scene {
 
       this.inventoryGridElement.appendChild(cell);
     }
+  }
+
+  private renderBankPanel(): void {
+    if (
+      !this.bankVisible ||
+      !this.bankInventoryState ||
+      !this.localPlayerState ||
+      !this.bankInventoryHeaderElement ||
+      !this.bankStorageHeaderElement ||
+      !this.bankInventoryGridElement ||
+      !this.bankStorageGridElement
+    ) {
+      return;
+    }
+
+    const inventory = this.localPlayerState.inventory;
+    const bank = this.bankInventoryState;
+
+    const signature = [
+      this.applySquareGridSizing(this.bankInventoryGridElement, 74),
+      this.applySquareGridSizing(this.bankStorageGridElement, 74),
+      inventory.maxSlots,
+      inventory.slots.map((slot) => `${slot.itemId}:${slot.quantity}`).join('|'),
+      bank.maxSlots,
+      bank.slots.map((slot) => `${slot.itemId}:${slot.quantity}`).join('|'),
+    ].join('::');
+
+    if (this.lastRenderedBankSignature === signature) {
+      return;
+    }
+
+    this.lastRenderedBankSignature = signature;
+    this.bankInventoryHeaderElement.textContent = `Inventory (${inventory.slots.length}/${inventory.maxSlots})`;
+    this.bankStorageHeaderElement.textContent = `Bank (${bank.slots.length}/${bank.maxSlots})`;
+    this.bankInventoryGridElement.innerHTML = '';
+    this.bankStorageGridElement.innerHTML = '';
+
+    this.renderBankContainerGrid(this.bankInventoryGridElement, inventory, 'inventory', 'bank');
+    this.renderBankContainerGrid(this.bankStorageGridElement, bank, 'bank', 'inventory');
+  }
+
+  private renderBankContainerGrid(
+    gridElement: HTMLDivElement,
+    container: InventoryState,
+    from: 'inventory' | 'bank',
+    to: 'inventory' | 'bank',
+  ): void {
+    const totalSlots = Math.max(1, container.maxSlots);
+
+    for (let index = 0; index < totalSlots; index += 1) {
+      const slot = container.slots[index];
+      const cell = document.createElement('div');
+      cell.style.height = '100%';
+      cell.style.background = slot ? 'rgba(68, 62, 44, 0.92)' : 'rgba(30, 30, 30, 0.75)';
+      cell.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      cell.style.padding = '0';
+      cell.style.position = 'relative';
+      cell.style.overflow = 'hidden';
+      cell.style.userSelect = 'none';
+
+      if (slot) {
+        cell.style.cursor = 'pointer';
+        cell.title = slot.name;
+
+        const icon = document.createElement('img');
+        icon.src = slot.image;
+        icon.alt = slot.name;
+        icon.width = 1;
+        icon.height = 1;
+        icon.style.width = '100%';
+        icon.style.height = '100%';
+        icon.style.objectFit = 'contain';
+        icon.style.display = 'block';
+        icon.style.imageRendering = 'pixelated';
+        icon.draggable = false;
+        icon.addEventListener('error', () => {
+          icon.src = this.getInventoryItemIcon(slot.itemId);
+        });
+
+        const quantity = document.createElement('div');
+        quantity.textContent = slot.quantity > 1 ? `x${slot.quantity}` : '';
+        quantity.style.fontSize = '11px';
+        quantity.style.color = '#fff4c7';
+        quantity.style.textAlign = 'right';
+        quantity.style.position = 'absolute';
+        quantity.style.right = '2px';
+        quantity.style.top = '2px';
+        quantity.style.background = 'rgba(0, 0, 0, 0.6)';
+        quantity.style.padding = '0 2px';
+        quantity.style.lineHeight = '1.1';
+
+        const name = document.createElement('div');
+        name.textContent = slot.name;
+        name.style.position = 'absolute';
+        name.style.left = '0';
+        name.style.right = '0';
+        name.style.bottom = '0';
+        name.style.fontSize = '10px';
+        name.style.color = '#fff0c2';
+        name.style.background = 'rgba(0, 0, 0, 0.55)';
+        name.style.padding = '0 2px';
+        name.style.whiteSpace = 'nowrap';
+        name.style.overflow = 'hidden';
+        name.style.textOverflow = 'ellipsis';
+
+        cell.append(icon, quantity, name);
+
+        cell.addEventListener('pointerdown', (event) => {
+          if (event.button !== 0) {
+            return;
+          }
+
+          event.preventDefault();
+          event.stopPropagation();
+          this.multiplayerClient.sendBankTransfer(from, to, index, 1);
+        });
+
+        cell.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+
+          const options: ContextMenuOption[] = [
+            {
+              label: `Move X ${slot.name}`,
+              onSelect: () => {
+                this.showBankQuantityPrompt(event.clientX, event.clientY, slot.quantity, (quantityValue) => {
+                  this.multiplayerClient.sendBankTransfer(from, to, index, quantityValue);
+                });
+              },
+            },
+            {
+              label: `Move all ${slot.name}`,
+              onSelect: () => {
+                this.multiplayerClient.sendBankTransfer(from, to, index, slot.quantity);
+              },
+            },
+          ];
+
+          this.showContextMenuAt(event.clientX, event.clientY, options);
+        });
+      }
+
+      gridElement.appendChild(cell);
+    }
+  }
+
+  private applySquareGridSizing(gridElement: HTMLDivElement, maxSlotSize: number): number {
+    const columns = 4;
+    const gap = 4;
+    const minSlotSize = 40;
+    const availableWidth = Math.max(0, gridElement.clientWidth - gap * (columns - 1));
+    const slotSize = Math.max(minSlotSize, Math.min(maxSlotSize, Math.floor(availableWidth / columns)));
+
+    gridElement.style.gridTemplateColumns = `repeat(${columns}, ${slotSize}px)`;
+    gridElement.style.gridAutoRows = `${slotSize}px`;
+    gridElement.style.justifyContent = 'start';
+    return slotSize;
   }
 
   private clearInventoryDropHighlights(): void {
@@ -2437,18 +2938,6 @@ export class WorldScene extends Phaser.Scene {
       this.shopContentElement.appendChild(row);
     }
 
-    const closeButton = document.createElement('button');
-    closeButton.textContent = 'Close';
-    closeButton.style.fontFamily = 'monospace';
-    closeButton.style.fontSize = '11px';
-    closeButton.style.cursor = 'pointer';
-    closeButton.style.marginTop = '6px';
-    closeButton.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      this.closeShop();
-    });
-    this.shopContentElement.appendChild(closeButton);
   }
 
   private renderDebugHud(): void {
@@ -2540,6 +3029,16 @@ export class WorldScene extends Phaser.Scene {
     this.shopRootElement?.remove();
     this.shopRootElement = null;
     this.shopContentElement = null;
+    this.bankRootElement?.remove();
+    this.bankRootElement = null;
+    this.bankInventoryHeaderElement = null;
+    this.bankStorageHeaderElement = null;
+    this.bankInventoryGridElement = null;
+    this.bankStorageGridElement = null;
+    this.bankInventoryState = null;
+    this.bankVisible = false;
+    this.lastRenderedBankSignature = null;
+    this.hideBankQuantityPrompt();
     this.localHealthBar?.destroy();
     this.localHealthBar = null;
     this.localHealthBarVisibleUntil = 0;

@@ -1,3 +1,17 @@
+export interface InventorySlotState {
+  itemId: string;
+  quantity: number;
+  name: string;
+  stackable: boolean;
+  image: string;
+  examineText: string;
+}
+
+export interface InventoryState {
+  maxSlots: number;
+  slots: InventorySlotState[];
+}
+
 export interface RemotePlayerState {
   id: string;
   displayName: string;
@@ -38,17 +52,7 @@ export interface RemotePlayerState {
       level: number;
     };
   };
-  inventory: {
-    maxSlots: number;
-    slots: Array<{
-      itemId: string;
-      quantity: number;
-      name: string;
-      stackable: boolean;
-      image: string;
-      examineText: string;
-    }>;
-  };
+  inventory: InventoryState;
   lastActionText: string | null;
 }
 
@@ -94,7 +98,7 @@ export interface EnemyState {
 
 export interface NpcState {
   id: string;
-  type: 'shopkeeper';
+  type: 'shopkeeper' | 'bank_chest';
   name: string;
   tileX: number;
   tileY: number;
@@ -152,6 +156,12 @@ interface ShopOpenMessage {
   shopId: string;
 }
 
+interface BankOpenMessage {
+  type: 'bankOpen';
+  inventory: InventoryState;
+  bank: InventoryState;
+}
+
 interface PlayerJoinedMessage {
   type: 'playerJoined';
   player: RemotePlayerState;
@@ -173,7 +183,8 @@ type ServerMessage =
   | PlayerJoinedMessage
   | PlayerLeftMessage
   | ChatMessage
-  | ShopOpenMessage;
+  | ShopOpenMessage
+  | BankOpenMessage;
 
 function resolveMultiplayerUrl(): string {
   const configuredUrl = import.meta.env.VITE_MULTIPLAYER_URL as string | undefined;
@@ -223,6 +234,7 @@ export class MultiplayerClient {
     private readonly onPlayerLeft: (id: string) => void,
     private readonly onChatMessage: (message: ChatMessageState) => void,
     private readonly onShopOpen: (shopId: string) => void,
+    private readonly onBankOpen: (inventory: InventoryState, bank: InventoryState) => void,
   ) {}
 
   connect(): void {
@@ -293,6 +305,11 @@ export class MultiplayerClient {
 
       if (message.type === 'shopOpen') {
         this.onShopOpen(message.shopId);
+        return;
+      }
+
+      if (message.type === 'bankOpen') {
+        this.onBankOpen(message.inventory, message.bank);
       }
     });
   }
@@ -470,6 +487,42 @@ export class MultiplayerClient {
     this.socket.send(
       JSON.stringify({
         type: 'inventoryDrop',
+        slotIndex,
+        quantity,
+      }),
+    );
+  }
+
+  sendBankOpen(npcId: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'bankOpen',
+        npcId,
+      }),
+    );
+  }
+
+  sendBankTransfer(
+    from: 'inventory' | 'bank',
+    to: 'inventory' | 'bank',
+    slotIndex: number,
+    quantity: number,
+  ): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'bankTransfer',
+        from,
+        to,
         slotIndex,
         quantity,
       }),

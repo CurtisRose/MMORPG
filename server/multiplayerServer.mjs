@@ -26,6 +26,7 @@ const STRENGTH_XP_PER_HIT = 16;
 const CONSTITUTION_XP_PER_HIT = 6;
 const DEFENSE_XP_PER_HIT_TAKEN = 12;
 const INVENTORY_MAX_SLOTS = 28;
+const BANK_MAX_SLOTS = 112;
 const STARTING_GOLD = 150;
 const PLAYER_MAX_HP = 20;
 const PLAYER_ATTACK_RANGE_TILES = 1;
@@ -186,6 +187,14 @@ const NPC_DEFINITIONS = {
     tileY: 40,
     examineText: 'A friendly general store shopkeeper.',
     talkText: 'Hello there! Need supplies or want to sell your goods?',
+  },
+  bankChest: {
+    id: 'npc-bank-chest',
+    type: 'bank_chest',
+    name: 'Bank chest',
+    tileX: 42,
+    tileY: 38,
+    examineText: 'A sturdy chest for secure item storage.',
   },
 };
 
@@ -1002,9 +1011,9 @@ function createSkills() {
   };
 }
 
-function createInventory() {
+function createInventory(maxSlots = INVENTORY_MAX_SLOTS) {
   return {
-    maxSlots: INVENTORY_MAX_SLOTS,
+    maxSlots,
     slots: [],
   };
 }
@@ -1143,6 +1152,113 @@ function dropInventorySlot(player, slotIndex, quantity) {
   };
 }
 
+function toInventorySnapshot(inventory) {
+  return {
+    maxSlots: inventory.maxSlots,
+    slots: inventory.slots.map((slot) => ({
+      itemId: slot.itemId,
+      quantity: slot.quantity,
+      name: slot.name,
+      stackable: slot.stackable,
+      image: slot.image,
+      examineText: slot.examineText,
+    })),
+  };
+}
+
+function canAddItemToContainer(container, itemDefinition, quantity) {
+  if (quantity <= 0) {
+    return false;
+  }
+
+  if (itemDefinition.stackable) {
+    const existingSlot = container.slots.find((slot) => slot.itemId === itemDefinition.id);
+    if (existingSlot) {
+      return true;
+    }
+
+    return container.slots.length < container.maxSlots;
+  }
+
+  return container.slots.length + quantity <= container.maxSlots;
+}
+
+function addItemToContainer(container, itemDefinition, quantity) {
+  if (!canAddItemToContainer(container, itemDefinition, quantity)) {
+    return false;
+  }
+
+  if (itemDefinition.stackable) {
+    const existingSlot = container.slots.find((slot) => slot.itemId === itemDefinition.id);
+    if (existingSlot) {
+      existingSlot.quantity += quantity;
+      return true;
+    }
+
+    container.slots.push({
+      itemId: itemDefinition.id,
+      quantity,
+      name: itemDefinition.name,
+      stackable: itemDefinition.stackable,
+      image: itemDefinition.image,
+      examineText: itemDefinition.examineText,
+    });
+    return true;
+  }
+
+  for (let index = 0; index < quantity; index += 1) {
+    container.slots.push({
+      itemId: itemDefinition.id,
+      quantity: 1,
+      name: itemDefinition.name,
+      stackable: itemDefinition.stackable,
+      image: itemDefinition.image,
+      examineText: itemDefinition.examineText,
+    });
+  }
+
+  return true;
+}
+
+function transferContainerSlot(source, destination, slotIndex, quantity) {
+  const index = Math.floor(Number(slotIndex));
+  if (!Number.isFinite(index) || index < 0 || index >= source.slots.length) {
+    return null;
+  }
+
+  const sourceSlot = source.slots[index];
+  if (!sourceSlot) {
+    return null;
+  }
+
+  const itemDefinition = getItemDefinition(sourceSlot.itemId);
+  if (!itemDefinition) {
+    return null;
+  }
+
+  const requestedQuantity = Math.max(1, Math.floor(Number(quantity ?? 1)));
+  const transferQuantity = Math.min(requestedQuantity, sourceSlot.quantity);
+
+  if (!canAddItemToContainer(destination, itemDefinition, transferQuantity)) {
+    return null;
+  }
+
+  sourceSlot.quantity -= transferQuantity;
+  if (sourceSlot.quantity <= 0) {
+    source.slots.splice(index, 1);
+  }
+
+  const moved = addItemToContainer(destination, itemDefinition, transferQuantity);
+  if (!moved) {
+    return null;
+  }
+
+  return {
+    quantity: transferQuantity,
+    itemName: itemDefinition.name,
+  };
+}
+
 function getXpForLevel(level) {
   if (level <= 1) {
     return 0;
@@ -1204,20 +1320,25 @@ function createPlayer(id) {
     hp: PLAYER_MAX_HP,
     maxHp: PLAYER_MAX_HP,
     combatTargetEnemyId: null,
+    activeBankNpcId: null,
     gold: STARTING_GOLD,
     inventory: createInventory(),
+    bank: createInventory(BANK_MAX_SLOTS),
     skills: createSkills(),
     lastActionText: null,
     lastInputAt: Date.now(),
   };
 }
 
-function cloneInventory(inventory) {
+function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS) {
   const maxSlots = Number(inventory?.maxSlots);
   const slots = Array.isArray(inventory?.slots) ? inventory.slots : [];
+  const maxAllowedSlots = Math.max(defaultMaxSlots, BANK_MAX_SLOTS);
 
   return {
-    maxSlots: Number.isFinite(maxSlots) ? Math.max(1, Math.min(56, Math.floor(maxSlots))) : INVENTORY_MAX_SLOTS,
+    maxSlots: Number.isFinite(maxSlots)
+      ? Math.max(1, Math.min(maxAllowedSlots, Math.floor(maxSlots)))
+      : defaultMaxSlots,
     slots: slots
       .map((slot) => {
         const itemId = String(slot?.itemId ?? '');
@@ -1270,6 +1391,7 @@ function cloneSkills(skills) {
 
 function sanitizePlayerProfile(rawProfile) {
   const inventory = cloneInventory(rawProfile?.inventory);
+  const bank = cloneInventory(rawProfile?.bank, BANK_MAX_SLOTS);
   const skills = cloneSkills(rawProfile?.skills);
   skills.woodcutting.level = getLevelForXp(skills.woodcutting.xp);
   skills.mining.level = getLevelForXp(skills.mining.xp);
@@ -1290,6 +1412,7 @@ function sanitizePlayerProfile(rawProfile) {
     maxHp,
     gold: Math.max(0, Math.floor(Number(rawProfile?.gold ?? STARTING_GOLD))),
     inventory,
+    bank,
     skills,
   };
 }
@@ -1333,6 +1456,7 @@ function capturePlayerProfile(player) {
     maxHp: player.maxHp,
     gold: player.gold,
     inventory: player.inventory,
+    bank: player.bank,
     skills: player.skills,
   });
 }
@@ -1355,6 +1479,7 @@ function applyPersistedProfile(player, profile) {
   player.maxHp = safeProfile.maxHp;
   player.gold = safeProfile.gold;
   player.inventory = cloneInventory(safeProfile.inventory);
+  player.bank = cloneInventory(safeProfile.bank, BANK_MAX_SLOTS);
   player.skills = cloneSkills(safeProfile.skills);
   player.skills.woodcutting.level = getLevelForXp(player.skills.woodcutting.xp);
   player.skills.mining.level = getLevelForXp(player.skills.mining.xp);
@@ -1932,6 +2057,20 @@ function getShopByNpcId(npcId) {
   return Object.values(SHOP_DEFINITIONS).find((shop) => shop.npcId === npcId) ?? null;
 }
 
+function getBankNpcById(npcId) {
+  return NPC_DEFINITIONS.bankChest.id === npcId ? NPC_DEFINITIONS.bankChest : null;
+}
+
+function sendBankSnapshotToSocket(socket, player) {
+  socket.send(
+    JSON.stringify({
+      type: 'bankOpen',
+      inventory: toInventorySnapshot(player.inventory),
+      bank: toInventorySnapshot(player.bank),
+    }),
+  );
+}
+
 function getEnemySnapshot(now) {
   const enemies = {};
 
@@ -2034,15 +2173,7 @@ function makeSnapshot(now) {
         },
       },
       inventory: {
-        maxSlots: client.player.inventory.maxSlots,
-        slots: client.player.inventory.slots.map((slot) => ({
-          itemId: slot.itemId,
-          quantity: slot.quantity,
-          name: slot.name,
-          stackable: slot.stackable,
-          image: slot.image,
-          examineText: slot.examineText,
-        })),
+        ...toInventorySnapshot(client.player.inventory),
       },
       lastActionText: client.player.lastActionText,
     };
@@ -2536,15 +2667,7 @@ wss.on('connection', (socket, request) => {
         },
       },
       inventory: {
-        maxSlots: player.inventory.maxSlots,
-        slots: player.inventory.slots.map((slot) => ({
-          itemId: slot.itemId,
-          quantity: slot.quantity,
-          name: slot.name,
-          stackable: slot.stackable,
-          image: slot.image,
-          examineText: slot.examineText,
-        })),
+        ...toInventorySnapshot(player.inventory),
       },
       lastActionText: player.lastActionText,
     },
@@ -2563,6 +2686,7 @@ wss.on('connection', (socket, request) => {
         player.targetTileY = null;
         player.targetPath = [];
         player.combatTargetEnemyId = null;
+        player.activeBankNpcId = null;
 
         if (length === 0) {
           player.directionX = 0;
@@ -2601,6 +2725,7 @@ wss.on('connection', (socket, request) => {
         }
 
         player.combatTargetEnemyId = null;
+        player.activeBankNpcId = null;
 
         stepPlayerIfPossible(player, Date.now());
 
@@ -2622,6 +2747,7 @@ wss.on('connection', (socket, request) => {
         player.activeInteractionNodeId = nodeId;
         player.nextInteractionAt = 0;
         player.combatTargetEnemyId = null;
+        player.activeBankNpcId = null;
 
         if (!isWithinInteractionRange(player, node)) {
           const adjacentTile = findBestAdjacentTile(player, node);
@@ -2660,6 +2786,7 @@ wss.on('connection', (socket, request) => {
 
         player.activeInteractionNodeId = null;
         player.combatTargetEnemyId = enemy.id;
+        player.activeBankNpcId = null;
         player.nextCombatAt = 0;
         processPlayerCombat(player, Date.now());
 
@@ -2698,12 +2825,67 @@ wss.on('connection', (socket, request) => {
 
       if (message.type === 'npcTalk') {
         const npcId = String(message.npcId ?? '');
-        const npc = NPC_DEFINITIONS.shopkeeperBob.id === npcId ? NPC_DEFINITIONS.shopkeeperBob : null;
+        const npc = Object.values(NPC_DEFINITIONS).find((entry) => entry.id === npcId) ?? null;
         if (!npc || !isWithinNpcRange(player, npc)) {
           return;
         }
 
+        if (npc.type === 'bank_chest') {
+          sendChatToSocket(socket, `[${npc.name}] Your valuables are safe inside.`);
+          return;
+        }
+
         sendChatToSocket(socket, `[${npc.name}] ${npc.talkText}`);
+        return;
+      }
+
+      if (message.type === 'bankOpen') {
+        const npcId = String(message.npcId ?? '');
+        const bankNpc = getBankNpcById(npcId);
+        if (!bankNpc || !isWithinNpcRange(player, bankNpc)) {
+          sendChatToSocket(socket, '[Bank] You are too far away.');
+          return;
+        }
+
+        player.activeBankNpcId = bankNpc.id;
+        sendBankSnapshotToSocket(socket, player);
+        return;
+      }
+
+      if (message.type === 'bankTransfer') {
+        const from = message.from === 'bank' ? 'bank' : 'inventory';
+        const to = message.to === 'bank' ? 'bank' : 'inventory';
+        const slotIndex = message.slotIndex;
+        const requestedQuantity = Number(message.quantity ?? 1);
+        const quantity = Number.isFinite(requestedQuantity)
+          ? Math.max(1, Math.floor(requestedQuantity))
+          : 1;
+
+        if (from === to) {
+          return;
+        }
+
+        const activeBankNpc = player.activeBankNpcId
+          ? getBankNpcById(player.activeBankNpcId)
+          : null;
+        if (!activeBankNpc || !isWithinNpcRange(player, activeBankNpc)) {
+          player.activeBankNpcId = null;
+          sendChatToSocket(socket, '[Bank] Move closer to the bank chest.');
+          return;
+        }
+
+        const sourceContainer = from === 'bank' ? player.bank : player.inventory;
+        const destinationContainer = to === 'bank' ? player.bank : player.inventory;
+        const transferResult = transferContainerSlot(sourceContainer, destinationContainer, slotIndex, quantity);
+
+        if (!transferResult) {
+          sendChatToSocket(socket, '[Bank] Could not move that item.');
+          return;
+        }
+
+        const quantityText = transferResult.quantity > 1 ? ` x${transferResult.quantity}` : '';
+        player.lastActionText = `${from === 'inventory' ? 'Deposited' : 'Withdrew'} ${transferResult.itemName}${quantityText}`;
+        sendBankSnapshotToSocket(socket, player);
         return;
       }
 
