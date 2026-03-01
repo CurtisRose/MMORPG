@@ -44,6 +44,22 @@ type NpcPlacement = {
   tileY: number;
   examineText: string;
   talkText: string;
+  quest: NpcQuestPlacement | null;
+};
+
+type NpcQuestPlacement = {
+  id: string;
+  title: string;
+  missionText: string;
+  startText: string;
+  progressText: string;
+  completeText: string;
+  objectiveType: 'kill' | 'gather';
+  objectiveTargetId: string;
+  requiredCount: number;
+  rewardGold: number;
+  rewardItemId: string;
+  rewardItemQuantity: number;
 };
 
 type EditorChunkData = {
@@ -193,6 +209,8 @@ const state: {
   isPainting: boolean;
   pendingStrokeSnapshot: ChunkSnapshot | null;
   selectedTile: SelectedTile | null;
+  npcFormDirty: boolean;
+  npcFormSelectionKey: string | null;
 } = {
   data: createChunkData(0, 0),
   chunks: new Map<string, EditorChunkData>(),
@@ -211,6 +229,8 @@ const state: {
   isPainting: false,
   pendingStrokeSnapshot: null,
   selectedTile: null,
+  npcFormDirty: false,
+  npcFormSelectionKey: null,
 };
 
 state.chunks.set(state.activeChunkKey, state.data);
@@ -349,6 +369,71 @@ app.innerHTML = `
           <label for="selectionNpcType">NPC</label>
           <select id="selectionNpcType">${npcSelectOptions}</select>
         </div>
+        <div class="row">
+          <label for="selectionNpcName">Name</label>
+          <input id="selectionNpcName" type="text" maxlength="60" />
+        </div>
+        <div class="row">
+          <label for="selectionNpcExamine">Examine</label>
+          <textarea id="selectionNpcExamine" rows="2" maxlength="220"></textarea>
+        </div>
+        <div class="row">
+          <label for="selectionNpcTalk">Talk</label>
+          <textarea id="selectionNpcTalk" rows="2" maxlength="220"></textarea>
+        </div>
+        <div class="row">
+          <label for="selectionNpcQuestEnabled">Quest</label>
+          <input id="selectionNpcQuestEnabled" type="checkbox" />
+        </div>
+        <div id="selectionNpcQuestFields" style="display:none;">
+          <div class="row">
+            <label for="selectionNpcQuestTitle">Quest Title</label>
+            <input id="selectionNpcQuestTitle" type="text" maxlength="80" />
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestMission">Mission</label>
+            <textarea id="selectionNpcQuestMission" rows="2" maxlength="220"></textarea>
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestStart">Quest Start</label>
+            <textarea id="selectionNpcQuestStart" rows="2" maxlength="220"></textarea>
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestProgress">Quest Progress</label>
+            <textarea id="selectionNpcQuestProgress" rows="2" maxlength="220"></textarea>
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestEnd">Quest End</label>
+            <textarea id="selectionNpcQuestEnd" rows="2" maxlength="220"></textarea>
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestObjectiveType">Objective</label>
+            <select id="selectionNpcQuestObjectiveType">
+              <option value="kill">Kill</option>
+              <option value="gather">Gather</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestTarget">Target ID</label>
+            <input id="selectionNpcQuestTarget" type="text" maxlength="80" />
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestCount">Required</label>
+            <input id="selectionNpcQuestCount" type="number" min="1" step="1" value="1" />
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestRewardGold">Reward Gold</label>
+            <input id="selectionNpcQuestRewardGold" type="number" min="0" step="1" value="0" />
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestRewardItem">Reward Item</label>
+            <input id="selectionNpcQuestRewardItem" type="text" maxlength="80" />
+          </div>
+          <div class="row">
+            <label for="selectionNpcQuestRewardQty">Reward Qty</label>
+            <input id="selectionNpcQuestRewardQty" type="number" min="1" step="1" value="1" />
+          </div>
+        </div>
         <div class="row row-buttons"><button id="selectionNpcUpdate" class="secondary">Update NPC</button></div>
         <div class="row row-buttons"><button id="selectionNpcDelete" class="secondary">Delete NPC</button></div>
       </div>
@@ -443,6 +528,22 @@ const selectionObjectUpdateButton = requireElement<HTMLButtonElement>('#selectio
 const selectionObjectDeleteButton = requireElement<HTMLButtonElement>('#selectionObjectDelete', 'Selection object delete button not found');
 const selectionNpcRow = requireElement<HTMLDivElement>('#selectionNpcRow', 'Selection npc row not found');
 const selectionNpcTypeSelect = requireElement<HTMLSelectElement>('#selectionNpcType', 'Selection npc type not found');
+const selectionNpcNameInput = requireElement<HTMLInputElement>('#selectionNpcName', 'Selection npc name not found');
+const selectionNpcExamineInput = requireElement<HTMLTextAreaElement>('#selectionNpcExamine', 'Selection npc examine not found');
+const selectionNpcTalkInput = requireElement<HTMLTextAreaElement>('#selectionNpcTalk', 'Selection npc talk not found');
+const selectionNpcQuestEnabledInput = requireElement<HTMLInputElement>('#selectionNpcQuestEnabled', 'Selection npc quest enabled checkbox not found');
+const selectionNpcQuestFields = requireElement<HTMLDivElement>('#selectionNpcQuestFields', 'Selection npc quest fields not found');
+const selectionNpcQuestTitleInput = requireElement<HTMLInputElement>('#selectionNpcQuestTitle', 'Selection npc quest title not found');
+const selectionNpcQuestMissionInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestMission', 'Selection npc quest mission not found');
+const selectionNpcQuestStartInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestStart', 'Selection npc quest start not found');
+const selectionNpcQuestProgressInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestProgress', 'Selection npc quest progress not found');
+const selectionNpcQuestEndInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestEnd', 'Selection npc quest end not found');
+const selectionNpcQuestObjectiveTypeSelect = requireElement<HTMLSelectElement>('#selectionNpcQuestObjectiveType', 'Selection npc quest objective type not found');
+const selectionNpcQuestTargetInput = requireElement<HTMLInputElement>('#selectionNpcQuestTarget', 'Selection npc quest target not found');
+const selectionNpcQuestCountInput = requireElement<HTMLInputElement>('#selectionNpcQuestCount', 'Selection npc quest required count not found');
+const selectionNpcQuestRewardGoldInput = requireElement<HTMLInputElement>('#selectionNpcQuestRewardGold', 'Selection npc quest reward gold not found');
+const selectionNpcQuestRewardItemInput = requireElement<HTMLInputElement>('#selectionNpcQuestRewardItem', 'Selection npc quest reward item not found');
+const selectionNpcQuestRewardQtyInput = requireElement<HTMLInputElement>('#selectionNpcQuestRewardQty', 'Selection npc quest reward quantity not found');
 const selectionNpcUpdateButton = requireElement<HTMLButtonElement>('#selectionNpcUpdate', 'Selection npc update button not found');
 const selectionNpcDeleteButton = requireElement<HTMLButtonElement>('#selectionNpcDelete', 'Selection npc delete button not found');
 const hoverSummaryElement = requireElement<HTMLDivElement>('#hoverSummary', 'Hover summary not found');
@@ -658,13 +759,13 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
     ];
     npcs = [
       {
-        id: 'npc-shopkeeper-1', type: 'shopkeeper', name: 'Bob', tileX: 44, tileY: 36, examineText: 'A friendly general store shopkeeper.', talkText: 'Hello there! Need supplies or want to sell your goods?'
+        id: 'npc-shopkeeper-1', type: 'shopkeeper', name: 'Bob', tileX: 44, tileY: 36, examineText: 'A friendly general store shopkeeper.', talkText: 'Hello there! Need supplies or want to sell your goods?', quest: null
       },
       {
-        id: 'npc-bank_chest-1', type: 'bank_chest', name: 'Bank chest', tileX: 41, tileY: 36, examineText: 'A sturdy chest for secure item storage.', talkText: 'Your valuables are safe inside.'
+        id: 'npc-bank_chest-1', type: 'bank_chest', name: 'Bank chest', tileX: 41, tileY: 36, examineText: 'A sturdy chest for secure item storage.', talkText: 'Your valuables are safe inside.', quest: null
       },
       {
-        id: 'npc-villager-1', type: 'villager', name: 'Villager', tileX: 38, tileY: 38, examineText: 'A local villager going about their day.', talkText: "Lovely weather for skilling, isn't it?"
+        id: 'npc-villager-1', type: 'villager', name: 'Villager', tileX: 38, tileY: 38, examineText: 'A local villager going about their day.', talkText: "Lovely weather for skilling, isn't it?", quest: null
       },
     ];
     monsters = [
@@ -952,6 +1053,87 @@ function normalizePositiveInt(value: number, fallback: number): number {
   return Math.max(1, Math.floor(value));
 }
 
+function normalizeNonNegativeInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizeText(value: string, fallback = ''): string {
+  const trimmed = String(value ?? '').trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function setNpcQuestFieldsVisible(visible: boolean): void {
+  selectionNpcQuestFields.style.display = visible ? 'block' : 'none';
+}
+
+function getSelectedNpcFormKey(): string | null {
+  if (!state.selectedTile) {
+    return null;
+  }
+
+  const mapped = worldToChunkCoords(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
+  return `${mapped.chunkX},${mapped.chunkY}:${mapped.localTileX},${mapped.localTileY}`;
+}
+
+function markNpcFormDirty(): void {
+  if (!state.selectedTile) {
+    return;
+  }
+
+  state.npcFormDirty = true;
+  state.npcFormSelectionKey = getSelectedNpcFormKey();
+}
+
+function populateNpcQuestInputs(quest: NpcQuestPlacement | null): void {
+  const hasQuest = Boolean(quest);
+  selectionNpcQuestEnabledInput.checked = hasQuest;
+  setNpcQuestFieldsVisible(hasQuest);
+
+  selectionNpcQuestTitleInput.value = quest?.title ?? '';
+  selectionNpcQuestMissionInput.value = quest?.missionText ?? '';
+  selectionNpcQuestStartInput.value = quest?.startText ?? '';
+  selectionNpcQuestProgressInput.value = quest?.progressText ?? '';
+  selectionNpcQuestEndInput.value = quest?.completeText ?? '';
+  selectionNpcQuestObjectiveTypeSelect.value = quest?.objectiveType ?? 'kill';
+  selectionNpcQuestTargetInput.value = quest?.objectiveTargetId ?? '';
+  selectionNpcQuestCountInput.value = String(quest?.requiredCount ?? 1);
+  selectionNpcQuestRewardGoldInput.value = String(quest?.rewardGold ?? 0);
+  selectionNpcQuestRewardItemInput.value = quest?.rewardItemId ?? '';
+  selectionNpcQuestRewardQtyInput.value = String(quest?.rewardItemQuantity ?? 1);
+}
+
+function buildQuestFromSelectionInputs(fallbackQuestId: string): NpcQuestPlacement | null {
+  if (!selectionNpcQuestEnabledInput.checked) {
+    return null;
+  }
+
+  const title = normalizeText(selectionNpcQuestTitleInput.value);
+  const objectiveTargetId = normalizeText(selectionNpcQuestTargetInput.value);
+  if (!title || !objectiveTargetId) {
+    return null;
+  }
+
+  const rewardItemId = normalizeText(selectionNpcQuestRewardItemInput.value);
+  return {
+    id: normalizeText(fallbackQuestId, `quest-${Date.now()}`),
+    title,
+    missionText: normalizeText(selectionNpcQuestMissionInput.value, title),
+    startText: normalizeText(selectionNpcQuestStartInput.value, `Can you help with ${title}?`),
+    progressText: normalizeText(selectionNpcQuestProgressInput.value, 'Keep going, you are making progress.'),
+    completeText: normalizeText(selectionNpcQuestEndInput.value, 'Excellent work. Here is your reward.'),
+    objectiveType: selectionNpcQuestObjectiveTypeSelect.value === 'gather' ? 'gather' : 'kill',
+    objectiveTargetId,
+    requiredCount: normalizePositiveInt(Number(selectionNpcQuestCountInput.value), 1),
+    rewardGold: normalizeNonNegativeInt(Number(selectionNpcQuestRewardGoldInput.value), 0),
+    rewardItemId,
+    rewardItemQuantity: normalizePositiveInt(Number(selectionNpcQuestRewardQtyInput.value), 1),
+  };
+}
+
 function applyImportedChunkData(chunk: EditorChunkData): void {
   const targetKey = getChunkKey(chunk.chunkX, chunk.chunkY);
   if (!state.histories.has(targetKey)) {
@@ -1080,6 +1262,7 @@ function updateSelectionPanel(): void {
     `Monster: ${monster ? `${monster.minionTypeId} (T${monster.tier})` : 'None'}`,
     `Object: ${object ? object.objectTypeId : 'None'}`,
     `NPC: ${npc ? `${npc.type} (${npc.name})` : 'None'}`,
+    `Quest: ${npc?.quest ? npc.quest.title : 'None'}`,
   ].join('\n');
 
   if (state.layer === 'terrain') {
@@ -1115,7 +1298,17 @@ function updateSelectionPanel(): void {
     selectionObjectTypeSelect.value = object?.objectTypeId ?? state.selectedObjectTypeId;
   } else if (state.layer === 'npcs') {
     selectionNpcRow.style.display = 'block';
-    selectionNpcTypeSelect.value = npc?.type ?? state.selectedNpcTypeId;
+    const selectionKey = `${mapped.chunkX},${mapped.chunkY}:${mapped.localTileX},${mapped.localTileY}`;
+    const shouldHydrateNpcForm = !state.npcFormDirty || state.npcFormSelectionKey !== selectionKey;
+    if (shouldHydrateNpcForm) {
+      selectionNpcTypeSelect.value = npc?.type ?? state.selectedNpcTypeId;
+      selectionNpcNameInput.value = npc?.name ?? '';
+      selectionNpcExamineInput.value = npc?.examineText ?? '';
+      selectionNpcTalkInput.value = npc?.talkText ?? '';
+      populateNpcQuestInputs(npc?.quest ?? null);
+      state.npcFormSelectionKey = selectionKey;
+      state.npcFormDirty = false;
+    }
   }
 }
 
@@ -1137,7 +1330,7 @@ function getHoverDetails(worldTileX: number, worldTileY: number): string {
     parts.push(`Object: ${object.objectTypeId}${object.blocksMovement ? ' [blocks]' : ''}`);
   }
   if (npc) {
-    parts.push(`NPC: ${npc.name} (${npc.type})`);
+    parts.push(`NPC: ${npc.name} (${npc.type})${npc.quest ? ` [Quest: ${npc.quest.title}]` : ''}`);
   }
 
   if (parts.length === 0) {
@@ -1152,11 +1345,17 @@ function setSelectedTile(tileX: number, tileY: number): void {
     worldTileX: tileX,
     worldTileY: tileY,
   };
+  state.npcFormDirty = false;
+  state.npcFormSelectionKey = getSelectedNpcFormKey();
   drawGrid();
   updateStatus(tileX, tileY);
 }
 
-function updateStatus(tileX?: number, tileY?: number): void {
+function updateStatus(
+  tileX?: number,
+  tileY?: number,
+  options: { refreshSelectionPanel?: boolean } = {},
+): void {
   const focusedTileText =
     typeof tileX === 'number' && typeof tileY === 'number'
       ? `World: (${tileX}, ${tileY})`
@@ -1179,7 +1378,9 @@ function updateStatus(tileX?: number, tileY?: number): void {
       : 'Hover: -';
 
   updateChunkSummary();
-  updateSelectionPanel();
+  if (options.refreshSelectionPanel !== false) {
+    updateSelectionPanel();
+  }
 }
 
 function getTileColor(tileId: number): string {
@@ -1524,6 +1725,7 @@ function placeAt(tileX: number, tileY: number, erase: boolean): void {
           tileY: localTileY,
           examineText: npcType.examineText,
           talkText: npcType.talkText,
+          quest: null,
         });
       }
     }
@@ -1743,7 +1945,7 @@ canvas.addEventListener('mousemove', (event) => {
     return;
   }
 
-  updateStatus(tile.worldTileX, tile.worldTileY);
+  updateStatus(tile.worldTileX, tile.worldTileY, { refreshSelectionPanel: false });
 
   if (state.toolMode !== 'paint') {
     return;
@@ -1817,6 +2019,27 @@ objectTypeSelect.addEventListener('change', () => {
 npcTypeSelect.addEventListener('change', () => {
   state.selectedNpcTypeId = npcTypeSelect.value;
 });
+
+selectionNpcQuestEnabledInput.addEventListener('change', () => {
+  markNpcFormDirty();
+  setNpcQuestFieldsVisible(selectionNpcQuestEnabledInput.checked);
+});
+
+selectionNpcTypeSelect.addEventListener('change', markNpcFormDirty);
+selectionNpcNameInput.addEventListener('input', markNpcFormDirty);
+selectionNpcExamineInput.addEventListener('input', markNpcFormDirty);
+selectionNpcTalkInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestTitleInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestMissionInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestStartInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestProgressInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestEndInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestObjectiveTypeSelect.addEventListener('change', markNpcFormDirty);
+selectionNpcQuestTargetInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestCountInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestRewardGoldInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestRewardItemInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestRewardQtyInput.addEventListener('input', markNpcFormDirty);
 
 monsterTierInput.addEventListener('change', () => {
   const value = Number(monsterTierInput.value);
@@ -1990,20 +2213,30 @@ selectionNpcUpdateButton.addEventListener('click', () => {
   const mapped = ensureChunkVisibleByWorldTile(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
   const existing = getNpcAt(mapped.localTileX, mapped.localTileY);
   const npcType = NPC_TYPES.find((entry) => entry.id === selectionNpcTypeSelect.value) ?? NPC_TYPES[0];
+  const existingNpcId = existing?.id ?? nextNpcId(npcType.id);
+  const existingQuestId = existing?.quest?.id ?? `quest-${existingNpcId}`;
+  const quest = buildQuestFromSelectionInputs(existingQuestId);
+  const npcName = normalizeText(selectionNpcNameInput.value, npcType.defaultName);
+  const npcExamineText = normalizeText(selectionNpcExamineInput.value, npcType.examineText);
+  const npcTalkText = normalizeText(selectionNpcTalkInput.value, npcType.talkText);
 
   mutateActiveChunk(() => {
     removeNpcAt(mapped.localTileX, mapped.localTileY);
     state.data.npcs.push({
-      id: existing?.id ?? nextNpcId(npcType.id),
+      id: existingNpcId,
       type: npcType.id,
-      name: npcType.defaultName,
+      name: npcName,
       tileX: mapped.localTileX,
       tileY: mapped.localTileY,
-      examineText: npcType.examineText,
-      talkText: npcType.talkText,
+      examineText: npcExamineText,
+      talkText: npcTalkText,
+      quest,
     });
     drawGrid();
   });
+
+  state.npcFormDirty = false;
+  state.npcFormSelectionKey = getSelectedNpcFormKey();
 });
 
 selectionNpcDeleteButton.addEventListener('click', () => {
@@ -2016,6 +2249,9 @@ selectionNpcDeleteButton.addEventListener('click', () => {
     removeNpcAt(mapped.localTileX, mapped.localTileY);
     drawGrid();
   });
+
+  state.npcFormDirty = false;
+  state.npcFormSelectionKey = getSelectedNpcFormKey();
 });
 
 async function didServerPersistMap(expectedMap: unknown): Promise<boolean> {
