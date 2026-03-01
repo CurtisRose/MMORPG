@@ -10,24 +10,40 @@ Next Roadmap (in order)
 - [x] Add per-minion tier scaling for minions.
 
 3) Ground item drops
-- [ ] Drop monster loot to world tiles instead of direct inventory award.
-- [ ] Drop player-discarded items to world tiles instead of deleting.
-- [ ] Add ground-item pickup interaction and inventory-capacity handling.
-- [ ] Add ownership visibility window: only owner sees item for first 60s.
-- [ ] Open visibility to all players after 60s if still on ground.
-- [ ] Despawn ground items after 120s total lifetime.
+- [x] Drop monster loot to world tiles instead of direct inventory award.
+- [x] Drop player-discarded items to world tiles instead of deleting.
+- [x] Add ground-item pickup interaction and inventory-capacity handling.
+- [x] Add ownership visibility window: only owner sees item for first 60s.
+- [x] Open visibility to all players after 60s if still on ground.
+- [x] Despawn ground items after 120s total lifetime.
 
-4) Quest / task loop
+4) Map Making
+- [x] Add browser-based map editor page with paint-like placement workflow.
+- [x] Add tile palette (grass/sand/water/etc.) and brush placement tools.
+- [x] Add placement palettes for monsters and resources.
+- [x] Add erase tool and simple undo/redo actions.
+- [x] Add select tool for tile/entity inspection.
+- [x] Add save/load for map data to JSON files.
+- [x] Add chunk coordinate workflow with per-chunk load/export.
+
+5) Player login + account security
+- [ ] Add account registration/login (email or username + password).
+- [ ] Store passwords with salted hash (Argon2/bcrypt), never plain text.
+- [ ] Add signed session/auth token flow with server-side validation.
+- [ ] Bind profile saves/loads to authenticated account IDs only.
+- [ ] Add basic anti-tamper controls (request validation + rate limiting).
+
+6) Quest / task loop
 - [ ] Add basic kill tasks.
 - [ ] Add basic gather tasks.
 - [ ] Add coin/xp/gear reward hooks.
 
-5) Economy balancing
+7) Economy balancing
 - [ ] Re-tune buy/sell pricing curves.
 - [ ] Add at least one coin sink (repair, fees, etc.).
 - [ ] Add economy telemetry counters for tuning.
 
-6) Save/profile hardening
+8) Save/profile hardening
 - [ ] Add profile schema version field.
 - [ ] Add migration pipeline for old profiles.
 - [ ] Add migration safety/fallback logging.

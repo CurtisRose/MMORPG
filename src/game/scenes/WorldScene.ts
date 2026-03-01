@@ -8,12 +8,14 @@ import {
   type ChatMessageState,
   type EquipmentSlotName,
   type EnemyState,
+  type GroundItemState,
   type ItemGearStats,
   type InventoryState,
   MultiplayerClient,
   type NpcState,
   type RemotePlayerState,
   type ShopState,
+  type WorldObjectState,
   type WorldNodeState,
   type WorldSnapshot,
 } from '../net/MultiplayerClient';
@@ -36,7 +38,132 @@ const HEALTH_BAR_VISIBLE_MS = 3000;
 const HEALTH_BAR_WIDTH = 26;
 const HEALTH_BAR_HEIGHT = 4;
 const DEBUG_HUD_VISIBLE_BY_DEFAULT =
-  String(import.meta.env.VITE_DEBUG_HUD ?? 'true').toLowerCase() === 'true';
+  String(import.meta.env.VITE_DEBUG_HUD ?? 'false').toLowerCase() === 'true';
+const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
+
+function isValidTerrainGrid(value: unknown): value is number[][] {
+  return Array.isArray(value)
+    && value.length === MAP_HEIGHT_TILES
+    && value.every(
+      (row) => Array.isArray(row)
+        && row.length === MAP_WIDTH_TILES
+        && row.every((tile) => Number.isFinite(tile)),
+    );
+}
+
+function toTerrainGrid(source: number[][]): number[][] {
+  return source.map((row) => row.map((tile) => Number(tile)));
+}
+
+function createFilledTerrainGrid(width: number, height: number, fill: number): number[][] {
+  return Array.from({ length: height }, () => Array.from({ length: width }, () => fill));
+}
+
+function isRectangularTerrainGrid(value: unknown): value is number[][] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return false;
+  }
+
+  const width = Array.isArray(value[0]) ? value[0].length : 0;
+  if (width <= 0) {
+    return false;
+  }
+
+  return value.every(
+    (row) => Array.isArray(row)
+      && row.length === width
+      && row.every((tile) => Number.isFinite(tile)),
+  );
+}
+
+function extractTerrainFromWorldMap(raw: unknown): number[][] | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const mapData = raw as {
+    terrain?: unknown;
+    chunkWidth?: unknown;
+    chunkHeight?: unknown;
+    chunks?: Array<{
+      chunkX?: number;
+      chunkY?: number;
+      terrain?: unknown;
+    }>;
+  };
+
+  if (isRectangularTerrainGrid(mapData.terrain)) {
+    return toTerrainGrid(mapData.terrain);
+  }
+
+  if (isValidTerrainGrid(mapData.terrain)) {
+    return toTerrainGrid(mapData.terrain);
+  }
+
+  if (!Array.isArray(mapData.chunks)) {
+    return null;
+  }
+
+  const chunkWidth = Math.max(1, Math.floor(Number(mapData.chunkWidth ?? MAP_WIDTH_TILES)));
+  const chunkHeight = Math.max(1, Math.floor(Number(mapData.chunkHeight ?? MAP_HEIGHT_TILES)));
+
+  const validChunks = mapData.chunks
+    .map((entry) => {
+      const chunkX = Number(entry?.chunkX);
+      const chunkY = Number(entry?.chunkY);
+      const terrain = entry?.terrain;
+
+      const isChunkTerrainValid = Array.isArray(terrain)
+        && terrain.length === chunkHeight
+        && terrain.every((row) => Array.isArray(row) && row.length === chunkWidth);
+
+      if (!Number.isFinite(chunkX) || !Number.isFinite(chunkY) || !isChunkTerrainValid) {
+        return null;
+      }
+
+      return {
+        chunkX: Math.trunc(chunkX),
+        chunkY: Math.trunc(chunkY),
+        terrain: terrain as number[][],
+      };
+    })
+    .filter((entry): entry is { chunkX: number; chunkY: number; terrain: number[][] } => entry !== null);
+
+  if (validChunks.length > 0) {
+    const minChunkX = Math.min(...validChunks.map((entry) => entry.chunkX));
+    const maxChunkX = Math.max(...validChunks.map((entry) => entry.chunkX));
+    const minChunkY = Math.min(...validChunks.map((entry) => entry.chunkY));
+    const maxChunkY = Math.max(...validChunks.map((entry) => entry.chunkY));
+    const worldWidthTiles = (maxChunkX - minChunkX + 1) * chunkWidth;
+    const worldHeightTiles = (maxChunkY - minChunkY + 1) * chunkHeight;
+    const stitchedTerrain = createFilledTerrainGrid(worldWidthTiles, worldHeightTiles, 0);
+
+    for (const chunk of validChunks) {
+      const tileOffsetX = (chunk.chunkX - minChunkX) * chunkWidth;
+      const tileOffsetY = (chunk.chunkY - minChunkY) * chunkHeight;
+
+      for (let localY = 0; localY < chunkHeight; localY += 1) {
+        for (let localX = 0; localX < chunkWidth; localX += 1) {
+          stitchedTerrain[tileOffsetY + localY][tileOffsetX + localX] = Number(chunk.terrain[localY][localX]);
+        }
+      }
+    }
+
+    return stitchedTerrain;
+  }
+
+  const preferredChunk = mapData.chunks.find((entry) => entry?.chunkX === 0 && entry?.chunkY === 0);
+  if (preferredChunk && isValidTerrainGrid(preferredChunk.terrain)) {
+    return toTerrainGrid(preferredChunk.terrain);
+  }
+
+  const firstValidChunk = mapData.chunks.find((entry) => isValidTerrainGrid(entry?.terrain));
+  if (firstValidChunk && isValidTerrainGrid(firstValidChunk.terrain)) {
+    return toTerrainGrid(firstValidChunk.terrain);
+  }
+
+  return null;
+}
 
 interface RemotePlayerVisual {
   state: RemotePlayerState;
@@ -60,6 +187,11 @@ interface NpcVisual {
   sprite: Phaser.GameObjects.Sprite;
 }
 
+interface WorldObjectVisual {
+  state: WorldObjectState;
+  sprite: Phaser.GameObjects.Sprite;
+}
+
 interface EnemyVisual {
   state: EnemyState;
   sprite: Phaser.GameObjects.Sprite;
@@ -68,6 +200,12 @@ interface EnemyVisual {
   pathWaypoints: Phaser.Math.Vector2[];
   healthBar: Phaser.GameObjects.Graphics;
   healthBarVisibleUntil: number;
+}
+
+interface GroundItemVisual {
+  state: GroundItemState;
+  sprite: Phaser.GameObjects.Image;
+  quantityText: Phaser.GameObjects.Text;
 }
 
 interface ContextMenuOption {
@@ -93,21 +231,27 @@ interface SkillLevelSnapshot {
 export class WorldScene extends Phaser.Scene {
   private player!: Phaser.GameObjects.Sprite;
   private terrainData: number[][] = [];
+  private worldWidthTiles = MAP_WIDTH_TILES;
+  private worldHeightTiles = MAP_HEIGHT_TILES;
   private localPlayerId: string | null = null;
   private localPlayerState: RemotePlayerState | null = null;
   private localTilePosition: Phaser.Math.Vector2 | null = null;
   private localRenderedTilePosition: Phaser.Math.Vector2 | null = null;
   private multiplayerClient!: MultiplayerClient;
-  private debugHudText!: Phaser.GameObjects.Text;
+  private debugHudRootElement: HTMLDivElement | null = null;
+  private debugHudLogElement: HTMLDivElement | null = null;
   private actionStatusText!: Phaser.GameObjects.Text;
   private debugHudVisible = DEBUG_HUD_VISIBLE_BY_DEFAULT;
-  private debugToggleKey!: Phaser.Input.Keyboard.Key;
+  private debugToggleKey: Phaser.Input.Keyboard.Key | null = null;
   private lastStateUpdateAt: number | null = null;
   private snapshotCount = 0;
   private remotePlayers = new Map<string, RemotePlayerVisual>();
   private worldNodes = new Map<string, WorldNodeVisual>();
   private worldNpcs = new Map<string, NpcVisual>();
+  private worldObjects = new Map<string, WorldObjectVisual>();
   private worldEnemies = new Map<string, EnemyVisual>();
+  private worldGroundItems = new Map<string, GroundItemVisual>();
+  private pendingGroundItemTextureLoads = new Set<string>();
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
   private contextMenuCloseListener: ((event: PointerEvent) => void) | null = null;
@@ -153,15 +297,19 @@ export class WorldScene extends Phaser.Scene {
   private timeSinceInputSendMs = 0;
   private lastSentDirection = new Phaser.Math.Vector2(0, 0);
   private localPathWaypoints: Phaser.Math.Vector2[] = [];
+  private sceneReady = false;
 
   constructor() {
     super('world');
   }
 
-  create(): void {
+  async create(): Promise<void> {
+    this.sceneReady = false;
     this.input.mouse?.disableContextMenu();
 
-    this.terrainData = generateTerrainData();
+    this.terrainData = await this.loadTerrainData();
+    this.worldHeightTiles = this.terrainData.length;
+    this.worldWidthTiles = this.terrainData[0]?.length ?? MAP_WIDTH_TILES;
     const terrainMap = this.make.tilemap({
       data: this.terrainData,
       tileWidth: TILE_SIZE,
@@ -189,8 +337,8 @@ export class WorldScene extends Phaser.Scene {
     terrainLayer.setCollision([WATER_TILE_ID]);
 
     this.player = this.add.sprite(
-      MAP_WIDTH_TILES * TILE_SIZE * 0.5,
-      MAP_HEIGHT_TILES * TILE_SIZE * 0.5,
+      this.worldWidthTiles * TILE_SIZE * 0.5,
+      this.worldHeightTiles * TILE_SIZE * 0.5,
       PLAYER_TEXTURE_KEY,
     );
 
@@ -208,8 +356,8 @@ export class WorldScene extends Phaser.Scene {
     this.cameras.main.setBounds(
       0,
       0,
-      MAP_WIDTH_TILES * TILE_SIZE,
-      MAP_HEIGHT_TILES * TILE_SIZE,
+      this.worldWidthTiles * TILE_SIZE,
+      this.worldHeightTiles * TILE_SIZE,
     );
     this.cameras.main.startFollow(this.player, true, 0.2, 0.2);
     this.cameras.main.setZoom(2);
@@ -220,19 +368,9 @@ export class WorldScene extends Phaser.Scene {
       throw new Error('Keyboard input is unavailable.');
     }
 
-    this.debugToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
 
-    this.debugHudText = this.add
-      .text(8, 8, '', {
-        fontFamily: 'monospace',
-        fontSize: '13px',
-        color: '#d6ecff',
-        backgroundColor: '#00000099',
-        padding: { x: 8, y: 6 },
-      })
-      .setDepth(1000)
-      .setScrollFactor(0)
-      .setVisible(this.debugHudVisible);
+    this.debugToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
+    this.initDebugHudPanel();
 
     this.actionStatusText = this.add
       .text(8, 116, '', {
@@ -280,15 +418,42 @@ export class WorldScene extends Phaser.Scene {
       (inventory, bank) => {
         this.openBank(inventory, bank);
       },
+      (reason) => {
+        this.scene.start('splash', { errorMessage: reason });
+      },
     );
 
     this.multiplayerClient.connect();
+    this.sceneReady = true;
 
     this.events.on(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this);
     this.events.on(Phaser.Scenes.Events.DESTROY, this.shutdown, this);
   }
 
+  private async loadTerrainData(): Promise<number[][]> {
+    try {
+      const response = await fetch(WORLD_MAP_URL, { cache: 'no-store' });
+      if (!response.ok) {
+        return generateTerrainData();
+      }
+
+      const raw = await response.json() as unknown;
+      const terrain = extractTerrainFromWorldMap(raw);
+      if (!terrain) {
+        return generateTerrainData();
+      }
+
+      return terrain;
+    } catch {
+      return generateTerrainData();
+    }
+  }
+
   update(_: number, delta: number): void {
+    if (!this.sceneReady) {
+      return;
+    }
+
     const directionX = 0;
     const directionY = 0;
 
@@ -298,9 +463,11 @@ export class WorldScene extends Phaser.Scene {
       this.timeSinceInputSendMs = 0;
     }
 
-    if (Phaser.Input.Keyboard.JustDown(this.debugToggleKey)) {
+    if (this.debugToggleKey && Phaser.Input.Keyboard.JustDown(this.debugToggleKey)) {
       this.debugHudVisible = !this.debugHudVisible;
-      this.debugHudText.setVisible(this.debugHudVisible);
+      if (this.debugHudRootElement) {
+        this.debugHudRootElement.style.display = this.debugHudVisible ? 'flex' : 'none';
+      }
     }
 
     this.updatePlayerSmoothing(delta);
@@ -680,8 +847,8 @@ export class WorldScene extends Phaser.Scene {
     return playerState.targetPath.map(
       (step) =>
         new Phaser.Math.Vector2(
-          Phaser.Math.Clamp(Math.round(step.tileX), 0, MAP_WIDTH_TILES - 1),
-          Phaser.Math.Clamp(Math.round(step.tileY), 0, MAP_HEIGHT_TILES - 1),
+          Phaser.Math.Clamp(Math.round(step.tileX), 0, this.worldWidthTiles - 1),
+          Phaser.Math.Clamp(Math.round(step.tileY), 0, this.worldHeightTiles - 1),
         ),
     );
   }
@@ -694,8 +861,8 @@ export class WorldScene extends Phaser.Scene {
     return enemyState.targetPath.map(
       (step) =>
         new Phaser.Math.Vector2(
-          Phaser.Math.Clamp(Math.round(step.tileX), 0, MAP_WIDTH_TILES - 1),
-          Phaser.Math.Clamp(Math.round(step.tileY), 0, MAP_HEIGHT_TILES - 1),
+          Phaser.Math.Clamp(Math.round(step.tileX), 0, this.worldWidthTiles - 1),
+          Phaser.Math.Clamp(Math.round(step.tileY), 0, this.worldHeightTiles - 1),
         ),
     );
   }
@@ -728,7 +895,9 @@ export class WorldScene extends Phaser.Scene {
     this.applyPlayerSnapshot(snapshot.players);
     this.applyNodeSnapshot(snapshot.nodes);
     this.applyNpcSnapshot(snapshot.npcs);
+    this.applyObjectSnapshot(snapshot.objects ?? {});
     this.applyEnemySnapshot(snapshot.enemies);
+    this.applyGroundItemSnapshot(snapshot.groundItems ?? {});
     this.shopDefinitions = snapshot.shops;
 
     this.processPendingNpcAction();
@@ -950,6 +1119,66 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
+  private applyObjectSnapshot(objects: Record<string, WorldObjectState>): void {
+    for (const objectState of Object.values(objects)) {
+      const position = this.getWorldPositionFromTile(objectState.tileX, objectState.tileY);
+
+      const existingObject = this.worldObjects.get(objectState.id);
+      if (existingObject) {
+        existingObject.state = objectState;
+        existingObject.sprite.setPosition(position.x, position.y);
+        this.styleObjectSprite(existingObject.sprite, objectState);
+        continue;
+      }
+
+      const objectSprite = this.add
+        .sprite(position.x, position.y, ROCK_TEXTURE_KEY)
+        .setDepth(1.8);
+
+      this.styleObjectSprite(objectSprite, objectState);
+      this.worldObjects.set(objectState.id, {
+        state: objectState,
+        sprite: objectSprite,
+      });
+    }
+
+    const visibleObjectIds = new Set(Object.keys(objects));
+    for (const [objectId, objectVisual] of this.worldObjects.entries()) {
+      if (visibleObjectIds.has(objectId)) {
+        continue;
+      }
+
+      objectVisual.sprite.destroy();
+      this.worldObjects.delete(objectId);
+    }
+  }
+
+  private styleObjectSprite(sprite: Phaser.GameObjects.Sprite, objectState: WorldObjectState): void {
+    sprite.clearTint();
+
+    if (objectState.objectTypeId === 'signpost') {
+      sprite.setTexture(TREE_TEXTURE_KEY).setTint(0xc9a45d);
+      return;
+    }
+
+    if (objectState.objectTypeId === 'fence') {
+      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x8e6b45);
+      return;
+    }
+
+    if (objectState.objectTypeId === 'bank_building') {
+      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x8a8f95);
+      return;
+    }
+
+    if (objectState.objectTypeId === 'general_store_building') {
+      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x7e6b52);
+      return;
+    }
+
+    sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x9b9b9b);
+  }
+
   private applyEnemySnapshot(enemies: Record<string, EnemyState>): void {
     for (const enemyState of Object.values(enemies)) {
       const position = this.getWorldPositionFromTile(enemyState.tileX, enemyState.tileY);
@@ -1024,6 +1253,94 @@ export class WorldScene extends Phaser.Scene {
       enemyVisual.healthBar.destroy();
       this.worldEnemies.delete(enemyId);
     }
+  }
+
+  private applyGroundItemSnapshot(groundItems: Record<string, GroundItemState>): void {
+    const visibleGroundStackByTile = new Set<string>();
+
+    for (const groundItemState of Object.values(groundItems)) {
+      const position = this.getWorldPositionFromTile(groundItemState.tileX, groundItemState.tileY);
+      const existingGroundItem = this.worldGroundItems.get(groundItemState.id);
+      const textureKey = `ground-item-${groundItemState.itemId}`;
+      const textureReady = this.ensureGroundItemTextureLoaded(textureKey, groundItemState.image);
+      const tileKey = `${groundItemState.tileX},${groundItemState.tileY}`;
+      const showStackVisual = !visibleGroundStackByTile.has(tileKey);
+      if (showStackVisual) {
+        visibleGroundStackByTile.add(tileKey);
+      }
+
+      if (existingGroundItem) {
+        existingGroundItem.state = groundItemState;
+        existingGroundItem.sprite.setPosition(position.x, position.y);
+        existingGroundItem.sprite.setDisplaySize(18, 18);
+        if (textureReady) {
+          existingGroundItem.sprite.setTexture(textureKey);
+          existingGroundItem.sprite.setVisible(showStackVisual);
+        }
+        existingGroundItem.quantityText
+          .setPosition(position.x + 10, position.y - 11)
+          .setText(groundItemState.quantity > 1 ? `x${groundItemState.quantity}` : '')
+          .setVisible(showStackVisual);
+        continue;
+      }
+
+      const sprite = this.add
+        .image(position.x, position.y, textureReady ? textureKey : PLAYER_TEXTURE_KEY)
+        .setDisplaySize(18, 18)
+        .setDepth(3.2)
+        .setVisible(textureReady && showStackVisual);
+
+      const quantityText = this.add
+        .text(position.x + 10, position.y - 11, groundItemState.quantity > 1 ? `x${groundItemState.quantity}` : '', {
+          fontFamily: 'monospace',
+          fontSize: '11px',
+          color: '#fff1bd',
+          stroke: '#000000',
+          strokeThickness: 2,
+        })
+        .setOrigin(0, 0.5)
+        .setDepth(4)
+        .setVisible(showStackVisual);
+
+      this.worldGroundItems.set(groundItemState.id, {
+        state: groundItemState,
+        sprite,
+        quantityText,
+      });
+    }
+
+    const visibleGroundItemIds = new Set(Object.keys(groundItems));
+    for (const [groundItemId, groundItemVisual] of this.worldGroundItems.entries()) {
+      if (visibleGroundItemIds.has(groundItemId)) {
+        continue;
+      }
+
+      groundItemVisual.sprite.destroy();
+      groundItemVisual.quantityText.destroy();
+      this.worldGroundItems.delete(groundItemId);
+    }
+  }
+
+  private ensureGroundItemTextureLoaded(textureKey: string, imagePath: string): boolean {
+    if (this.textures.exists(textureKey)) {
+      return true;
+    }
+
+    if (this.pendingGroundItemTextureLoads.has(textureKey)) {
+      return false;
+    }
+
+    this.pendingGroundItemTextureLoads.add(textureKey);
+    this.load.image(textureKey, imagePath);
+    this.load.once(`filecomplete-image-${textureKey}`, () => {
+      this.pendingGroundItemTextureLoads.delete(textureKey);
+    });
+
+    if (!this.load.isLoading()) {
+      this.load.start();
+    }
+
+    return false;
   }
 
   private styleNodeSprite(sprite: Phaser.GameObjects.Sprite, nodeState: WorldNodeState): void {
@@ -1121,21 +1438,21 @@ export class WorldScene extends Phaser.Scene {
 
     if (hasTileCoords) {
       return new Phaser.Math.Vector2(
-        Phaser.Math.Clamp(Math.round(playerState.tileX), 0, MAP_WIDTH_TILES - 1),
-        Phaser.Math.Clamp(Math.round(playerState.tileY), 0, MAP_HEIGHT_TILES - 1),
+        Phaser.Math.Clamp(Math.round(playerState.tileX), 0, this.worldWidthTiles - 1),
+        Phaser.Math.Clamp(Math.round(playerState.tileY), 0, this.worldHeightTiles - 1),
       );
     }
 
     const fallbackTileX = Number.isFinite(playerState.x)
       ? Math.round(playerState.x / TILE_SIZE - 0.5)
-      : Math.floor(MAP_WIDTH_TILES * 0.5);
+      : Math.floor(this.worldWidthTiles * 0.5);
     const fallbackTileY = Number.isFinite(playerState.y)
       ? Math.round(playerState.y / TILE_SIZE - 0.5)
-      : Math.floor(MAP_HEIGHT_TILES * 0.5);
+      : Math.floor(this.worldHeightTiles * 0.5);
 
     return new Phaser.Math.Vector2(
-      Phaser.Math.Clamp(fallbackTileX, 0, MAP_WIDTH_TILES - 1),
-      Phaser.Math.Clamp(fallbackTileY, 0, MAP_HEIGHT_TILES - 1),
+      Phaser.Math.Clamp(fallbackTileX, 0, this.worldWidthTiles - 1),
+      Phaser.Math.Clamp(fallbackTileY, 0, this.worldHeightTiles - 1),
     );
   }
 
@@ -1169,8 +1486,8 @@ export class WorldScene extends Phaser.Scene {
     this.hideContextMenu();
 
     const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-    const tileX = Phaser.Math.Clamp(Math.floor(worldPoint.x / TILE_SIZE), 0, MAP_WIDTH_TILES - 1);
-    const tileY = Phaser.Math.Clamp(Math.floor(worldPoint.y / TILE_SIZE), 0, MAP_HEIGHT_TILES - 1);
+    const tileX = Phaser.Math.Clamp(Math.floor(worldPoint.x / TILE_SIZE), 0, this.worldWidthTiles - 1);
+    const tileY = Phaser.Math.Clamp(Math.floor(worldPoint.y / TILE_SIZE), 0, this.worldHeightTiles - 1);
 
     const clickedNode = this.findNodeAtTile(tileX, tileY);
 
@@ -1198,6 +1515,13 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
 
+    const clickedGroundItems = this.findGroundItemsAtTile(tileX, tileY);
+    if (clickedGroundItems.length > 0) {
+      this.showTileClickFeedback(tileX, tileY, 'interact');
+      this.pickupGroundItem(clickedGroundItems[0].state.id);
+      return;
+    }
+
     this.performWalkTo(tileX, tileY);
   }
 
@@ -1210,13 +1534,15 @@ export class WorldScene extends Phaser.Scene {
 
   private openExamineContextMenu(pointer: Phaser.Input.Pointer): void {
     const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-    const tileX = Phaser.Math.Clamp(Math.floor(worldPoint.x / TILE_SIZE), 0, MAP_WIDTH_TILES - 1);
-    const tileY = Phaser.Math.Clamp(Math.floor(worldPoint.y / TILE_SIZE), 0, MAP_HEIGHT_TILES - 1);
+    const tileX = Phaser.Math.Clamp(Math.floor(worldPoint.x / TILE_SIZE), 0, this.worldWidthTiles - 1);
+    const tileY = Phaser.Math.Clamp(Math.floor(worldPoint.y / TILE_SIZE), 0, this.worldHeightTiles - 1);
 
     const options: ContextMenuOption[] = [];
     const nodeAtTile = this.findNodeAtTile(tileX, tileY);
     const npcAtTile = this.findNpcAtTile(tileX, tileY);
     const enemyAtTile = this.findEnemyAtTile(tileX, tileY);
+    const objectAtTile = this.findObjectAtTile(tileX, tileY);
+    const groundItemsAtTile = this.findGroundItemsAtTile(tileX, tileY);
     const playersAtTile = this.getPlayersAtTile(tileX, tileY);
     const tileType = this.getTileTypeName(tileX, tileY);
 
@@ -1288,6 +1614,38 @@ export class WorldScene extends Phaser.Scene {
           this.appendSystemChatMessage(enemyAtTile.state.examineText);
         },
       });
+    }
+
+    if (objectAtTile) {
+      options.push({
+        label: `Examine ${objectAtTile.state.name}`,
+        onSelect: () => {
+          this.appendSystemChatMessage(objectAtTile.state.examineText);
+        },
+      });
+    }
+
+    if (groundItemsAtTile.length > 0) {
+      for (const groundItemAtTile of groundItemsAtTile) {
+        const quantityText =
+          groundItemAtTile.state.quantity > 1 ? ` x${groundItemAtTile.state.quantity}` : '';
+
+        options.push({
+          label: `Take ${groundItemAtTile.state.name}${quantityText}`,
+          onSelect: () => {
+            this.pickupGroundItem(groundItemAtTile.state.id);
+          },
+        });
+
+        options.push({
+          label: `Examine ${groundItemAtTile.state.name}`,
+          onSelect: () => {
+            this.appendSystemChatMessage(
+              `${groundItemAtTile.state.name} x${groundItemAtTile.state.quantity} lies on the ground.`,
+            );
+          },
+        });
+      }
     }
 
     for (const playerEntry of playersAtTile) {
@@ -1756,7 +2114,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private isTileWalkable(tileX: number, tileY: number): boolean {
-    if (tileX < 0 || tileY < 0 || tileX >= MAP_WIDTH_TILES || tileY >= MAP_HEIGHT_TILES) {
+    if (tileX < 0 || tileY < 0 || tileX >= this.worldWidthTiles || tileY >= this.worldHeightTiles) {
       return false;
     }
 
@@ -1765,12 +2123,20 @@ export class WorldScene extends Phaser.Scene {
       return false;
     }
 
-    return !this.findNodeAtTile(tileX, tileY) && !this.findNpcAtTile(tileX, tileY);
+    const objectAtTile = this.findObjectAtTile(tileX, tileY);
+    return !this.findNodeAtTile(tileX, tileY)
+      && !this.findNpcAtTile(tileX, tileY)
+      && !(objectAtTile && objectAtTile.state.blocksMovement);
   }
 
   private attackEnemy(enemyId: string): void {
     this.hideContextMenu();
     this.multiplayerClient.sendCombatAttack(enemyId);
+  }
+
+  private pickupGroundItem(groundItemId: string): void {
+    this.hideContextMenu();
+    this.multiplayerClient.sendGroundItemPickup(groundItemId);
   }
 
   private talkToNpc(npcId: string): void {
@@ -2591,6 +2957,29 @@ export class WorldScene extends Phaser.Scene {
     return null;
   }
 
+  private findObjectAtTile(tileX: number, tileY: number): WorldObjectVisual | null {
+    for (const objectVisual of this.worldObjects.values()) {
+      if (objectVisual.state.tileX === tileX && objectVisual.state.tileY === tileY) {
+        return objectVisual;
+      }
+    }
+
+    return null;
+  }
+
+  private findGroundItemsAtTile(tileX: number, tileY: number): GroundItemVisual[] {
+    const itemsAtTile: GroundItemVisual[] = [];
+
+    for (const groundItemVisual of this.worldGroundItems.values()) {
+      if (groundItemVisual.state.tileX === tileX && groundItemVisual.state.tileY === tileY) {
+        itemsAtTile.push(groundItemVisual);
+      }
+    }
+
+    itemsAtTile.sort((left, right) => left.state.despawnAt - right.state.despawnAt);
+    return itemsAtTile;
+  }
+
   private renderActionStatus(): void {
     if (!this.localPlayerState || !this.localTilePosition) {
       this.actionStatusText.setText('Connecting...');
@@ -2700,10 +3089,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     context.imageSmoothingEnabled = false;
-    context.fillStyle = '#1a1a1a';
-    context.fillRect(0, 0, 16, 16);
-    context.fillStyle = '#302c21';
-    context.fillRect(1, 1, 14, 14);
+    context.clearRect(0, 0, 16, 16);
 
     if (resolvedKey === 'logs' || resolvedKey === 'birch_logs') {
       context.fillStyle = '#6e4f2f';
@@ -2979,7 +3365,7 @@ export class WorldScene extends Phaser.Scene {
               },
             },
             {
-              label: `Drop all ${slot.name}`,
+              label: `Drop ${slot.name}`,
               onSelect: () => {
                 this.multiplayerClient.sendInventoryDrop(index, slot.quantity);
               },
@@ -3539,16 +3925,16 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private renderDebugHud(): void {
-    if (!this.debugHudVisible) {
+    if (!this.debugHudVisible || !this.debugHudLogElement) {
+      if (this.debugHudRootElement) this.debugHudRootElement.style.display = 'none';
       return;
     }
+    if (this.debugHudRootElement) this.debugHudRootElement.style.display = 'flex';
 
     const stats = this.multiplayerClient.getStats();
-
     const stateAgeMs = this.lastStateUpdateAt
       ? Math.max(0, Date.now() - this.lastStateUpdateAt)
       : -1;
-
     const lines = [
       'F3: Toggle Debug HUD',
       `Local ID: ${this.localPlayerId ? this.localPlayerId.slice(0, 8) : 'pending'}`,
@@ -3561,14 +3947,51 @@ export class WorldScene extends Phaser.Scene {
       }`,
       `Nodes: ${this.worldNodes.size}`,
       `NPCs: ${this.worldNpcs.size}`,
+      `Objects: ${this.worldObjects.size}`,
       `Enemies: ${this.worldEnemies.size}`,
+      `Ground Items: ${this.worldGroundItems.size}`,
       `Remote Players: ${this.remotePlayers.size}`,
       `Snapshots: ${this.snapshotCount}`,
       `Last Snapshot: ${stateAgeMs >= 0 ? `${stateAgeMs}ms ago` : 'n/a'}`,
       `Net RX/TX: ${stats.messagesReceived}/${stats.messagesSent}`,
     ];
+    this.debugHudLogElement.textContent = lines.join('\n');
+  }
 
-    this.debugHudText.setText(lines);
+  private initDebugHudPanel(): void {
+    const appElement = document.querySelector<HTMLDivElement>('#app');
+    if (!appElement) return;
+    const root = document.createElement('div');
+    root.style.position = 'fixed';
+    root.style.top = '12px';
+    root.style.left = '50%';
+    root.style.transform = 'translateX(-50%)';
+    root.style.width = '340px';
+    root.style.maxHeight = '220px';
+    root.style.background = 'rgba(0,0,0,0.82)';
+    root.style.border = '1px solid #b7aa81';
+    root.style.display = this.debugHudVisible ? 'flex' : 'none';
+    root.style.flexDirection = 'column';
+    root.style.zIndex = '2000';
+    root.style.pointerEvents = 'auto';
+    root.style.color = '#d6ecff';
+    root.style.fontFamily = 'monospace';
+    root.style.fontSize = '13px';
+    root.style.boxShadow = '0 2px 10px rgba(0,0,0,0.45)';
+    root.style.borderRadius = '7px';
+    root.style.overflow = 'hidden';
+
+    const log = document.createElement('div');
+    log.style.flex = '1';
+    log.style.overflowY = 'auto';
+    log.style.whiteSpace = 'pre-line';
+    log.style.padding = '10px 12px 10px 12px';
+    log.style.userSelect = 'text';
+
+    root.appendChild(log);
+    appElement.appendChild(root);
+    this.debugHudRootElement = root;
+    this.debugHudLogElement = log;
   }
 
   private shutdown(): void {
@@ -3588,15 +4011,27 @@ export class WorldScene extends Phaser.Scene {
       npcVisual.sprite.destroy();
     }
 
+    for (const objectVisual of this.worldObjects.values()) {
+      objectVisual.sprite.destroy();
+    }
+
     for (const enemyVisual of this.worldEnemies.values()) {
       enemyVisual.sprite.destroy();
       enemyVisual.healthBar.destroy();
     }
 
+    for (const groundItemVisual of this.worldGroundItems.values()) {
+      groundItemVisual.sprite.destroy();
+      groundItemVisual.quantityText.destroy();
+    }
+
     this.remotePlayers.clear();
     this.worldNodes.clear();
     this.worldNpcs.clear();
+    this.worldObjects.clear();
     this.worldEnemies.clear();
+    this.worldGroundItems.clear();
+    this.pendingGroundItemTextureLoads.clear();
     this.shopDefinitions = {};
     this.activeShopId = null;
     this.lastRenderedShopSignature = null;
@@ -3650,7 +4085,11 @@ export class WorldScene extends Phaser.Scene {
     this.harvestingActionIndicator?.destroy();
     this.harvestingActionIndicator = null;
     this.harvestingIndicatorPhase = 0;
-    this.debugHudText?.destroy();
+    if (this.debugHudRootElement) {
+      this.debugHudRootElement.remove();
+      this.debugHudRootElement = null;
+      this.debugHudLogElement = null;
+    }
     this.actionStatusText?.destroy();
     this.snapshotCount = 0;
     this.lastStateUpdateAt = null;

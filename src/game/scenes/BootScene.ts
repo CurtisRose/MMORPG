@@ -16,7 +16,7 @@ export class BootScene extends Phaser.Scene {
     this.createPlayerTexture();
     this.createTreeTexture();
     this.createRockTexture();
-    this.scene.start('world');
+    this.scene.start('splash');
   }
 
   private createTerrainTexture(): void {

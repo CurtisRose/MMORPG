@@ -45,16 +45,37 @@ async function waitForServerReady(serverProcess) {
 
 function createClient(label) {
   const socket = new WebSocket(SERVER_URL);
+  const username = `smoke_${label.toLowerCase()}_${Math.random().toString(36).slice(2, 8)}`;
+  const password = `smoke_pw_${Math.random().toString(36).slice(2, 12)}A!`;
 
   const client = {
     label,
     socket,
     id: null,
     latestState: null,
+    authToken: null,
+    username,
+    password,
   };
 
   socket.on('message', (rawData) => {
     const message = JSON.parse(rawData.toString());
+    if (message.type === 'authRequired') {
+      socket.send(
+        JSON.stringify({
+          type: 'authRegister',
+          username,
+          password,
+        }),
+      );
+      return;
+    }
+
+    if (message.type === 'authOk') {
+      client.authToken = String(message.token ?? '');
+      return;
+    }
+
     if (message.type === 'welcome') {
       client.id = message.id;
       client.latestState = message.players;
