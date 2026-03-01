@@ -13431,6 +13431,33 @@
           "tileY": 37,
           "blocksMovement": true,
           "examineText": "A sturdy building that houses the bank chest."
+        },
+        {
+          "id": "smelting_station-1",
+          "objectTypeId": "smelting_station",
+          "name": "Smelting furnace",
+          "tileX": 39,
+          "tileY": 34,
+          "blocksMovement": true,
+          "examineText": "A blazing furnace used to smelt ores into bars."
+        },
+        {
+          "id": "smithing_station-1",
+          "objectTypeId": "smithing_station",
+          "name": "Smithing anvil",
+          "tileX": 40,
+          "tileY": 33,
+          "blocksMovement": true,
+          "examineText": "A sturdy anvil for shaping bars into equipment."
+        },
+        {
+          "id": "fletching_station-1",
+          "objectTypeId": "fletching_station",
+          "name": "Fletching bench",
+          "tileX": 38,
+          "tileY": 35,
+          "blocksMovement": true,
+          "examineText": "A crafting bench for carving logs into bows and arrows."
         }
       ],
       "npcs": [
@@ -13474,6 +13501,26 @@
             "rewardItemId": "bronze_axe",
             "rewardItemQuantity": 1
           }
+        },
+        {
+          "id": "npc-shopkeeper-3",
+          "type": "shopkeeper",
+          "name": "Joseph",
+          "tileX": 39,
+          "tileY": 32,
+          "examineText": "A burly smith.",
+          "talkText": "Hello there! Need supplies or want to sell your goods?",
+          "quest": null
+        },
+        {
+          "id": "npc-shopkeeper-2",
+          "type": "shopkeeper",
+          "name": "Frank",
+          "tileX": 37,
+          "tileY": 35,
+          "examineText": "A friendly fletcher",
+          "talkText": "Hello there! Need supplies or want to sell your goods?",
+          "quest": null
         }
       ]
     }

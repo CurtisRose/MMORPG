@@ -1,0 +1,25 @@
+{
+  "skill": "smelting",
+  "recipes": [
+    {
+      "id": "bronze_bar",
+      "requiredLevel": 1,
+      "durationMs": 1600,
+      "successChance": 1,
+      "xp": 6,
+      "inputs": [
+        { "itemId": "copper_ore", "quantity": 1 },
+        { "itemId": "tin_ore", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_bar", "quantity": 1 }
+      ]
+    }
+  ],
+  "messages": {
+    "locked": "Requires level {requiredLevel}.",
+    "missingItems": "You need the required ores.",
+    "success": "You smelt a bronze bar.",
+    "failure": "You fail to smelt the metal."
+  }
+}

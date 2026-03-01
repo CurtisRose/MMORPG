@@ -117,6 +117,27 @@ const MONSTER_TYPES: Array<{ id: string; label: string }> = [
 
 const OBJECT_TYPES: Array<{ id: string; label: string; name: string; blocksMovement: boolean; examineText: string }> = [
   {
+    id: 'smelting_station',
+    label: 'Smelting Station',
+    name: 'Smelting furnace',
+    blocksMovement: true,
+    examineText: 'A blazing furnace used to smelt ores into bars.',
+  },
+  {
+    id: 'smithing_station',
+    label: 'Smithing Station',
+    name: 'Smithing anvil',
+    blocksMovement: true,
+    examineText: 'A sturdy anvil for shaping bars into equipment.',
+  },
+  {
+    id: 'fletching_station',
+    label: 'Fletching Station',
+    name: 'Fletching bench',
+    blocksMovement: true,
+    examineText: 'A crafting bench for carving logs into bows and arrows.',
+  },
+  {
     id: 'bank_building',
     label: 'Bank Building',
     name: 'Bank building',
@@ -690,6 +711,15 @@ function getObjectIcon(objectTypeId: string): HTMLCanvasElement {
   }
   if (objectTypeId === 'general_store_building') {
     return getTintedEditorIcon('rock', '#7e6b52');
+  }
+  if (objectTypeId === 'smelting_station') {
+    return getTintedEditorIcon('rock', '#d07f3f');
+  }
+  if (objectTypeId === 'smithing_station') {
+    return getTintedEditorIcon('rock', '#9a9ea8');
+  }
+  if (objectTypeId === 'fletching_station') {
+    return getTintedEditorIcon('tree', '#8d6f47');
   }
 
   return getTintedEditorIcon('rock', '#9b9b9b');
