@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { BootScene } from '../scenes/BootScene';
+import { SplashScene } from '../scenes/SplashScene';
 import { WorldScene } from '../scenes/WorldScene';
 
 export const TILE_SIZE = 32;
@@ -24,5 +25,5 @@ export const gameConfig: Phaser.Types.Core.GameConfig = {
       debug: false,
     },
   },
-  scene: [BootScene, WorldScene],
+  scene: [BootScene, SplashScene, WorldScene],
 };

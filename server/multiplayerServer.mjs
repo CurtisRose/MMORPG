@@ -1,15 +1,18 @@
 import { WebSocketServer } from 'ws';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SERVER_PORT = Number(process.env.MULTIPLAYER_PORT ?? 2567);
-const WORLD_WIDTH = 80 * 32;
-const WORLD_HEIGHT = 80 * 32;
 const TILE_SIZE = 32;
-const WORLD_WIDTH_TILES = WORLD_WIDTH / TILE_SIZE;
-const WORLD_HEIGHT_TILES = WORLD_HEIGHT / TILE_SIZE;
+const DEFAULT_WORLD_WIDTH_TILES = 80;
+const DEFAULT_WORLD_HEIGHT_TILES = 80;
+const PROFILE_COORDINATE_SPACE_VERSION = 2;
+const NEW_PLAYER_SPAWN_LOCAL_TILE_X = 40;
+const NEW_PLAYER_SPAWN_LOCAL_TILE_Y = 36;
+let WORLD_WIDTH_TILES = DEFAULT_WORLD_WIDTH_TILES;
+let WORLD_HEIGHT_TILES = DEFAULT_WORLD_HEIGHT_TILES;
 const BROADCAST_RATE_MS = 100;
 const TILE_STEP_INTERVAL_MS = 200;
 const DIAGONAL_STEP_MULTIPLIER = 1.65;
@@ -55,17 +58,26 @@ const COMBAT_PLAYER_HIT_MODIFIER_PCT = 0;
 const COMBAT_ENEMY_HIT_MODIFIER_PCT = 0;
 const COMBAT_HIT_CHANCE_MIN = 0.1;
 const COMBAT_HIT_CHANCE_MAX = 0.95;
+const GROUND_ITEM_LIFETIME_MS = 120000;
+const GROUND_ITEM_OWNER_PRIORITY_MS = 60000;
+const GROUND_ITEM_PICKUP_RANGE_TILES = 1;
+const WATER_TILE_ID = 2;
+const AUTH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 14;
+const MAX_AUTH_ATTEMPTS_PER_CONNECTION = 12;
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT_DIR = path.dirname(SERVER_DIR);
 const PUBLIC_DIR = path.join(PROJECT_ROOT_DIR, 'public');
 const DATA_DIR = path.join(SERVER_DIR, 'data');
 const PLAYER_PROFILES_PATH = path.join(DATA_DIR, 'playerProfiles.json');
+const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json');
+const AUTH_SECRET_PATH = path.join(DATA_DIR, 'authSecret.txt');
 const SKILL_DATA_DIR = path.join(DATA_DIR, 'skills');
 const HARVESTING_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'harvesting');
 const CRAFTING_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'crafting');
 const COMBAT_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'combat');
 const CONTENT_DATA_DIR = path.join(DATA_DIR, 'content');
+const WORLD_MAP_PATH = path.join(PUBLIC_DIR, 'data', 'worldMap.json');
 const ITEM_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'items.json');
 const RESOURCE_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'resources.json');
 const GEAR_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'gear.json');
@@ -87,6 +99,428 @@ const EQUIPMENT_SLOTS = [
   'ring5',
 ];
 const RING_EQUIPMENT_SLOTS = ['ring1', 'ring2', 'ring3', 'ring4', 'ring5'];
+
+const DEFAULT_MINION_SPAWN_DEFINITIONS = [
+  {
+    id: 'enemy-goblin-1',
+    minionTypeId: 'goblin',
+    tier: 1,
+    tileX: 33,
+    tileY: 39,
+  },
+  {
+    id: 'enemy-goblin-2',
+    minionTypeId: 'goblin',
+    tier: 1,
+    tileX: 47,
+    tileY: 41,
+  },
+  {
+    id: 'enemy-goblin-3',
+    minionTypeId: 'goblin',
+    tier: 2,
+    tileX: 25,
+    tileY: 36,
+  },
+  {
+    id: 'enemy-goblin-4',
+    minionTypeId: 'goblin',
+    tier: 2,
+    tileX: 55,
+    tileY: 44,
+  },
+  {
+    id: 'enemy-goblin-5',
+    minionTypeId: 'goblin',
+    tier: 3,
+    tileX: 20,
+    tileY: 34,
+  },
+  {
+    id: 'enemy-goblin-6',
+    minionTypeId: 'goblin',
+    tier: 4,
+    tileX: 60,
+    tileY: 46,
+  },
+];
+
+const DEFAULT_WORLD_NODE_DEFINITIONS = [
+  { id: 'tree-1', type: 'tree', resourceId: 'birch_tree', tileX: 35, tileY: 36, respawnMs: 5000 },
+  { id: 'tree-2', type: 'tree', resourceId: 'oak_tree', tileX: 46, tileY: 35, respawnMs: 6500 },
+  { id: 'rock-1', type: 'rock', resourceId: 'copper_rock', tileX: 34, tileY: 43, respawnMs: 6500 },
+  { id: 'rock-3', type: 'rock', resourceId: 'tin_rock', tileX: 39, tileY: 44, respawnMs: 6500 },
+  { id: 'rock-2', type: 'rock', resourceId: 'iron_rock', tileX: 45, tileY: 44, respawnMs: 7500 },
+];
+
+const DEFAULT_NPC_DEFINITIONS = [
+  {
+    id: 'npc-shopkeeper-bob',
+    type: 'shopkeeper',
+    name: 'Bob',
+    tileX: 40,
+    tileY: 40,
+    examineText: 'A friendly general store shopkeeper.',
+    talkText: 'Hello there! Need supplies or want to sell your goods?',
+  },
+  {
+    id: 'npc-bank-chest',
+    type: 'bank_chest',
+    name: 'Bank chest',
+    tileX: 42,
+    tileY: 38,
+    examineText: 'A sturdy chest for secure item storage.',
+    talkText: 'Your valuables are safe inside.',
+  },
+];
+
+const DEFAULT_OBJECT_DEFINITIONS = [
+  {
+    id: 'obj-bank-building',
+    objectTypeId: 'bank_building',
+    name: 'Bank building',
+    tileX: 42,
+    tileY: 37,
+    blocksMovement: true,
+    examineText: 'A sturdy building that houses the bank chest.',
+  },
+];
+
+function generateDefaultTerrainData() {
+  const rows = [];
+
+  for (let rowIndex = 0; rowIndex < WORLD_HEIGHT_TILES; rowIndex += 1) {
+    const row = [];
+    for (let columnIndex = 0; columnIndex < WORLD_WIDTH_TILES; columnIndex += 1) {
+      const edgeDistance = Math.min(
+        rowIndex,
+        columnIndex,
+        WORLD_HEIGHT_TILES - 1 - rowIndex,
+        WORLD_WIDTH_TILES - 1 - columnIndex,
+      );
+
+      if (edgeDistance < 3) {
+        row.push(2);
+        continue;
+      }
+
+      if (edgeDistance < 5) {
+        row.push(3);
+        continue;
+      }
+
+      const onHorizontalRoad = rowIndex > 34 && rowIndex < 38;
+      const onVerticalRoad = columnIndex > 38 && columnIndex < 42;
+      if (onHorizontalRoad || onVerticalRoad) {
+        row.push(1);
+        continue;
+      }
+
+      row.push(0);
+    }
+
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function createDefaultWorldMapData() {
+  return {
+    version: 1,
+    chunkX: 0,
+    chunkY: 0,
+    width: WORLD_WIDTH_TILES,
+    height: WORLD_HEIGHT_TILES,
+    terrain: generateDefaultTerrainData(),
+    resources: DEFAULT_WORLD_NODE_DEFINITIONS.map((entry) => ({
+      id: entry.id,
+      nodeType: entry.type,
+      resourceId: entry.resourceId,
+      tileX: entry.tileX,
+      tileY: entry.tileY,
+      respawnMs: entry.respawnMs,
+    })),
+    monsters: DEFAULT_MINION_SPAWN_DEFINITIONS.map((entry) => ({
+      id: entry.id,
+      minionTypeId: entry.minionTypeId,
+      tier: entry.tier,
+      tileX: entry.tileX,
+      tileY: entry.tileY,
+    })),
+    npcs: DEFAULT_NPC_DEFINITIONS.map((entry) => ({ ...entry })),
+    objects: DEFAULT_OBJECT_DEFINITIONS.map((entry) => ({ ...entry })),
+  };
+}
+
+function createFilledTerrainGrid(width, height, fill) {
+  const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const safeHeight = Math.max(1, Math.floor(Number(height) || 1));
+  return Array.from({ length: safeHeight }, () => Array.from({ length: safeWidth }, () => fill));
+}
+
+function normalizeWorldMapData(raw) {
+  const fallback = createDefaultWorldMapData();
+  const rawChunkWidth = Math.floor(Number(raw?.chunkWidth ?? DEFAULT_WORLD_WIDTH_TILES));
+  const rawChunkHeight = Math.floor(Number(raw?.chunkHeight ?? DEFAULT_WORLD_HEIGHT_TILES));
+  const chunkWidth = Math.max(1, Number.isFinite(rawChunkWidth) ? rawChunkWidth : DEFAULT_WORLD_WIDTH_TILES);
+  const chunkHeight = Math.max(1, Number.isFinite(rawChunkHeight) ? rawChunkHeight : DEFAULT_WORLD_HEIGHT_TILES);
+
+  if (Array.isArray(raw?.chunks) && raw.chunks.length > 0) {
+    const validChunks = raw.chunks
+      .map((entry) => {
+        const chunkX = Number(entry?.chunkX);
+        const chunkY = Number(entry?.chunkY);
+        const terrain = entry?.terrain;
+        const isTerrainValid =
+          Array.isArray(terrain)
+          && terrain.length === chunkHeight
+          && terrain.every((row) => Array.isArray(row) && row.length === chunkWidth);
+
+        if (!Number.isFinite(chunkX) || !Number.isFinite(chunkY) || !isTerrainValid) {
+          return null;
+        }
+
+        return {
+          chunkX: Math.trunc(chunkX),
+          chunkY: Math.trunc(chunkY),
+          terrain,
+          resources: Array.isArray(entry?.resources) ? entry.resources : [],
+          monsters: Array.isArray(entry?.monsters) ? entry.monsters : [],
+          npcs: Array.isArray(entry?.npcs) ? entry.npcs : [],
+          objects: Array.isArray(entry?.objects) ? entry.objects : [],
+        };
+      })
+      .filter((entry) => entry !== null);
+
+    if (validChunks.length > 0) {
+      const minChunkX = Math.min(...validChunks.map((entry) => entry.chunkX));
+      const maxChunkX = Math.max(...validChunks.map((entry) => entry.chunkX));
+      const minChunkY = Math.min(...validChunks.map((entry) => entry.chunkY));
+      const maxChunkY = Math.max(...validChunks.map((entry) => entry.chunkY));
+      const worldWidthTiles = (maxChunkX - minChunkX + 1) * chunkWidth;
+      const worldHeightTiles = (maxChunkY - minChunkY + 1) * chunkHeight;
+      const terrain = createFilledTerrainGrid(worldWidthTiles, worldHeightTiles, 0);
+
+      const resources = [];
+      const monsters = [];
+      const npcs = [];
+      const objects = [];
+
+      for (const chunk of validChunks) {
+        const chunkOriginTileX = (chunk.chunkX - minChunkX) * chunkWidth;
+        const chunkOriginTileY = (chunk.chunkY - minChunkY) * chunkHeight;
+
+        for (let localY = 0; localY < chunkHeight; localY += 1) {
+          for (let localX = 0; localX < chunkWidth; localX += 1) {
+            terrain[chunkOriginTileY + localY][chunkOriginTileX + localX] = Math.max(
+              0,
+              Math.floor(Number(chunk.terrain[localY][localX]) || 0),
+            );
+          }
+        }
+
+        for (const entry of chunk.resources) {
+          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+          resources.push({
+            id: String(entry?.id ?? `resource-${resources.length + 1}`),
+            nodeType: String(entry?.nodeType ?? 'tree'),
+            resourceId: String(entry?.resourceId ?? ''),
+            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
+            respawnMs: Math.max(250, Math.floor(Number(entry?.respawnMs ?? 5000))),
+          });
+        }
+
+        for (const entry of chunk.monsters) {
+          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+          monsters.push({
+            id: String(entry?.id ?? `enemy-${monsters.length + 1}`),
+            minionTypeId: String(entry?.minionTypeId ?? ''),
+            tier: Math.max(1, Math.floor(Number(entry?.tier ?? 1))),
+            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
+          });
+        }
+
+        for (const entry of chunk.npcs) {
+          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+          npcs.push({
+            id: String(entry?.id ?? `npc-${npcs.length + 1}`),
+            type: String(entry?.type ?? 'villager'),
+            name: String(entry?.name ?? `NPC ${npcs.length + 1}`),
+            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
+            examineText: String(entry?.examineText ?? "It's someone."),
+            talkText: String(entry?.talkText ?? 'Hello there.'),
+          });
+        }
+
+        for (const entry of chunk.objects) {
+          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+          objects.push({
+            id: String(entry?.id ?? `object-${objects.length + 1}`),
+            objectTypeId: String(entry?.objectTypeId ?? 'object'),
+            name: String(entry?.name ?? `Object ${objects.length + 1}`),
+            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
+            blocksMovement: Boolean(entry?.blocksMovement),
+            examineText: String(entry?.examineText ?? "It's an object."),
+          });
+        }
+      }
+
+      return {
+        version: Math.max(1, Math.floor(Number(raw?.version ?? 1))),
+        chunkX: 0,
+        chunkY: 0,
+        chunkWidth,
+        chunkHeight,
+        chunkZeroOriginTileX: (0 - minChunkX) * chunkWidth,
+        chunkZeroOriginTileY: (0 - minChunkY) * chunkHeight,
+        width: worldWidthTiles,
+        height: worldHeightTiles,
+        terrain,
+        resources,
+        monsters,
+        npcs,
+        objects,
+      };
+    }
+  }
+
+  const source = raw;
+
+  const isTerrainValid =
+    Array.isArray(source?.terrain)
+    && source.terrain.length > 0
+    && source.terrain.every((row) => Array.isArray(row) && row.length === source.terrain[0].length);
+
+  const width = isTerrainValid ? source.terrain[0].length : fallback.width;
+  const height = isTerrainValid ? source.terrain.length : fallback.height;
+
+  const terrain = isTerrainValid
+    ? source.terrain.map((row) => row.map((tileId) => Math.max(0, Math.floor(Number(tileId) || 0))))
+    : fallback.terrain;
+
+  const resources = Array.isArray(source?.resources)
+    ? source.resources.map((entry, index) => ({
+      id: String(entry?.id ?? `resource-${index + 1}`),
+      nodeType: String(entry?.nodeType ?? 'tree'),
+      resourceId: String(entry?.resourceId ?? ''),
+      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
+      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
+      respawnMs: Math.max(250, Math.floor(Number(entry?.respawnMs ?? 5000))),
+    }))
+    : fallback.resources;
+
+  const monsters = Array.isArray(source?.monsters)
+    ? source.monsters.map((entry, index) => ({
+      id: String(entry?.id ?? `enemy-${index + 1}`),
+      minionTypeId: String(entry?.minionTypeId ?? ''),
+      tier: Math.max(1, Math.floor(Number(entry?.tier ?? 1))),
+      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
+      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
+    }))
+    : fallback.monsters;
+
+  const npcs = Array.isArray(source?.npcs)
+    ? source.npcs.map((entry, index) => ({
+      id: String(entry?.id ?? `npc-${index + 1}`),
+      type: String(entry?.type ?? 'villager'),
+      name: String(entry?.name ?? `NPC ${index + 1}`),
+      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
+      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
+      examineText: String(entry?.examineText ?? "It's someone."),
+      talkText: String(entry?.talkText ?? 'Hello there.'),
+    }))
+    : fallback.npcs;
+
+  const objects = Array.isArray(source?.objects)
+    ? source.objects.map((entry, index) => ({
+      id: String(entry?.id ?? `object-${index + 1}`),
+      objectTypeId: String(entry?.objectTypeId ?? 'object'),
+      name: String(entry?.name ?? `Object ${index + 1}`),
+      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
+      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
+      blocksMovement: Boolean(entry?.blocksMovement),
+      examineText: String(entry?.examineText ?? "It's an object."),
+    }))
+    : fallback.objects;
+
+  return {
+    version: Math.max(1, Math.floor(Number(raw?.version ?? source?.version ?? 1))),
+    chunkX: Math.floor(Number(source?.chunkX ?? 0)),
+    chunkY: Math.floor(Number(source?.chunkY ?? 0)),
+    chunkWidth: width,
+    chunkHeight: height,
+    chunkZeroOriginTileX: 0,
+    chunkZeroOriginTileY: 0,
+    width,
+    height,
+    terrain,
+    resources,
+    monsters,
+    npcs,
+    objects,
+  };
+}
+
+function loadWorldMapData() {
+  if (!existsSync(WORLD_MAP_PATH)) {
+    mkdirSync(path.dirname(WORLD_MAP_PATH), { recursive: true });
+    writeFileSync(WORLD_MAP_PATH, `${JSON.stringify(createDefaultWorldMapData(), null, 2)}\n`, 'utf8');
+  }
+
+  const raw = loadRequiredJsonFile(WORLD_MAP_PATH);
+  return normalizeWorldMapData(raw);
+}
+
+const WORLD_MAP_DATA = loadWorldMapData();
+WORLD_WIDTH_TILES = Math.max(1, Math.floor(Number(WORLD_MAP_DATA.width) || DEFAULT_WORLD_WIDTH_TILES));
+WORLD_HEIGHT_TILES = Math.max(1, Math.floor(Number(WORLD_MAP_DATA.height) || DEFAULT_WORLD_HEIGHT_TILES));
+const CHUNK_ZERO_ORIGIN_TILE_X = clamp(
+  Math.floor(Number(WORLD_MAP_DATA.chunkZeroOriginTileX ?? 0)),
+  0,
+  Math.max(0, WORLD_WIDTH_TILES - 1),
+);
+const CHUNK_ZERO_ORIGIN_TILE_Y = clamp(
+  Math.floor(Number(WORLD_MAP_DATA.chunkZeroOriginTileY ?? 0)),
+  0,
+  Math.max(0, WORLD_HEIGHT_TILES - 1),
+);
+const ORIGINAL_CHUNK_WIDTH_TILES = Math.max(
+  1,
+  Math.floor(Number(WORLD_MAP_DATA.chunkWidth ?? DEFAULT_WORLD_WIDTH_TILES)),
+);
+const ORIGINAL_CHUNK_HEIGHT_TILES = Math.max(
+  1,
+  Math.floor(Number(WORLD_MAP_DATA.chunkHeight ?? DEFAULT_WORLD_HEIGHT_TILES)),
+);
+const ORIGINAL_CHUNK_CENTER_TILE_X = clamp(
+  CHUNK_ZERO_ORIGIN_TILE_X + Math.floor(ORIGINAL_CHUNK_WIDTH_TILES * 0.5),
+  1,
+  Math.max(1, WORLD_WIDTH_TILES - 2),
+);
+const ORIGINAL_CHUNK_CENTER_TILE_Y = clamp(
+  CHUNK_ZERO_ORIGIN_TILE_Y + Math.floor(ORIGINAL_CHUNK_HEIGHT_TILES * 0.5),
+  1,
+  Math.max(1, WORLD_HEIGHT_TILES - 2),
+);
+const NEW_PLAYER_SPAWN_TILE_X = clamp(
+  CHUNK_ZERO_ORIGIN_TILE_X + NEW_PLAYER_SPAWN_LOCAL_TILE_X,
+  1,
+  Math.max(1, WORLD_WIDTH_TILES - 2),
+);
+const NEW_PLAYER_SPAWN_TILE_Y = clamp(
+  CHUNK_ZERO_ORIGIN_TILE_Y + NEW_PLAYER_SPAWN_LOCAL_TILE_Y,
+  1,
+  Math.max(1, WORLD_HEIGHT_TILES - 2),
+);
 
 function loadItemDefinitions() {
   const raw = loadRequiredJsonFile(ITEM_CONTENT_PATH);
@@ -617,30 +1051,24 @@ function getGearDefinition(itemId) {
   return GEAR_DEFINITIONS[String(itemId ?? '')] ?? null;
 }
 
-const NPC_DEFINITIONS = {
-  shopkeeperBob: {
-    id: 'npc-shopkeeper-bob',
-    type: 'shopkeeper',
-    name: 'Bob',
-    tileX: 40,
-    tileY: 40,
-    examineText: 'A friendly general store shopkeeper.',
-    talkText: 'Hello there! Need supplies or want to sell your goods?',
-  },
-  bankChest: {
-    id: 'npc-bank-chest',
-    type: 'bank_chest',
-    name: 'Bank chest',
-    tileX: 42,
-    tileY: 38,
-    examineText: 'A sturdy chest for secure item storage.',
-  },
-};
+const NPC_DEFINITIONS = Object.fromEntries(
+  WORLD_MAP_DATA.npcs.map((entry) => [entry.id, entry]),
+);
+
+function getNpcById(npcId) {
+  return NPC_DEFINITIONS[String(npcId ?? '')] ?? null;
+}
+
+function getNpcByType(npcType) {
+  return Object.values(NPC_DEFINITIONS).find((entry) => entry.type === npcType) ?? null;
+}
+
+const SHOPKEEPER_NPC = getNpcByType('shopkeeper');
 
 const SHOP_DEFINITIONS = {
   generalStore: {
     id: 'shop-general-store',
-    npcId: NPC_DEFINITIONS.shopkeeperBob.id,
+    npcId: SHOPKEEPER_NPC?.id ?? 'npc-shopkeeper-bob',
     name: 'Bob\'s General Store',
     listings: [
       {
@@ -737,50 +1165,7 @@ const SHOP_DEFINITIONS = {
   },
 };
 
-const MINION_SPAWN_DEFINITIONS = [
-  {
-    id: 'enemy-goblin-1',
-    minionTypeId: 'goblin',
-    tier: 1,
-    tileX: 33,
-    tileY: 39,
-  },
-  {
-    id: 'enemy-goblin-2',
-    minionTypeId: 'goblin',
-    tier: 1,
-    tileX: 47,
-    tileY: 41,
-  },
-  {
-    id: 'enemy-goblin-3',
-    minionTypeId: 'goblin',
-    tier: 2,
-    tileX: 25,
-    tileY: 36,
-  },
-  {
-    id: 'enemy-goblin-4',
-    minionTypeId: 'goblin',
-    tier: 2,
-    tileX: 55,
-    tileY: 44,
-  },
-  {
-    id: 'enemy-goblin-5',
-    minionTypeId: 'goblin',
-    tier: 3,
-    tileX: 20,
-    tileY: 34,
-  },
-  {
-    id: 'enemy-goblin-6',
-    minionTypeId: 'goblin',
-    tier: 4,
-    tileX: 60,
-    tileY: 46,
-  },
-];
+const MINION_SPAWN_DEFINITIONS = WORLD_MAP_DATA.monsters;
 
 const DEFAULT_HARVESTING_SKILL_CONFIGS = {
   woodcutting: {
@@ -1728,8 +2113,110 @@ function dropInventorySlot(player, slotIndex, quantity) {
   }
 
   return {
+    itemId: slot.itemId,
     name: slot.name,
     quantity: removedQuantity,
+  };
+}
+
+function dropItemToGround({
+  itemId,
+  quantity,
+  tileX,
+  tileY,
+  ownerPlayerId = null,
+  nowMs = Date.now(),
+}) {
+  const itemDefinition = getItemDefinition(itemId);
+  if (!itemDefinition) {
+    return null;
+  }
+
+  const safeQuantity = Math.max(1, Math.floor(Number(quantity ?? 1)));
+  const safeTileX = clamp(Math.floor(Number(tileX ?? 0)), 0, WORLD_WIDTH_TILES - 1);
+  const safeTileY = clamp(Math.floor(Number(tileY ?? 0)), 0, WORLD_HEIGHT_TILES - 1);
+  const hasOwner = typeof ownerPlayerId === 'string' && ownerPlayerId.length > 0;
+
+  const groundItem = {
+    id: `ground-${randomUUID()}`,
+    itemId: itemDefinition.id,
+    name: itemDefinition.name,
+    image: itemDefinition.image,
+    examineText: itemDefinition.examineText,
+    quantity: safeQuantity,
+    tileX: safeTileX,
+    tileY: safeTileY,
+    ownerPlayerId: hasOwner ? ownerPlayerId : null,
+    ownerOnlyUntil: hasOwner ? nowMs + GROUND_ITEM_OWNER_PRIORITY_MS : nowMs,
+    despawnAt: nowMs + GROUND_ITEM_LIFETIME_MS,
+    createdAt: nowMs,
+  };
+
+  worldGroundItems.set(groundItem.id, groundItem);
+  return groundItem;
+}
+
+function isGroundItemVisibleToPlayer(groundItem, viewerPlayerId, nowMs) {
+  if (!groundItem || groundItem.despawnAt <= nowMs) {
+    return false;
+  }
+
+  if (!groundItem.ownerPlayerId) {
+    return true;
+  }
+
+  if (viewerPlayerId && groundItem.ownerPlayerId === viewerPlayerId) {
+    return true;
+  }
+
+  return nowMs >= groundItem.ownerOnlyUntil;
+}
+
+function processGroundItemLifecycle(nowMs) {
+  for (const [groundItemId, groundItem] of worldGroundItems.entries()) {
+    if (groundItem.despawnAt > nowMs) {
+      continue;
+    }
+
+    worldGroundItems.delete(groundItemId);
+  }
+}
+
+function tryPickupGroundItem(player, groundItemId, nowMs) {
+  const id = String(groundItemId ?? '').trim();
+  if (!id) {
+    return { ok: false, reason: 'Invalid ground item.' };
+  }
+
+  const groundItem = worldGroundItems.get(id);
+  if (!groundItem) {
+    return { ok: false, reason: 'That item is no longer there.' };
+  }
+
+  if (groundItem.despawnAt <= nowMs) {
+    worldGroundItems.delete(id);
+    return { ok: false, reason: 'That item has already despawned.' };
+  }
+
+  if (!isGroundItemVisibleToPlayer(groundItem, player.id, nowMs)) {
+    return { ok: false, reason: 'That item is not visible to you yet.' };
+  }
+
+  const distance = Math.abs(player.tileX - groundItem.tileX) + Math.abs(player.tileY - groundItem.tileY);
+  if (distance > GROUND_ITEM_PICKUP_RANGE_TILES) {
+    return { ok: false, reason: 'Move closer to pick that up.' };
+  }
+
+  const added = addItemToInventory(player, groundItem.itemId, groundItem.quantity);
+  if (!added) {
+    return { ok: false, reason: 'Not enough inventory space.' };
+  }
+
+  worldGroundItems.delete(id);
+  return {
+    ok: true,
+    itemName: groundItem.name,
+    quantity: groundItem.quantity,
   };
 }
 
@@ -1835,67 +2322,68 @@ function applyMinionDropsToPlayer(player, minionDefinition) {
   const rolledDrops = rollMinionDrops(minionDefinition);
   if (rolledDrops.length === 0) {
     return {
-      awardedDrops: [],
+      droppedDrops: [],
       lootTableDrops: [],
     };
   }
 
   const mergedDrops = new Map();
-  const rolledLootTableDropsByItemId = new Map();
   for (const drop of rolledDrops) {
     const current = mergedDrops.get(drop.itemId) ?? 0;
     mergedDrops.set(drop.itemId, current + drop.quantity);
-
-    const sourceLootTableId = String(drop.sourceLootTableId ?? '').trim();
-    const sourceLootTableName = String(drop.sourceLootTableName ?? '').trim();
-    if (!sourceLootTableId) {
-      continue;
-    }
-
-    const itemList = rolledLootTableDropsByItemId.get(drop.itemId) ?? [];
-    itemList.push({
-      sourceLootTableId,
-      sourceLootTableName,
-      quantity: drop.quantity,
-    });
-    rolledLootTableDropsByItemId.set(drop.itemId, itemList);
   }
 
-  const awardedDrops = [];
-  const mergedLootTableDrops = new Map();
+  const droppedDrops = [];
+  const droppedItemIds = new Set();
+  const dropTileX = Math.floor(Number(minionDefinition?.tileX ?? player.tileX));
+  const dropTileY = Math.floor(Number(minionDefinition?.tileY ?? player.tileY));
+  const nowMs = Date.now();
   for (const [itemId, quantity] of mergedDrops.entries()) {
-    const added = addItemToInventory(player, itemId, quantity);
-    if (!added) {
+    const droppedGroundItem = dropItemToGround({
+      itemId,
+      quantity,
+      tileX: dropTileX,
+      tileY: dropTileY,
+      ownerPlayerId: player.id,
+      nowMs,
+    });
+    if (!droppedGroundItem) {
       continue;
     }
 
-    const itemDefinition = getItemDefinition(itemId);
-    awardedDrops.push({
+    droppedItemIds.add(itemId);
+    droppedDrops.push({
       itemId,
       quantity,
-      name: itemDefinition?.name ?? itemId,
+      name: droppedGroundItem.name,
     });
+  }
 
-    const sourceLootTableDrops = rolledLootTableDropsByItemId.get(itemId) ?? [];
-    for (const sourceDrop of sourceLootTableDrops) {
-      const mergeKey = `${sourceDrop.sourceLootTableId}::${itemId}`;
-      const currentMerged = mergedLootTableDrops.get(mergeKey);
-      if (currentMerged) {
-        currentMerged.quantity += sourceDrop.quantity;
-      } else {
-        mergedLootTableDrops.set(mergeKey, {
-          sourceLootTableId: sourceDrop.sourceLootTableId,
-          sourceLootTableName: sourceDrop.sourceLootTableName,
-          itemId,
-          itemName: itemDefinition?.name ?? itemId,
-          quantity: sourceDrop.quantity,
-        });
-      }
+  const mergedLootTableDrops = new Map();
+  for (const drop of rolledDrops) {
+    const sourceLootTableId = String(drop.sourceLootTableId ?? '').trim();
+    if (!sourceLootTableId || !droppedItemIds.has(drop.itemId)) {
+      continue;
+    }
+
+    const mergeKey = `${sourceLootTableId}::${drop.itemId}`;
+    const itemDefinition = getItemDefinition(drop.itemId);
+    const currentMerged = mergedLootTableDrops.get(mergeKey);
+    if (currentMerged) {
+      currentMerged.quantity += drop.quantity;
+    } else {
+      mergedLootTableDrops.set(mergeKey, {
+        sourceLootTableId,
+        sourceLootTableName: String(drop.sourceLootTableName ?? ''),
+        itemId: drop.itemId,
+        itemName: itemDefinition?.name ?? drop.itemId,
+        quantity: drop.quantity,
+      });
     }
   }
 
   return {
-    awardedDrops,
+    droppedDrops,
     lootTableDrops: Array.from(mergedLootTableDrops.values()),
   };
 }
@@ -2193,6 +2681,7 @@ function addSkillXp(player, skillName, xpAmount) {
 const clients = new Map();
 const worldNodes = createWorldNodes();
 const worldEnemies = createWorldEnemies();
+const worldGroundItems = new Map();
 
 const wss = new WebSocketServer({ port: SERVER_PORT });
 
@@ -2417,8 +2906,30 @@ function sanitizePlayerProfile(rawProfile) {
   skills.defense.level = getLevelForXp(skills.defense.xp);
   skills.constitution.level = getLevelForXp(skills.constitution.xp);
 
-  const tileX = Math.max(1, Math.min(WORLD_WIDTH_TILES - 2, Math.round(Number(rawProfile?.tileX ?? 40))));
-  const tileY = Math.max(1, Math.min(WORLD_HEIGHT_TILES - 2, Math.round(Number(rawProfile?.tileY ?? 40))));
+  const coordinateSpaceVersion = Math.max(
+    1,
+    Math.floor(Number(rawProfile?.coordinateSpaceVersion ?? 1)),
+  );
+  const savedTileX = Number(rawProfile?.tileX ?? NEW_PLAYER_SPAWN_TILE_X);
+  const savedTileY = Number(rawProfile?.tileY ?? NEW_PLAYER_SPAWN_TILE_Y);
+  const needsChunkZeroMigration = coordinateSpaceVersion < PROFILE_COORDINATE_SPACE_VERSION;
+  const chunkZeroMaxTileX = CHUNK_ZERO_ORIGIN_TILE_X + ORIGINAL_CHUNK_WIDTH_TILES - 1;
+  const chunkZeroMaxTileY = CHUNK_ZERO_ORIGIN_TILE_Y + ORIGINAL_CHUNK_HEIGHT_TILES - 1;
+  const appearsAlreadyInChunkZeroWorldSpace =
+    savedTileX >= CHUNK_ZERO_ORIGIN_TILE_X
+    && savedTileX <= chunkZeroMaxTileX
+    && savedTileY >= CHUNK_ZERO_ORIGIN_TILE_Y
+    && savedTileY <= chunkZeroMaxTileY;
+
+  const migratedTileX = needsChunkZeroMigration && !appearsAlreadyInChunkZeroWorldSpace
+    ? savedTileX + CHUNK_ZERO_ORIGIN_TILE_X
+    : savedTileX;
+  const migratedTileY = needsChunkZeroMigration && !appearsAlreadyInChunkZeroWorldSpace
+    ? savedTileY + CHUNK_ZERO_ORIGIN_TILE_Y
+    : savedTileY;
+
+  const tileX = Math.max(1, Math.min(WORLD_WIDTH_TILES - 2, Math.round(migratedTileX)));
+  const tileY = Math.max(1, Math.min(WORLD_HEIGHT_TILES - 2, Math.round(migratedTileY)));
   const maxHp = Math.max(1, Math.floor(Number(rawProfile?.maxHp ?? PLAYER_BASE_HP)));
   const hp = Math.max(1, Math.min(maxHp, Math.floor(Number(rawProfile?.hp ?? maxHp))));
 
@@ -2433,6 +2944,7 @@ function sanitizePlayerProfile(rawProfile) {
 
   return {
     displayName: String(rawProfile?.displayName ?? '').trim(),
+    coordinateSpaceVersion: PROFILE_COORDINATE_SPACE_VERSION,
     tileX,
     tileY,
     hp,
@@ -2471,6 +2983,227 @@ function savePlayerProfiles(profiles) {
   mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(PLAYER_PROFILES_PATH, `${JSON.stringify(profiles, null, 2)}\n`, 'utf8');
 }
+
+function toBase64Url(value) {
+  const asBuffer = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8');
+  return asBuffer
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function fromBase64Url(value) {
+  const normalized = String(value).replace(/-/g, '+').replace(/_/g, '/');
+  const paddingLength = (4 - (normalized.length % 4)) % 4;
+  return Buffer.from(`${normalized}${'='.repeat(paddingLength)}`, 'base64');
+}
+
+function hashPassword(password, saltHex) {
+  return scryptSync(String(password), String(saltHex), 64).toString('hex');
+}
+
+function loadOrCreateAuthSecret() {
+  mkdirSync(DATA_DIR, { recursive: true });
+
+  if (!existsSync(AUTH_SECRET_PATH)) {
+    const generatedSecret = randomBytes(48).toString('hex');
+    writeFileSync(AUTH_SECRET_PATH, `${generatedSecret}\n`, 'utf8');
+    return generatedSecret;
+  }
+
+  const existingSecret = readFileSync(AUTH_SECRET_PATH, 'utf8').trim();
+  if (existingSecret.length >= 32) {
+    return existingSecret;
+  }
+
+  const regeneratedSecret = randomBytes(48).toString('hex');
+  writeFileSync(AUTH_SECRET_PATH, `${regeneratedSecret}\n`, 'utf8');
+  return regeneratedSecret;
+}
+
+function loadAccounts() {
+  if (!existsSync(ACCOUNTS_PATH)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(ACCOUNTS_PATH, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+
+    const normalized = {};
+    for (const [usernameKey, entry] of Object.entries(parsed)) {
+      const normalizedUsername = String(usernameKey).trim().toLowerCase();
+      if (!/^[a-z0-9_]{3,24}$/.test(normalizedUsername)) {
+        continue;
+      }
+
+      const accountId = String(entry?.accountId ?? '').trim();
+      const username = String(entry?.username ?? '').trim();
+      const passwordSalt = String(entry?.passwordSalt ?? '').trim();
+      const passwordHash = String(entry?.passwordHash ?? '').trim();
+      const createdAt = Number(entry?.createdAt ?? Date.now());
+
+      if (!accountId || !username || !passwordSalt || !passwordHash) {
+        continue;
+      }
+
+      normalized[normalizedUsername] = {
+        accountId,
+        username,
+        passwordSalt,
+        passwordHash,
+        createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+      };
+    }
+
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function saveAccounts(accounts) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(ACCOUNTS_PATH, `${JSON.stringify(accounts, null, 2)}\n`, 'utf8');
+}
+
+function buildAccountsById(accountsByUsername) {
+  const byId = {};
+  for (const account of Object.values(accountsByUsername)) {
+    byId[account.accountId] = account;
+  }
+  return byId;
+}
+
+function buildProfileIdForAccount(accountId) {
+  return `acct_${accountId}`;
+}
+
+function normalizeUsername(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function isValidUsername(username) {
+  return /^[a-z0-9_]{3,24}$/.test(username);
+}
+
+function isValidPassword(password) {
+  const text = String(password ?? '');
+  return text.length >= 8 && text.length <= 128;
+}
+
+function registerAccount(usernameInput, passwordInput) {
+  const username = normalizeUsername(usernameInput);
+  if (!isValidUsername(username)) {
+    return { ok: false, reason: 'Username must be 3-24 chars: lowercase letters, numbers, underscore.' };
+  }
+
+  if (!isValidPassword(passwordInput)) {
+    return { ok: false, reason: 'Password must be 8-128 characters.' };
+  }
+
+  if (accountsByUsername[username]) {
+    return { ok: false, reason: 'That username is already taken.' };
+  }
+
+  const accountId = randomUUID().replace(/-/g, '');
+  const passwordSalt = randomBytes(16).toString('hex');
+  const passwordHash = hashPassword(passwordInput, passwordSalt);
+
+  const account = {
+    accountId,
+    username,
+    passwordSalt,
+    passwordHash,
+    createdAt: Date.now(),
+  };
+
+  accountsByUsername[username] = account;
+  accountsById[accountId] = account;
+  saveAccounts(accountsByUsername);
+
+  return { ok: true, account };
+}
+
+function loginAccount(usernameInput, passwordInput) {
+  const username = normalizeUsername(usernameInput);
+  const account = accountsByUsername[username];
+  if (!account || !isValidPassword(passwordInput)) {
+    return { ok: false, reason: 'Invalid username or password.' };
+  }
+
+  const expectedHash = Buffer.from(account.passwordHash, 'hex');
+  const providedHash = Buffer.from(hashPassword(passwordInput, account.passwordSalt), 'hex');
+  if (expectedHash.length !== providedHash.length || !timingSafeEqual(expectedHash, providedHash)) {
+    return { ok: false, reason: 'Invalid username or password.' };
+  }
+
+  return { ok: true, account };
+}
+
+function createAuthToken(secret, account) {
+  const now = Date.now();
+  const payload = {
+    accountId: account.accountId,
+    username: account.username,
+    iat: now,
+    exp: now + AUTH_TOKEN_TTL_MS,
+    nonce: randomUUID().replace(/-/g, ''),
+    v: 1,
+  };
+
+  const encodedPayload = toBase64Url(JSON.stringify(payload));
+  const signature = createHmac('sha256', secret).update(encodedPayload).digest();
+  const encodedSignature = toBase64Url(signature);
+  return `${encodedPayload}.${encodedSignature}`;
+}
+
+function verifyAuthToken(secret, token) {
+  const rawToken = String(token ?? '').trim();
+  if (!rawToken.includes('.')) {
+    return null;
+  }
+
+  const [encodedPayload, encodedSignature] = rawToken.split('.', 2);
+  if (!encodedPayload || !encodedSignature) {
+    return null;
+  }
+
+  const expectedSignature = createHmac('sha256', secret).update(encodedPayload).digest();
+  const providedSignature = fromBase64Url(encodedSignature);
+  if (providedSignature.length !== expectedSignature.length) {
+    return null;
+  }
+
+  if (!timingSafeEqual(providedSignature, expectedSignature)) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(fromBase64Url(encodedPayload).toString('utf8'));
+    const accountId = String(payload?.accountId ?? '').trim();
+    const username = String(payload?.username ?? '').trim();
+    const exp = Number(payload?.exp ?? 0);
+
+    if (!accountId || !username || !Number.isFinite(exp) || exp <= Date.now()) {
+      return null;
+    }
+
+    return {
+      accountId,
+      username,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const AUTH_SECRET = loadOrCreateAuthSecret();
+const accountsByUsername = loadAccounts();
+const accountsById = buildAccountsById(accountsByUsername);
 
 const playerProfiles = loadPlayerProfiles();
 
@@ -2517,18 +3250,6 @@ function applyPersistedProfile(player, profile) {
   player.skills.constitution.level = getLevelForXp(player.skills.constitution.xp);
   applyPlayerMaxHpFromConstitution(player, true);
   player.nextHpRegenAt = Date.now() + PLAYER_HP_REGEN_INTERVAL_MS;
-}
-
-function resolveProfileIdFromRequest(request) {
-  const rawUrl = request?.url ?? '/';
-  const parsedUrl = new URL(rawUrl, 'ws://127.0.0.1');
-  const profileId = parsedUrl.searchParams.get('profileId') ?? '';
-
-  if (/^[a-zA-Z0-9_-]{8,64}$/.test(profileId)) {
-    return profileId;
-  }
-
-  return randomUUID().replace(/-/g, '').slice(0, 24);
 }
 
 function createWorldEnemies() {
@@ -2617,13 +3338,14 @@ function createWorldEnemies() {
 
 function createWorldNodes() {
   const nodes = new Map();
-  const definitions = [
-    { id: 'tree-1', type: 'tree', resourceId: 'birch_tree', tileX: 35, tileY: 36, respawnMs: 5000 },
-    { id: 'tree-2', type: 'tree', resourceId: 'oak_tree', tileX: 46, tileY: 35, respawnMs: 6500 },
-    { id: 'rock-1', type: 'rock', resourceId: 'copper_rock', tileX: 34, tileY: 43, respawnMs: 6500 },
-    { id: 'rock-3', type: 'rock', resourceId: 'tin_rock', tileX: 39, tileY: 44, respawnMs: 6500 },
-    { id: 'rock-2', type: 'rock', resourceId: 'iron_rock', tileX: 45, tileY: 44, respawnMs: 7500 },
-  ];
+  const definitions = WORLD_MAP_DATA.resources.map((entry) => ({
+    id: entry.id,
+    type: entry.nodeType,
+    resourceId: entry.resourceId,
+    tileX: entry.tileX,
+    tileY: entry.tileY,
+    respawnMs: entry.respawnMs,
+  }));
 
   for (const definition of definitions) {
     if (!isBaseWalkableTile(definition.tileX, definition.tileY)) {
@@ -2780,14 +3502,8 @@ function clamp(value, min, max) {
 }
 
 function isWaterTile(tileX, tileY) {
-  const edgeDistance = Math.min(
-    tileY,
-    tileX,
-    WORLD_HEIGHT_TILES - 1 - tileY,
-    WORLD_WIDTH_TILES - 1 - tileX,
-  );
-
-  return edgeDistance < 3;
+  const tileId = WORLD_MAP_DATA.terrain[tileY]?.[tileX];
+  return tileId === WATER_TILE_ID;
 }
 
 function isBaseWalkableTile(tileX, tileY) {
@@ -2801,6 +3517,20 @@ function isBaseWalkableTile(tileX, tileY) {
 function isNodeBlockingTile(tileX, tileY) {
   for (const node of worldNodes.values()) {
     if (node.tileX === tileX && node.tileY === tileY) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isObjectBlockingTile(tileX, tileY) {
+  for (const object of WORLD_MAP_DATA.objects) {
+    if (!object.blocksMovement) {
+      continue;
+    }
+
+    if (object.tileX === tileX && object.tileY === tileY) {
       return true;
     }
   }
@@ -2837,12 +3567,18 @@ function isWalkableTile(tileX, tileY) {
     return false;
   }
 
-  return !isNodeBlockingTile(tileX, tileY) && !isNpcBlockingTile(tileX, tileY);
+  return !isNodeBlockingTile(tileX, tileY)
+    && !isNpcBlockingTile(tileX, tileY)
+    && !isObjectBlockingTile(tileX, tileY);
 }
 
 function findSpawnTile() {
-  const centerX = Math.floor(WORLD_WIDTH_TILES * 0.5);
-  const centerY = Math.floor(WORLD_HEIGHT_TILES * 0.5);
+  const centerX = NEW_PLAYER_SPAWN_TILE_X;
+  const centerY = NEW_PLAYER_SPAWN_TILE_Y;
+
+  if (isWalkableTile(centerX, centerY)) {
+    return { tileX: centerX, tileY: centerY };
+  }
 
   for (let radius = 0; radius < 20; radius += 1) {
     for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -3335,7 +4071,8 @@ function getShopByNpcId(npcId) {
 }
 
 function getBankNpcById(npcId) {
-  return NPC_DEFINITIONS.bankChest.id === npcId ? NPC_DEFINITIONS.bankChest : null;
+  const npc = getNpcById(npcId);
+  return npc?.type === 'bank_chest' ? npc : null;
 }
 
 function sendBankSnapshotToSocket(socket, player) {
@@ -3405,7 +4142,48 @@ function getNodeSnapshot(now) {
   return nodes;
 }
 
-function makeSnapshot(now) {
+function getGroundItemSnapshot(viewerPlayerId, now) {
+  const groundItems = {};
+
+  for (const groundItem of worldGroundItems.values()) {
+    if (!isGroundItemVisibleToPlayer(groundItem, viewerPlayerId, now)) {
+      continue;
+    }
+
+    groundItems[groundItem.id] = {
+      id: groundItem.id,
+      itemId: groundItem.itemId,
+      name: groundItem.name,
+      image: groundItem.image,
+      quantity: groundItem.quantity,
+      tileX: groundItem.tileX,
+      tileY: groundItem.tileY,
+      despawnAt: groundItem.despawnAt,
+    };
+  }
+
+  return groundItems;
+}
+
+function getObjectSnapshot() {
+  const objects = {};
+
+  for (const object of WORLD_MAP_DATA.objects) {
+    objects[object.id] = {
+      id: object.id,
+      objectTypeId: object.objectTypeId,
+      name: object.name,
+      tileX: object.tileX,
+      tileY: object.tileY,
+      blocksMovement: object.blocksMovement,
+      examineText: object.examineText,
+    };
+  }
+
+  return objects;
+}
+
+function makeSnapshot(now, viewerPlayerId = null) {
   const players = {};
 
   for (const [id, client] of clients.entries()) {
@@ -3462,8 +4240,10 @@ function makeSnapshot(now) {
     players,
     nodes: getNodeSnapshot(now),
     npcs: getNpcSnapshot(),
+    objects: getObjectSnapshot(),
     shops: getShopSnapshot(),
     enemies: getEnemySnapshot(now),
+    groundItems: getGroundItemSnapshot(viewerPlayerId, now),
   };
 }
 
@@ -3819,7 +4599,7 @@ function processPlayerCombat(player, nowMs) {
 
   if (enemy.hp <= 0) {
     const dropResult = applyMinionDropsToPlayer(player, enemy);
-    const awardedDrops = dropResult.awardedDrops;
+    const droppedDrops = dropResult.droppedDrops;
     enemy.deadUntil = nowMs + enemy.respawnMs;
     enemy.hp = 0;
     enemy.targetPlayerId = null;
@@ -3828,11 +4608,11 @@ function processPlayerCombat(player, nowMs) {
     enemy.targetPath = [];
     enemy.nextMoveAllowedAt = nowMs;
     player.combatTargetEnemyId = null;
-    if (awardedDrops.length > 0) {
-      const dropSummary = awardedDrops
+    if (droppedDrops.length > 0) {
+      const dropSummary = droppedDrops
         .map((drop) => `${drop.quantity > 1 ? `${drop.quantity} ` : ''}${drop.name.toLowerCase()}`)
         .join(', ');
-      player.lastActionText = `You defeated ${enemy.name}. Loot: ${dropSummary}.`;
+      player.lastActionText = `You defeated ${enemy.name}. Ground loot: ${dropSummary}.`;
     } else {
       player.lastActionText = `You defeated ${enemy.name}.`;
     }
@@ -4052,8 +4832,20 @@ setInterval(() => {
   }
 
   processEnemyAi(now);
+  processGroundItemLifecycle(now);
 
-  broadcast({ type: 'state', ...makeSnapshot(now) });
+  for (const [clientId, client] of clients.entries()) {
+    if (client.socket.readyState !== 1) {
+      continue;
+    }
+
+    client.socket.send(
+      JSON.stringify({
+        type: 'state',
+        ...makeSnapshot(now, clientId),
+      }),
+    );
+  }
 
   const nowForLog = Date.now();
   if (nowForLog - lastStateLogAt >= STATE_LOG_INTERVAL_MS) {
@@ -4069,83 +4861,173 @@ setInterval(() => {
   persistAllConnectedProfiles();
 }, PROFILE_AUTOSAVE_INTERVAL_MS);
 
-wss.on('connection', (socket, request) => {
+wss.on('connection', (socket) => {
   const id = randomUUID();
-  const profileId = resolveProfileIdFromRequest(request);
-  const player = createPlayer(id);
+  let accountId = null;
+  let authAttempts = 0;
 
-  const persistedProfile = playerProfiles[profileId];
-  if (persistedProfile) {
-    applyPersistedProfile(player, persistedProfile);
-  } else {
-    playerProfiles[profileId] = capturePlayerProfile(player);
-    savePlayerProfiles(playerProfiles);
+  function completeAuthentication(account, token) {
+    accountId = account.accountId;
+    const profileId = buildProfileIdForAccount(account.accountId);
+    const player = createPlayer(id);
+    player.displayName = account.username;
+
+    const persistedProfile = playerProfiles[profileId];
+    if (persistedProfile) {
+      applyPersistedProfile(player, persistedProfile);
+      player.displayName = account.username;
+    } else {
+      playerProfiles[profileId] = capturePlayerProfile(player);
+      savePlayerProfiles(playerProfiles);
+    }
+
+    clients.set(id, { socket, player, profileId, accountId: account.accountId });
+    log('player_connected', { id, players: clients.size, accountId: account.accountId });
+
+    socket.send(
+      JSON.stringify({
+        type: 'authOk',
+        token,
+        username: account.username,
+      }),
+    );
+
+    socket.send(
+      JSON.stringify({
+        type: 'welcome',
+        id,
+        ...makeSnapshot(Date.now(), id),
+      }),
+    );
+
+    broadcast({
+      type: 'playerJoined',
+      player: {
+        id,
+        displayName: player.displayName,
+        tileX: player.tileX,
+        tileY: player.tileY,
+        x: player.tileX * TILE_SIZE + TILE_SIZE * 0.5,
+        y: player.tileY * TILE_SIZE + TILE_SIZE * 0.5,
+        targetTileX: player.targetTileX,
+        targetTileY: player.targetTileY,
+        targetPath: player.targetPath.map((step) => ({
+          tileX: step.tileX,
+          tileY: step.tileY,
+        })),
+        hp: player.hp,
+        maxHp: player.maxHp,
+        combatTargetEnemyId: player.combatTargetEnemyId,
+        activeInteractionNodeId: player.activeInteractionNodeId,
+        gold: getPlayerGoldAmount(player),
+        skills: {
+          woodcutting: {
+            xp: player.skills.woodcutting.xp,
+            level: player.skills.woodcutting.level,
+          },
+          mining: {
+            xp: player.skills.mining.xp,
+            level: player.skills.mining.level,
+          },
+          strength: {
+            xp: player.skills.strength.xp,
+            level: player.skills.strength.level,
+          },
+          defense: {
+            xp: player.skills.defense.xp,
+            level: player.skills.defense.level,
+          },
+          constitution: {
+            xp: player.skills.constitution.xp,
+            level: player.skills.constitution.level,
+          },
+        },
+        inventory: {
+          ...toInventorySnapshot(player.inventory),
+        },
+        equipment: toEquipmentSnapshot(player.equipment),
+        lastActionText: player.lastActionText,
+      },
+    });
   }
-
-  clients.set(id, { socket, player, profileId });
-  log('player_connected', { id, players: clients.size });
 
   socket.send(
     JSON.stringify({
-      type: 'welcome',
-      id,
-      ...makeSnapshot(Date.now()),
+      type: 'authRequired',
+      usernamePattern: '^[a-z0-9_]{3,24}$',
+      passwordPolicy: '8-128 characters',
     }),
   );
-
-  broadcast({
-    type: 'playerJoined',
-    player: {
-      id,
-      displayName: player.displayName,
-      tileX: player.tileX,
-      tileY: player.tileY,
-      x: player.tileX * TILE_SIZE + TILE_SIZE * 0.5,
-      y: player.tileY * TILE_SIZE + TILE_SIZE * 0.5,
-      targetTileX: player.targetTileX,
-      targetTileY: player.targetTileY,
-      targetPath: player.targetPath.map((step) => ({
-        tileX: step.tileX,
-        tileY: step.tileY,
-      })),
-      hp: player.hp,
-      maxHp: player.maxHp,
-      combatTargetEnemyId: player.combatTargetEnemyId,
-      activeInteractionNodeId: player.activeInteractionNodeId,
-      gold: getPlayerGoldAmount(player),
-      skills: {
-        woodcutting: {
-          xp: player.skills.woodcutting.xp,
-          level: player.skills.woodcutting.level,
-        },
-        mining: {
-          xp: player.skills.mining.xp,
-          level: player.skills.mining.level,
-        },
-        strength: {
-          xp: player.skills.strength.xp,
-          level: player.skills.strength.level,
-        },
-        defense: {
-          xp: player.skills.defense.xp,
-          level: player.skills.defense.level,
-        },
-        constitution: {
-          xp: player.skills.constitution.xp,
-          level: player.skills.constitution.level,
-        },
-      },
-      inventory: {
-        ...toInventorySnapshot(player.inventory),
-      },
-      equipment: toEquipmentSnapshot(player.equipment),
-      lastActionText: player.lastActionText,
-    },
-  });
 
   socket.on('message', (rawMessage) => {
     try {
       const message = JSON.parse(rawMessage.toString());
+
+      const client = clients.get(id);
+      if (!client) {
+        const messageType = String(message?.type ?? '');
+        if (messageType !== 'authRegister' && messageType !== 'authLogin' && messageType !== 'authToken') {
+          socket.send(
+            JSON.stringify({
+              type: 'authError',
+              reason: 'Authentication required before joining the world.',
+            }),
+          );
+          return;
+        }
+
+        authAttempts += 1;
+        if (authAttempts > MAX_AUTH_ATTEMPTS_PER_CONNECTION) {
+          socket.close(1008, 'Too many auth attempts');
+          return;
+        }
+
+        if (messageType === 'authRegister') {
+          const registration = registerAccount(message.username, message.password);
+          if (!registration.ok) {
+            socket.send(JSON.stringify({ type: 'authError', reason: registration.reason }));
+            return;
+          }
+
+          const token = createAuthToken(AUTH_SECRET, registration.account);
+          completeAuthentication(registration.account, token);
+          return;
+        }
+
+        if (messageType === 'authLogin') {
+          const login = loginAccount(message.username, message.password);
+          if (!login.ok) {
+            socket.send(JSON.stringify({ type: 'authError', reason: login.reason }));
+            return;
+          }
+
+          const token = createAuthToken(AUTH_SECRET, login.account);
+          completeAuthentication(login.account, token);
+          return;
+        }
+
+        if (messageType === 'authToken') {
+          const payload = verifyAuthToken(AUTH_SECRET, message.token);
+          if (!payload) {
+            socket.send(JSON.stringify({ type: 'authError', reason: 'Session expired or invalid. Please login again.' }));
+            return;
+          }
+
+          const account = accountsById[payload.accountId];
+          if (!account || normalizeUsername(account.username) !== normalizeUsername(payload.username)) {
+            socket.send(JSON.stringify({ type: 'authError', reason: 'Account session no longer valid.' }));
+            return;
+          }
+
+          const refreshedToken = createAuthToken(AUTH_SECRET, account);
+          completeAuthentication(account, refreshedToken);
+          return;
+        }
+
+        return;
+      }
+
+      const player = client.player;
 
       if (message.type === 'input') {
         const directionX = Number(message.directionX ?? 0);
@@ -4286,9 +5168,35 @@ wss.on('connection', (socket, request) => {
           return;
         }
 
+        const groundItem = dropItemToGround({
+          itemId: dropped.itemId,
+          quantity: dropped.quantity,
+          tileX: player.tileX,
+          tileY: player.tileY,
+          ownerPlayerId: player.id,
+          nowMs: Date.now(),
+        });
+        if (!groundItem) {
+          sendChatToSocket(socket, '[Inventory] Could not place that item on the ground.');
+          return;
+        }
+
         const quantityText = dropped.quantity > 1 ? ` x${dropped.quantity}` : '';
         player.lastActionText = `Dropped ${dropped.name}${quantityText}`;
         sendChatToSocket(socket, `[Inventory] Dropped ${dropped.name}${quantityText}.`);
+        return;
+      }
+
+      if (message.type === 'groundItemPickup') {
+        const result = tryPickupGroundItem(player, message.groundItemId, Date.now());
+        if (!result.ok) {
+          sendChatToSocket(socket, `[Loot] ${result.reason}`);
+          return;
+        }
+
+        const quantityText = result.quantity > 1 ? ` x${result.quantity}` : '';
+        player.lastActionText = `Picked up ${result.itemName}${quantityText}`;
+        sendChatToSocket(socket, `[Loot] Picked up ${result.itemName}${quantityText}.`);
         return;
       }
 
@@ -4329,7 +5237,7 @@ wss.on('connection', (socket, request) => {
 
       if (message.type === 'npcTalk') {
         const npcId = String(message.npcId ?? '');
-        const npc = Object.values(NPC_DEFINITIONS).find((entry) => entry.id === npcId) ?? null;
+        const npc = getNpcById(npcId);
         if (!npc || !isWithinNpcRange(player, npc)) {
           return;
         }
@@ -4395,9 +5303,9 @@ wss.on('connection', (socket, request) => {
 
       if (message.type === 'shopOpen') {
         const npcId = String(message.npcId ?? '');
-        const npc = NPC_DEFINITIONS.shopkeeperBob.id === npcId ? NPC_DEFINITIONS.shopkeeperBob : null;
+        const npc = getNpcById(npcId);
         const shop = getShopByNpcId(npcId);
-        if (!npc || !shop || !isWithinNpcRange(player, npc)) {
+        if (!npc || npc.type !== 'shopkeeper' || !shop || !isWithinNpcRange(player, npc)) {
           return;
         }
 
@@ -4420,8 +5328,8 @@ wss.on('connection', (socket, request) => {
           return;
         }
 
-        const npc = NPC_DEFINITIONS.shopkeeperBob;
-        if (!isWithinNpcRange(player, npc)) {
+        const npc = getNpcById(shop.npcId);
+        if (!npc || !isWithinNpcRange(player, npc)) {
           sendChatToSocket(socket, '[Shop] You are too far away.');
           return;
         }
@@ -4459,8 +5367,8 @@ wss.on('connection', (socket, request) => {
           return;
         }
 
-        const npc = NPC_DEFINITIONS.shopkeeperBob;
-        if (!isWithinNpcRange(player, npc)) {
+        const npc = getNpcById(shop.npcId);
+        if (!npc || !isWithinNpcRange(player, npc)) {
           sendChatToSocket(socket, '[Shop] You are too far away.');
           return;
         }
@@ -4500,8 +5408,10 @@ wss.on('connection', (socket, request) => {
     }
 
     clients.delete(id);
-    broadcast({ type: 'playerLeft', id });
-    log('player_disconnected', { id, players: clients.size });
+    if (client) {
+      broadcast({ type: 'playerLeft', id });
+      log('player_disconnected', { id, players: clients.size, accountId });
+    }
   });
 });
 

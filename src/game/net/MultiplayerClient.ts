@@ -133,8 +133,31 @@ export interface WorldSnapshot {
   players: Record<string, RemotePlayerState>;
   nodes: Record<string, WorldNodeState>;
   npcs: Record<string, NpcState>;
+  objects: Record<string, WorldObjectState>;
   shops: Record<string, ShopState>;
   enemies: Record<string, EnemyState>;
+  groundItems?: Record<string, GroundItemState>;
+}
+
+export interface WorldObjectState {
+  id: string;
+  objectTypeId: string;
+  name: string;
+  tileX: number;
+  tileY: number;
+  blocksMovement: boolean;
+  examineText: string;
+}
+
+export interface GroundItemState {
+  id: string;
+  itemId: string;
+  name: string;
+  image: string;
+  quantity: number;
+  tileX: number;
+  tileY: number;
+  despawnAt: number;
 }
 
 export interface EnemyState {
@@ -158,7 +181,7 @@ export interface EnemyState {
 
 export interface NpcState {
   id: string;
-  type: 'shopkeeper' | 'bank_chest';
+  type: 'shopkeeper' | 'bank_chest' | 'villager' | string;
   name: string;
   tileX: number;
   tileY: number;
@@ -198,8 +221,10 @@ interface WelcomeMessage {
   players: Record<string, RemotePlayerState>;
   nodes: Record<string, WorldNodeState>;
   npcs: Record<string, NpcState>;
+  objects: Record<string, WorldObjectState>;
   shops: Record<string, ShopState>;
   enemies: Record<string, EnemyState>;
+  groundItems: Record<string, GroundItemState>;
 }
 
 interface StateMessage {
@@ -207,8 +232,10 @@ interface StateMessage {
   players: Record<string, RemotePlayerState>;
   nodes: Record<string, WorldNodeState>;
   npcs: Record<string, NpcState>;
+  objects: Record<string, WorldObjectState>;
   shops: Record<string, ShopState>;
   enemies: Record<string, EnemyState>;
+  groundItems: Record<string, GroundItemState>;
 }
 
 interface ShopOpenMessage {
@@ -237,6 +264,16 @@ interface ChatMessage {
   message: ChatMessageState;
 }
 
+interface PendingAuthPayload {
+  mode: 'login' | 'register';
+  username: string;
+  password: string;
+}
+
+const AUTH_PENDING_KEY = 'game-auth-pending';
+const AUTH_TOKEN_KEY = 'game-auth-token';
+const AUTH_USERNAME_KEY = 'game-auth-username';
+
 type ServerMessage =
   | WelcomeMessage
   | StateMessage
@@ -244,40 +281,34 @@ type ServerMessage =
   | PlayerLeftMessage
   | ChatMessage
   | ShopOpenMessage
-  | BankOpenMessage;
+  | BankOpenMessage
+  | {
+      type: 'authRequired';
+      usernamePattern: string;
+      passwordPolicy: string;
+    }
+  | {
+      type: 'authOk';
+      token: string;
+      username: string;
+    }
+  | {
+      type: 'authError';
+      reason: string;
+    };
 
 function resolveMultiplayerUrl(): string {
   const configuredUrl = import.meta.env.VITE_MULTIPLAYER_URL as string | undefined;
-  const profileId = getOrCreateProfileId();
 
-  const baseUrl = configuredUrl
+  return configuredUrl
     ? configuredUrl
     : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:2567`;
-
-  const parsedUrl = new URL(baseUrl);
-  parsedUrl.searchParams.set('profileId', profileId);
-  return parsedUrl.toString();
-}
-
-function getOrCreateProfileId(): string {
-  const storageKey = 'game-profile-id';
-  const existing = window.localStorage.getItem(storageKey);
-  if (existing && /^[a-zA-Z0-9_-]{8,64}$/.test(existing)) {
-    return existing;
-  }
-
-  const generated =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID().replace(/-/g, '').slice(0, 24)
-      : `profile_${Math.random().toString(36).slice(2, 14)}`;
-
-  window.localStorage.setItem(storageKey, generated);
-  return generated;
 }
 
 export class MultiplayerClient {
   private socket: WebSocket | null = null;
   private localPlayerId: string | null = null;
+  private lastAuthMethod: 'token' | 'login' | 'register' | null = null;
   private readonly debugEnabled =
     String(import.meta.env.VITE_DEBUG_NET ?? '').toLowerCase() === 'true';
   private stats: MultiplayerClientStats = {
@@ -295,6 +326,7 @@ export class MultiplayerClient {
     private readonly onChatMessage: (message: ChatMessageState) => void,
     private readonly onShopOpen: (shopId: string) => void,
     private readonly onBankOpen: (inventory: InventoryState, bank: InventoryState) => void,
+    private readonly onAuthFailure: (reason: string) => void,
   ) {}
 
   connect(): void {
@@ -325,14 +357,67 @@ export class MultiplayerClient {
 
       const message = JSON.parse(event.data) as ServerMessage;
 
+      if (message.type === 'authRequired') {
+        const pendingCredentials = this.consumePendingAuthPayload();
+        if (pendingCredentials && this.socket?.readyState === WebSocket.OPEN) {
+          this.lastAuthMethod = pendingCredentials.mode;
+          this.stats.messagesSent += 1;
+          this.socket.send(
+            JSON.stringify({
+              type: pendingCredentials.mode === 'register' ? 'authRegister' : 'authLogin',
+              username: pendingCredentials.username,
+              password: pendingCredentials.password,
+            }),
+          );
+          return;
+        }
+
+        const savedToken = window.localStorage.getItem(AUTH_TOKEN_KEY);
+        if (savedToken && this.socket?.readyState === WebSocket.OPEN) {
+          this.lastAuthMethod = 'token';
+          this.stats.messagesSent += 1;
+          this.socket.send(
+            JSON.stringify({
+              type: 'authToken',
+              token: savedToken,
+            }),
+          );
+          return;
+        }
+
+        this.onAuthFailure('Please login or create an account to continue.');
+        return;
+      }
+
+      if (message.type === 'authOk') {
+        window.localStorage.setItem(AUTH_TOKEN_KEY, message.token);
+        window.localStorage.setItem(AUTH_USERNAME_KEY, message.username);
+        return;
+      }
+
+      if (message.type === 'authError') {
+        this.log(`auth error: ${message.reason}`);
+
+        if (this.lastAuthMethod === 'token') {
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          this.onAuthFailure('Session expired. Please login again.');
+          return;
+        }
+
+        this.onAuthFailure(message.reason);
+        return;
+      }
+
       if (message.type === 'welcome') {
         this.localPlayerId = message.id;
         this.onWelcome(message.id, {
           players: message.players,
           nodes: message.nodes,
           npcs: message.npcs,
+          objects: message.objects ?? {},
           shops: message.shops,
           enemies: message.enemies,
+          groundItems: message.groundItems ?? {},
         });
         return;
       }
@@ -342,8 +427,10 @@ export class MultiplayerClient {
           players: message.players,
           nodes: message.nodes,
           npcs: message.npcs,
+          objects: message.objects ?? {},
           shops: message.shops,
           enemies: message.enemies,
+          groundItems: message.groundItems ?? {},
         });
         return;
       }
@@ -523,6 +610,20 @@ export class MultiplayerClient {
     );
   }
 
+  sendGroundItemPickup(groundItemId: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'groundItemPickup',
+        groundItemId,
+      }),
+    );
+  }
+
   sendInventoryMove(fromIndex: number, toIndex: number): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return;
@@ -648,5 +749,27 @@ export class MultiplayerClient {
     }
 
     console.debug(`[MultiplayerClient] ${message}`);
+  }
+
+  private consumePendingAuthPayload(): PendingAuthPayload | null {
+    const raw = window.sessionStorage.getItem(AUTH_PENDING_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<PendingAuthPayload>;
+      const mode = parsed.mode === 'register' ? 'register' : 'login';
+      const username = String(parsed.username ?? '').trim().toLowerCase();
+      const password = String(parsed.password ?? '');
+
+      if (!username || !password) {
+        return null;
+      }
+
+      return { mode, username, password };
+    } finally {
+      window.sessionStorage.removeItem(AUTH_PENDING_KEY);
+    }
   }
 }

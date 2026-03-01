@@ -1,0 +1,79 @@
+
+MMORPG Game & Map Editor: Website Deployment Instructions (Project-Root Accurate)
+===============================================================================
+
+1. Build the Project
+-------------------
+From your project root (C:/Users/Curtis Rose/Work/Game), run:
+
+    npm run build
+
+This creates a 'dist/' folder with everything needed for your website.
+
+2. Upload These to Your Website Folder
+-------------------------------------
+Copy the entire contents of the 'dist/' folder to your website's public root (or a subfolder if you want). This includes:
+
+    dist/index.html
+    dist/map-editor.html
+    dist/vite.svg
+    dist/assets/         (entire folder and all subfolders/files)
+    dist/data/worldMap.json
+
+Your website folder should look like:
+
+    /index.html
+    /map-editor.html
+    /vite.svg
+    /assets/...
+    /assets/items/...
+    /assets/resources/...
+    /assets/*.js, *.css
+    /data/worldMap.json
+
+3. Do NOT Upload
+----------------
+Do NOT upload: src/, server/, node_modules/, public/, or any files outside 'dist/' (except your own docs if you want).
+
+4. How to Access
+----------------
+Go to 'https://yourdomain.com/index.html' for the game.
+Go to 'https://yourdomain.com/map-editor.html' for the map editor.
+
+5. Map Saving
+-------------
+The map editor saves to 'data/worldMap.json'. After editing, download the new file and upload it to '/data/worldMap.json' on your site to update the live map.
+
+
+6. Multiplayer (Optional)
+------------------------
+Bluehost (and most shared web hosts) cannot run Node.js servers—they only serve static files and PHP. To enable multiplayer, you need a separate VPS or cloud server (like DigitalOcean, AWS, Linode, etc.) that supports Node.js.
+
+How to deploy the multiplayer server:
+
+1. Get a VPS/cloud server (Ubuntu or similar is fine).
+2. Copy your project folder (or just the 'server/' and 'public/data/worldMap.json' files) to the VPS.
+3. Install Node.js (v18+ recommended) on the VPS:
+    sudo apt update && sudo apt install nodejs npm
+4. On the VPS, in your project folder, run:
+    npm install
+5. Start the multiplayer server:
+    node server/multiplayerServer.mjs
+    (You may want to use a process manager like pm2 or screen for production.)
+6. Make sure port 2567 (or your chosen port) is open in your VPS firewall.
+7. In your website code, update the WebSocket URL to point to your VPS public IP or domain, e.g.:
+    ws://your-vps-ip:2567
+
+Your static website (on Bluehost) and the Node.js server (on your VPS) will communicate over the internet. You do NOT need to move your website—just run the multiplayer server separately and point the client to it.
+
+7. Troubleshooting
+------------------
+- If you see 404 errors for JS/CSS, check that all files from 'dist/' are present and paths are correct.
+- If the map editor does not load the map, ensure 'data/worldMap.json' is accessible and valid JSON.
+
+8. Security Note
+----------------
+Anyone with access to '/map-editor.html' can edit your map. Restrict access if needed.
+
+---
+For questions or updates, see your project README or contact your developer.
