@@ -10,6 +10,7 @@
     "dev:server:debug": "set DEBUG_MULTIPLAYER=true&& node server/multiplayerServer.mjs",
     "dev:all": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "smoke:multiplayer": "node scripts/multiplayerSmokeTest.mjs",
+    "smoke:crafting": "node scripts/craftingSmokeTest.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

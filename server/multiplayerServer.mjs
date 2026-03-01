@@ -188,6 +188,33 @@ const DEFAULT_OBJECT_DEFINITIONS = [
     blocksMovement: true,
     examineText: 'A sturdy building that houses the bank chest.',
   },
+  {
+    id: 'obj-smelting-station',
+    objectTypeId: 'smelting_station',
+    name: 'Smelting furnace',
+    tileX: 39,
+    tileY: 40,
+    blocksMovement: true,
+    examineText: 'A blazing furnace used to smelt ores into bars.',
+  },
+  {
+    id: 'obj-smithing-station',
+    objectTypeId: 'smithing_station',
+    name: 'Smithing anvil',
+    tileX: 41,
+    tileY: 40,
+    blocksMovement: true,
+    examineText: 'A sturdy anvil for shaping bars into equipment.',
+  },
+  {
+    id: 'obj-fletching-station',
+    objectTypeId: 'fletching_station',
+    name: 'Fletching bench',
+    tileX: 43,
+    tileY: 40,
+    blocksMovement: true,
+    examineText: 'A crafting bench for carving logs into bows and arrows.',
+  },
 ];
 
 function generateDefaultTerrainData() {
@@ -1213,6 +1240,32 @@ const SHOP_DEFINITIONS = {
   },
 };
 
+const CRAFTING_STATIONS = {
+  smelting_station: {
+    stationType: 'smelting_station',
+    title: 'Smelting Furnace',
+    recipeSkill: 'smelting',
+    xpSkill: 'smithing',
+  },
+  smithing_station: {
+    stationType: 'smithing_station',
+    title: 'Smithing Anvil',
+    recipeSkill: 'smithing',
+    xpSkill: 'smithing',
+  },
+  fletching_station: {
+    stationType: 'fletching_station',
+    title: 'Fletching Bench',
+    recipeSkill: 'fletching',
+    xpSkill: 'fletching',
+  },
+};
+
+function getCraftingStationByObjectType(objectTypeId) {
+  const key = String(objectTypeId ?? '');
+  return CRAFTING_STATIONS[key] ?? null;
+}
+
 const MINION_SPAWN_DEFINITIONS = WORLD_MAP_DATA.monsters;
 
 const DEFAULT_HARVESTING_SKILL_CONFIGS = {
@@ -2001,6 +2054,9 @@ function createSkills() {
   return {
     woodcutting: { xp: 0, level: 1 },
     mining: { xp: 0, level: 1 },
+    smelting: { xp: 0, level: 1 },
+    smithing: { xp: 0, level: 1 },
+    fletching: { xp: 0, level: 1 },
     strength: { xp: 0, level: 1 },
     defense: { xp: 0, level: 1 },
     constitution: { xp: 0, level: 1 },
@@ -2757,6 +2813,8 @@ function createPlayer(id) {
     maxHp: PLAYER_BASE_HP,
     combatTargetEnemyId: null,
     activeBankNpcId: null,
+    activeCraftingObjectId: null,
+    activeCraftingStationType: null,
     inventory: createInventory(),
     bank: createInventory(BANK_MAX_SLOTS),
     equipment: createEquipment(),
@@ -2889,6 +2947,9 @@ function applyPlayerMaxHpFromConstitution(player, applyDelta = false) {
 function cloneSkills(skills) {
   const woodcuttingXp = Number(skills?.woodcutting?.xp ?? 0);
   const miningXp = Number(skills?.mining?.xp ?? 0);
+  const smeltingXp = Number(skills?.smelting?.xp ?? 0);
+  const smithingXp = Number(skills?.smithing?.xp ?? 0);
+  const fletchingXp = Number(skills?.fletching?.xp ?? 0);
   const strengthXp = Number(skills?.strength?.xp ?? 0);
   const defenseXp = Number(skills?.defense?.xp ?? 0);
   const constitutionXp = Number(skills?.constitution?.xp ?? 0);
@@ -2900,6 +2961,18 @@ function cloneSkills(skills) {
     },
     mining: {
       xp: Math.max(0, Math.floor(Number.isFinite(miningXp) ? miningXp : 0)),
+      level: 1,
+    },
+    smelting: {
+      xp: Math.max(0, Math.floor(Number.isFinite(smeltingXp) ? smeltingXp : 0)),
+      level: 1,
+    },
+    smithing: {
+      xp: Math.max(0, Math.floor(Number.isFinite(smithingXp) ? smithingXp : 0)),
+      level: 1,
+    },
+    fletching: {
+      xp: Math.max(0, Math.floor(Number.isFinite(fletchingXp) ? fletchingXp : 0)),
       level: 1,
     },
     strength: {
@@ -2984,6 +3057,9 @@ function sanitizePlayerProfile(rawProfile) {
   const skills = cloneSkills(rawProfile?.skills);
   skills.woodcutting.level = getLevelForXp(skills.woodcutting.xp);
   skills.mining.level = getLevelForXp(skills.mining.xp);
+  skills.smelting.level = getLevelForXp(skills.smelting.xp);
+  skills.smithing.level = getLevelForXp(skills.smithing.xp);
+  skills.fletching.level = getLevelForXp(skills.fletching.xp);
   skills.strength.level = getLevelForXp(skills.strength.xp);
   skills.defense.level = getLevelForXp(skills.defense.xp);
   skills.constitution.level = getLevelForXp(skills.constitution.xp);
@@ -3330,6 +3406,9 @@ function applyPersistedProfile(player, profile) {
   player.quests = sanitizeQuestProgress(safeProfile.quests);
   player.skills.woodcutting.level = getLevelForXp(player.skills.woodcutting.xp);
   player.skills.mining.level = getLevelForXp(player.skills.mining.xp);
+  player.skills.smelting.level = getLevelForXp(player.skills.smelting.xp);
+  player.skills.smithing.level = getLevelForXp(player.skills.smithing.xp);
+  player.skills.fletching.level = getLevelForXp(player.skills.fletching.xp);
   player.skills.strength.level = getLevelForXp(player.skills.strength.xp);
   player.skills.defense.level = getLevelForXp(player.skills.defense.xp);
   player.skills.constitution.level = getLevelForXp(player.skills.constitution.xp);
@@ -4196,6 +4275,200 @@ function sendBankSnapshotToSocket(socket, player) {
   );
 }
 
+function getCraftingRecipeDisplayName(recipe) {
+  const firstOutput = Array.isArray(recipe?.outputs) && recipe.outputs.length > 0
+    ? recipe.outputs[0]
+    : null;
+  const outputDefinition = firstOutput ? getItemDefinition(firstOutput.itemId) : null;
+  if (outputDefinition?.name) {
+    return outputDefinition.name;
+  }
+
+  return String(recipe?.id ?? 'Recipe');
+}
+
+function toCraftingRecipeSnapshot(recipe) {
+  return {
+    id: String(recipe.id),
+    name: getCraftingRecipeDisplayName(recipe),
+    requiredLevel: Math.max(1, Math.floor(Number(recipe.requiredLevel ?? 1))),
+    durationMs: Math.max(100, Math.floor(Number(recipe.durationMs ?? 1000))),
+    successChance: clamp01(recipe.successChance, 1),
+    xp: Math.max(0, Number(recipe.xp ?? 0)),
+    inputs: (Array.isArray(recipe.inputs) ? recipe.inputs : []).map((entry) => ({
+      itemId: String(entry.itemId),
+      name: getItemDefinition(entry.itemId)?.name ?? String(entry.itemId),
+      quantity: Math.max(1, Math.floor(Number(entry.quantity ?? 1))),
+    })),
+    outputs: (Array.isArray(recipe.outputs) ? recipe.outputs : []).map((entry) => ({
+      itemId: String(entry.itemId),
+      name: getItemDefinition(entry.itemId)?.name ?? String(entry.itemId),
+      quantity: Math.max(1, Math.floor(Number(entry.quantity ?? 1))),
+    })),
+  };
+}
+
+function sendCraftingOpenToSocket(socket, player, station, objectId) {
+  const craftingConfig = CRAFTING_SKILL_CONFIGS[station.recipeSkill];
+  if (!craftingConfig || !Array.isArray(craftingConfig.recipes) || craftingConfig.recipes.length === 0) {
+    sendChatToSocket(socket, '[Crafting] No recipes are configured for this station yet.');
+    return false;
+  }
+
+  socket.send(
+    JSON.stringify({
+      type: 'craftingOpen',
+      stationType: station.stationType,
+      title: station.title,
+      objectId,
+      inventory: toInventorySnapshot(player.inventory),
+      recipes: craftingConfig.recipes.map((recipe) => toCraftingRecipeSnapshot(recipe)),
+    }),
+  );
+  return true;
+}
+
+function hasRequiredItemsForRecipe(player, recipe) {
+  for (const input of recipe.inputs) {
+    const quantity = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
+    if (getInventoryItemCount(player, input.itemId) < quantity) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function canReceiveRecipeOutputs(player, recipe) {
+  const projectedInventory = cloneInventory(player.inventory, INVENTORY_MAX_SLOTS);
+
+  for (const input of recipe.inputs) {
+    let remaining = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
+
+    for (let index = projectedInventory.slots.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      const slot = projectedInventory.slots[index];
+      if (slot.itemId !== input.itemId) {
+        continue;
+      }
+
+      const available = Math.max(0, Math.floor(Number(slot.quantity ?? 0)));
+      if (available <= 0) {
+        continue;
+      }
+
+      const consumed = Math.min(available, remaining);
+      slot.quantity -= consumed;
+      remaining -= consumed;
+
+      if (slot.quantity <= 0) {
+        projectedInventory.slots.splice(index, 1);
+      }
+    }
+
+    if (remaining > 0) {
+      return false;
+    }
+  }
+
+  for (const output of recipe.outputs) {
+    const itemDefinition = getItemDefinition(output.itemId);
+    if (!itemDefinition) {
+      return false;
+    }
+
+    const quantity = Math.max(1, Math.floor(Number(output.quantity ?? 1)));
+    if (!canAddItemToContainer(projectedInventory, itemDefinition, quantity)) {
+      return false;
+    }
+
+    addItemToContainer(projectedInventory, itemDefinition, quantity);
+  }
+
+  return true;
+}
+
+function performCraftingAtStation(player, stationType, recipeId, quantity) {
+  const station = CRAFTING_STATIONS[String(stationType ?? '')] ?? null;
+  if (!station) {
+    return { ok: false, reason: 'Unknown crafting station.' };
+  }
+
+  const config = CRAFTING_SKILL_CONFIGS[station.recipeSkill];
+  if (!config || !Array.isArray(config.recipes)) {
+    return { ok: false, reason: 'No recipes configured for this station.' };
+  }
+
+  const recipe = config.recipes.find((entry) => String(entry.id) === String(recipeId ?? ''));
+  if (!recipe) {
+    return { ok: false, reason: 'Unknown recipe.' };
+  }
+
+  const skillState = player.skills?.[station.xpSkill] ?? { level: 1 };
+  const requiredLevel = Math.max(1, Math.floor(Number(recipe.requiredLevel ?? 1)));
+  if (Math.max(1, Math.floor(Number(skillState.level ?? 1))) < requiredLevel) {
+    return { ok: false, reason: `Requires ${station.xpSkill} level ${requiredLevel}.` };
+  }
+
+  const craftAttempts = Math.max(1, Math.min(28, Math.floor(Number(quantity ?? 1))));
+  let craftedCount = 0;
+
+  for (let index = 0; index < craftAttempts; index += 1) {
+    if (!hasRequiredItemsForRecipe(player, recipe)) {
+      break;
+    }
+
+    if (!canReceiveRecipeOutputs(player, recipe)) {
+      if (craftedCount === 0) {
+        return { ok: false, reason: 'Not enough inventory space.' };
+      }
+      break;
+    }
+
+    for (const input of recipe.inputs) {
+      const inputQuantity = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
+      const removed = removeItemFromInventory(player, input.itemId, inputQuantity);
+      if (!removed) {
+        return craftedCount > 0
+          ? { ok: true, craftedCount, recipe: toCraftingRecipeSnapshot(recipe), partial: true }
+          : { ok: false, reason: 'Missing required materials.' };
+      }
+    }
+
+    const successChance = clamp01(recipe.successChance, 1);
+    if (Math.random() > successChance) {
+      continue;
+    }
+
+    for (const output of recipe.outputs) {
+      const outputQuantity = Math.max(1, Math.floor(Number(output.quantity ?? 1)));
+      const added = addItemToInventory(player, output.itemId, outputQuantity);
+      if (!added) {
+        return craftedCount > 0
+          ? { ok: true, craftedCount, recipe: toCraftingRecipeSnapshot(recipe), partial: true }
+          : { ok: false, reason: 'Not enough inventory space.' };
+      }
+    }
+
+    const xpGain = Math.max(0, Number(recipe.xp ?? 0));
+    if (xpGain > 0) {
+      addSkillXp(player, station.xpSkill, xpGain);
+    }
+
+    craftedCount += 1;
+  }
+
+  if (craftedCount <= 0) {
+    return { ok: false, reason: 'You do not have the required materials.' };
+  }
+
+  return {
+    ok: true,
+    craftedCount,
+    recipe: toCraftingRecipeSnapshot(recipe),
+    partial: craftedCount < craftAttempts,
+  };
+}
+
 function getEnemySnapshot(now) {
   const enemies = {};
 
@@ -4519,6 +4792,14 @@ function makeSnapshot(now, viewerPlayerId = null) {
         mining: {
           xp: client.player.skills.mining.xp,
           level: client.player.skills.mining.level,
+        },
+        smithing: {
+          xp: client.player.skills.smithing.xp,
+          level: client.player.skills.smithing.level,
+        },
+        fletching: {
+          xp: client.player.skills.fletching.xp,
+          level: client.player.skills.fletching.level,
         },
         strength: {
           xp: client.player.skills.strength.xp,
@@ -5241,6 +5522,14 @@ wss.on('connection', (socket) => {
             xp: player.skills.mining.xp,
             level: player.skills.mining.level,
           },
+          smithing: {
+            xp: player.skills.smithing.xp,
+            level: player.skills.smithing.level,
+          },
+          fletching: {
+            xp: player.skills.fletching.xp,
+            level: player.skills.fletching.level,
+          },
           strength: {
             xp: player.skills.strength.xp,
             level: player.skills.strength.level,
@@ -5351,6 +5640,8 @@ wss.on('connection', (socket) => {
         player.targetPath = [];
         player.combatTargetEnemyId = null;
         player.activeBankNpcId = null;
+        player.activeCraftingObjectId = null;
+        player.activeCraftingStationType = null;
 
         if (length === 0) {
           player.directionX = 0;
@@ -5390,6 +5681,8 @@ wss.on('connection', (socket) => {
 
         player.combatTargetEnemyId = null;
         player.activeBankNpcId = null;
+        player.activeCraftingObjectId = null;
+        player.activeCraftingStationType = null;
 
         stepPlayerIfPossible(player, Date.now());
 
@@ -5412,6 +5705,8 @@ wss.on('connection', (socket) => {
         player.nextInteractionAt = 0;
         player.combatTargetEnemyId = null;
         player.activeBankNpcId = null;
+        player.activeCraftingObjectId = null;
+        player.activeCraftingStationType = null;
 
         if (!isWithinInteractionRange(player, node)) {
           const adjacentTile = findBestAdjacentTile(player, node);
@@ -5451,6 +5746,8 @@ wss.on('connection', (socket) => {
 
         player.activeInteractionNodeId = null;
         player.activeBankNpcId = null;
+        player.activeCraftingObjectId = null;
+        player.activeCraftingStationType = null;
         beginPlayerCombatTarget(player, enemy.id, nowMs);
 
         log('player_combat_attack', {
@@ -5597,7 +5894,79 @@ wss.on('connection', (socket) => {
         }
 
         player.activeBankNpcId = bankNpc.id;
+        player.activeCraftingObjectId = null;
+        player.activeCraftingStationType = null;
         sendBankSnapshotToSocket(socket, player);
+        return;
+      }
+
+      if (message.type === 'craftingOpen') {
+        const objectId = String(message.objectId ?? '');
+        const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === objectId) ?? null;
+        if (!objectEntry) {
+          sendChatToSocket(socket, '[Crafting] That workstation could not be found.');
+          return;
+        }
+
+        const station = getCraftingStationByObjectType(objectEntry.objectTypeId);
+        if (!station) {
+          sendChatToSocket(socket, '[Crafting] That object is not a crafting workstation.');
+          return;
+        }
+
+        if (!isWithinRange(player.tileX, player.tileY, objectEntry.tileX, objectEntry.tileY, INTERACTION_RANGE_TILES)) {
+          sendChatToSocket(socket, '[Crafting] Move closer to the workstation.');
+          return;
+        }
+
+        player.activeBankNpcId = null;
+        player.activeCraftingObjectId = objectEntry.id;
+        player.activeCraftingStationType = station.stationType;
+        sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
+        return;
+      }
+
+      if (message.type === 'craftingMake') {
+        const objectId = String(message.objectId ?? player.activeCraftingObjectId ?? '');
+        const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === objectId) ?? null;
+        if (!objectEntry) {
+          sendChatToSocket(socket, '[Crafting] That workstation could not be found.');
+          return;
+        }
+
+        const station = getCraftingStationByObjectType(objectEntry.objectTypeId);
+        if (!station) {
+          sendChatToSocket(socket, '[Crafting] That object is not a crafting workstation.');
+          return;
+        }
+
+        if (!isWithinRange(player.tileX, player.tileY, objectEntry.tileX, objectEntry.tileY, INTERACTION_RANGE_TILES)) {
+          sendChatToSocket(socket, '[Crafting] Move closer to the workstation.');
+          return;
+        }
+
+        player.activeBankNpcId = null;
+        player.activeCraftingObjectId = objectEntry.id;
+        player.activeCraftingStationType = station.stationType;
+
+        const quantity = Math.max(1, Math.min(28, Math.floor(Number(message.quantity ?? 1))));
+        const result = performCraftingAtStation(player, station.stationType, message.recipeId, quantity);
+        if (!result.ok) {
+          sendChatToSocket(socket, `[Crafting] ${result.reason}`);
+          return;
+        }
+
+        const outputSummary = result.recipe.outputs
+          .map((entry) => `${entry.name}${entry.quantity > 1 ? ` x${entry.quantity}` : ''}`)
+          .join(', ');
+
+        player.lastActionText = `Crafted ${result.recipe.name}`;
+        sendChatToSocket(
+          socket,
+          `[Crafting] Crafted ${result.recipe.name} x${result.craftedCount}${result.partial ? ' (stopped early)' : ''}. Outputs: ${outputSummary}.`,
+        );
+
+        sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
         return;
       }
 

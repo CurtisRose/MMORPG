@@ -1,0 +1,76 @@
+{
+  "skill": "smithing",
+  "recipes": [
+    {
+      "id": "bronze_helmet",
+      "requiredLevel": 1,
+      "durationMs": 1700,
+      "successChance": 1,
+      "xp": 8,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_helmet", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "bronze_axe",
+      "requiredLevel": 1,
+      "durationMs": 1700,
+      "successChance": 1,
+      "xp": 8,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_axe", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "bronze_pickaxe",
+      "requiredLevel": 2,
+      "durationMs": 1800,
+      "successChance": 1,
+      "xp": 10,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_pickaxe", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "bronze_platelegs",
+      "requiredLevel": 4,
+      "durationMs": 2200,
+      "successChance": 1,
+      "xp": 16,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 2 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_platelegs", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "bronze_platebody",
+      "requiredLevel": 8,
+      "durationMs": 2600,
+      "successChance": 1,
+      "xp": 22,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 3 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_platebody", "quantity": 1 }
+      ]
+    }
+  ],
+  "messages": {
+    "locked": "Requires level {requiredLevel}.",
+    "missingItems": "You need more bars.",
+    "success": "You smith the item.",
+    "failure": "You fail to shape the metal."
+  }
+}

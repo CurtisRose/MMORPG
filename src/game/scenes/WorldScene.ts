@@ -5,6 +5,8 @@ import {
   TILE_SIZE,
 } from '../config/gameConfig';
 import {
+  type CraftingOpenState,
+  type CraftingRecipeState,
   type ChatMessageState,
   type EquipmentSlotName,
   type EnemyState,
@@ -215,14 +217,32 @@ interface ContextMenuOption {
 
 type ClickFeedbackKind = 'walk' | 'interact' | 'npc-interact';
 
-interface PendingNpcAction {
-  npcId: string;
-  action: 'talk' | 'trade' | 'bank';
+type InteractionTargetType =
+  | 'node-harvest'
+  | 'npc-talk'
+  | 'npc-trade'
+  | 'npc-bank'
+  | 'enemy-attack'
+  | 'ground-pickup'
+  | 'object-crafting'
+  | 'object-use';
+
+interface InteractionTarget {
+  type: InteractionTargetType;
+  id: string;
+  tileX: number;
+  tileY: number;
+  name: string;
+  range: number;
+  approachTileX?: number;
+  approachTileY?: number;
 }
 
 interface SkillLevelSnapshot {
   woodcutting: number;
   mining: number;
+  smithing: number;
+  fletching: number;
   strength: number;
   defense: number;
   constitution: number;
@@ -251,6 +271,9 @@ export class WorldScene extends Phaser.Scene {
   private worldObjects = new Map<string, WorldObjectVisual>();
   private worldEnemies = new Map<string, EnemyVisual>();
   private worldGroundItems = new Map<string, GroundItemVisual>();
+  private blockedNodeTiles = new Set<string>();
+  private blockedNpcTiles = new Set<string>();
+  private blockedObjectTiles = new Set<string>();
   private pendingGroundItemTextureLoads = new Set<string>();
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
@@ -288,7 +311,16 @@ export class WorldScene extends Phaser.Scene {
   private bankVisible = false;
   private lastRenderedBankSignature: string | null = null;
   private bankQuantityPromptElement: HTMLDivElement | null = null;
-  private pendingNpcAction: PendingNpcAction | null = null;
+  private craftingRootElement: HTMLDivElement | null = null;
+  private craftingContentElement: HTMLDivElement | null = null;
+  private activeCraftingObjectId: string | null = null;
+  private activeCraftingStationType: string | null = null;
+  private activeCraftingTitle = 'Crafting';
+  private craftingRecipes: CraftingRecipeState[] = [];
+  private craftingVisible = false;
+  private lastRenderedCraftingSignature: string | null = null;
+  private pendingInteractionTarget: InteractionTarget | null = null;
+  private pendingInteractionRetryAt = 0;
   private localHealthBar: Phaser.GameObjects.Graphics | null = null;
   private localHealthBarVisibleUntil = 0;
   private harvestingActionIndicator: Phaser.GameObjects.Image | null = null;
@@ -387,6 +419,7 @@ export class WorldScene extends Phaser.Scene {
     this.initCharacterUi();
     this.initShopUi();
     this.initBankUi();
+    this.initCraftingUi();
     this.appendSystemChatMessage('Welcome to the world.');
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
@@ -417,6 +450,9 @@ export class WorldScene extends Phaser.Scene {
       },
       (inventory, bank) => {
         this.openBank(inventory, bank);
+      },
+      (craftingState) => {
+        this.openCrafting(craftingState);
       },
       (reason) => {
         this.scene.start('splash', { errorMessage: reason });
@@ -879,7 +915,7 @@ export class WorldScene extends Phaser.Scene {
     this.lastSentDirection.set(directionX, directionY);
 
     if (directionX !== 0 || directionY !== 0) {
-      this.pendingNpcAction = null;
+      this.pendingInteractionTarget = null;
       this.closeTransientInteractionUi();
       this.multiplayerClient.sendInteractStop();
     }
@@ -889,6 +925,7 @@ export class WorldScene extends Phaser.Scene {
     this.hideContextMenu();
     this.closeBank();
     this.closeShop();
+    this.closeCrafting();
   }
 
   private applySnapshot(snapshot: WorldSnapshot): void {
@@ -896,11 +933,12 @@ export class WorldScene extends Phaser.Scene {
     this.applyNodeSnapshot(snapshot.nodes);
     this.applyNpcSnapshot(snapshot.npcs);
     this.applyObjectSnapshot(snapshot.objects ?? {});
+    this.rebuildWalkabilityIndexes();
     this.applyEnemySnapshot(snapshot.enemies);
     this.applyGroundItemSnapshot(snapshot.groundItems ?? {});
     this.shopDefinitions = snapshot.shops;
 
-    this.processPendingNpcAction();
+    this.processPendingInteractionTarget();
 
     if (this.activeShopId && !this.shopDefinitions[this.activeShopId]) {
       this.closeShop();
@@ -950,6 +988,8 @@ export class WorldScene extends Phaser.Scene {
         this.previousSkillLevels = {
           woodcutting: playerState.skills.woodcutting.level,
           mining: playerState.skills.mining.level,
+          smithing: playerState.skills.smithing.level,
+          fletching: playerState.skills.fletching.level,
           strength: playerState.skills.strength.level,
           defense: playerState.skills.defense.level,
           constitution: playerState.skills.constitution.level,
@@ -964,6 +1004,14 @@ export class WorldScene extends Phaser.Scene {
 
           if (playerState.skills.mining.level > previousLevels.mining) {
             this.appendSystemChatMessage(`Mining level is now ${playerState.skills.mining.level}.`);
+          }
+
+          if (playerState.skills.smithing.level > previousLevels.smithing) {
+            this.appendSystemChatMessage(`Smithing level is now ${playerState.skills.smithing.level}.`);
+          }
+
+          if (playerState.skills.fletching.level > previousLevels.fletching) {
+            this.appendSystemChatMessage(`Fletching level is now ${playerState.skills.fletching.level}.`);
           }
 
           if (playerState.skills.strength.level > previousLevels.strength) {
@@ -1040,24 +1088,7 @@ export class WorldScene extends Phaser.Scene {
 
       const nodeSprite = this.add
         .sprite(position.x, position.y, textureKey)
-        .setInteractive({ useHandCursor: true })
         .setDepth(2);
-
-      nodeSprite.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-        if (pointer.rightButtonDown()) {
-          pointer.event.stopPropagation();
-          this.openExamineContextMenu(pointer);
-          return;
-        }
-
-        if (!pointer.leftButtonDown()) {
-          return;
-        }
-
-        pointer.event.stopPropagation();
-        this.showTileClickFeedback(nodeState.tileX, nodeState.tileY, 'interact');
-        this.startNodeInteraction(nodeState.id);
-      });
 
       this.styleNodeSprite(nodeSprite, nodeState);
       this.worldNodes.set(nodeState.id, {
@@ -1173,6 +1204,21 @@ export class WorldScene extends Phaser.Scene {
 
     if (objectState.objectTypeId === 'general_store_building') {
       sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x7e6b52);
+      return;
+    }
+
+    if (objectState.objectTypeId === 'smelting_station') {
+      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0xd07f3f);
+      return;
+    }
+
+    if (objectState.objectTypeId === 'smithing_station') {
+      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x9a9ea8);
+      return;
+    }
+
+    if (objectState.objectTypeId === 'fletching_station') {
+      sprite.setTexture(TREE_TEXTURE_KEY).setTint(0x8d6f47);
       return;
     }
 
@@ -1515,6 +1561,15 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
 
+    const clickedObject = this.findObjectAtTile(tileX, tileY);
+    if (clickedObject) {
+      this.showTileClickFeedback(tileX, tileY, 'interact');
+
+      this.useWorldObject(clickedObject.state.id);
+
+      return;
+    }
+
     const clickedGroundItems = this.findGroundItemsAtTile(tileX, tileY);
     if (clickedGroundItems.length > 0) {
       this.showTileClickFeedback(tileX, tileY, 'interact');
@@ -1526,10 +1581,22 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private startNodeInteraction(nodeId: string): void {
-    this.hideContextMenu();
-    this.multiplayerClient.sendInput(0, 0);
-    this.lastSentDirection.set(0, 0);
-    this.multiplayerClient.sendInteractStart(nodeId);
+    const nodeVisual = this.worldNodes.get(nodeId);
+    if (!nodeVisual) {
+      return;
+    }
+
+    this.queueInteractionTarget(
+      {
+        type: 'node-harvest',
+        id: nodeVisual.state.id,
+        tileX: nodeVisual.state.tileX,
+        tileY: nodeVisual.state.tileY,
+        name: nodeVisual.state.resourceName,
+        range: 1,
+      },
+      'interact',
+    );
   }
 
   private openExamineContextMenu(pointer: Phaser.Input.Pointer): void {
@@ -1617,6 +1684,13 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (objectAtTile) {
+      options.push({
+        label: `Use ${objectAtTile.state.name}`,
+        onSelect: () => {
+          this.useWorldObject(objectAtTile.state.id);
+        },
+      });
+
       options.push({
         label: `Examine ${objectAtTile.state.name}`,
         onSelect: () => {
@@ -1945,13 +2019,13 @@ export class WorldScene extends Phaser.Scene {
   private performWalkTo(
     tileX: number,
     tileY: number,
-    clearPendingNpcAction = true,
+    clearPendingActions = true,
     showClickFeedback = true,
   ): void {
     const destination = this.resolveWalkDestination(tileX, tileY);
 
-    if (clearPendingNpcAction) {
-      this.pendingNpcAction = null;
+    if (clearPendingActions) {
+      this.pendingInteractionTarget = null;
     }
 
     this.closeTransientInteractionUi();
@@ -1968,7 +2042,9 @@ export class WorldScene extends Phaser.Scene {
     const nodeAtTarget = this.findNodeAtTile(tileX, tileY);
     const npcAtTarget = this.findNpcAtTile(tileX, tileY);
     const enemyAtTarget = this.findEnemyAtTile(tileX, tileY);
-    if (!nodeAtTarget && !npcAtTarget && !enemyAtTarget) {
+    const objectAtTarget = this.findObjectAtTile(tileX, tileY);
+    const objectBlocksMovement = Boolean(objectAtTarget?.state.blocksMovement);
+    if (!nodeAtTarget && !npcAtTarget && !enemyAtTarget && !objectBlocksMovement) {
       return new Phaser.Math.Vector2(tileX, tileY);
     }
 
@@ -2113,6 +2189,30 @@ export class WorldScene extends Phaser.Scene {
     return true;
   }
 
+  private getTileKey(tileX: number, tileY: number): string {
+    return `${tileX},${tileY}`;
+  }
+
+  private rebuildWalkabilityIndexes(): void {
+    this.blockedNodeTiles.clear();
+    this.blockedNpcTiles.clear();
+    this.blockedObjectTiles.clear();
+
+    for (const nodeVisual of this.worldNodes.values()) {
+      this.blockedNodeTiles.add(this.getTileKey(nodeVisual.state.tileX, nodeVisual.state.tileY));
+    }
+
+    for (const npcVisual of this.worldNpcs.values()) {
+      this.blockedNpcTiles.add(this.getTileKey(npcVisual.state.tileX, npcVisual.state.tileY));
+    }
+
+    for (const objectVisual of this.worldObjects.values()) {
+      if (objectVisual.state.blocksMovement) {
+        this.blockedObjectTiles.add(this.getTileKey(objectVisual.state.tileX, objectVisual.state.tileY));
+      }
+    }
+  }
+
   private isTileWalkable(tileX: number, tileY: number): boolean {
     if (tileX < 0 || tileY < 0 || tileX >= this.worldWidthTiles || tileY >= this.worldHeightTiles) {
       return false;
@@ -2123,20 +2223,20 @@ export class WorldScene extends Phaser.Scene {
       return false;
     }
 
-    const objectAtTile = this.findObjectAtTile(tileX, tileY);
-    return !this.findNodeAtTile(tileX, tileY)
-      && !this.findNpcAtTile(tileX, tileY)
-      && !(objectAtTile && objectAtTile.state.blocksMovement);
+    const key = this.getTileKey(tileX, tileY);
+    return !this.blockedNodeTiles.has(key)
+      && !this.blockedNpcTiles.has(key)
+      && !this.blockedObjectTiles.has(key);
   }
 
   private attackEnemy(enemyId: string): void {
     this.hideContextMenu();
-    this.multiplayerClient.sendCombatAttack(enemyId);
+    this.startEnemyAttack(enemyId);
   }
 
   private pickupGroundItem(groundItemId: string): void {
     this.hideContextMenu();
-    this.multiplayerClient.sendGroundItemPickup(groundItemId);
+    this.startGroundItemPickup(groundItemId);
   }
 
   private talkToNpc(npcId: string): void {
@@ -2154,44 +2254,184 @@ export class WorldScene extends Phaser.Scene {
     this.startNpcAction(npcId, 'bank');
   }
 
-  private startNpcAction(npcId: string, action: PendingNpcAction['action']): void {
+  private useWorldObject(objectId: string): void {
+    this.hideContextMenu();
+    this.startObjectAction(objectId);
+  }
+
+  private startNpcAction(npcId: string, action: 'talk' | 'trade' | 'bank'): void {
     const npcVisual = this.worldNpcs.get(npcId);
     if (!npcVisual) {
       return;
     }
 
-    this.showTileClickFeedback(npcVisual.state.tileX, npcVisual.state.tileY, 'npc-interact');
+    const type: InteractionTargetType = action === 'bank'
+      ? 'npc-bank'
+      : action === 'trade'
+        ? 'npc-trade'
+        : 'npc-talk';
 
-    if (this.isAdjacentToTile(npcVisual.state.tileX, npcVisual.state.tileY)) {
-      this.executeNpcAction(npcId, action);
-      return;
-    }
-
-    const destination = this.resolveWalkDestination(npcVisual.state.tileX, npcVisual.state.tileY);
-    if (destination.x === npcVisual.state.tileX && destination.y === npcVisual.state.tileY) {
-      this.appendSystemChatMessage(`You can't reach ${npcVisual.state.name} from here.`);
-      return;
-    }
-
-    this.pendingNpcAction = { npcId, action };
-    this.performWalkTo(npcVisual.state.tileX, npcVisual.state.tileY, false, false);
+    this.queueInteractionTarget(
+      {
+        type,
+        id: npcVisual.state.id,
+        tileX: npcVisual.state.tileX,
+        tileY: npcVisual.state.tileY,
+        name: npcVisual.state.name,
+        range: 1,
+      },
+      'npc-interact',
+    );
   }
 
-  private processPendingNpcAction(): void {
-    if (!this.pendingNpcAction) {
+  private resolveObjectInteractionType(objectState: WorldObjectState): InteractionTargetType {
+    if (
+      objectState.objectTypeId === 'smelting_station'
+      || objectState.objectTypeId === 'smithing_station'
+      || objectState.objectTypeId === 'fletching_station'
+    ) {
+      return 'object-crafting';
+    }
+
+    return 'object-use';
+  }
+
+  private startObjectAction(objectId: string): void {
+    const objectVisual = this.worldObjects.get(objectId);
+    if (!objectVisual) {
       return;
     }
 
-    const npcVisual = this.worldNpcs.get(this.pendingNpcAction.npcId);
-    if (!npcVisual) {
-      this.pendingNpcAction = null;
+    const type = this.resolveObjectInteractionType(objectVisual.state);
+    const approach = this.resolveWalkDestination(objectVisual.state.tileX, objectVisual.state.tileY);
+    this.queueInteractionTarget(
+      {
+        type,
+        id: objectVisual.state.id,
+        tileX: objectVisual.state.tileX,
+        tileY: objectVisual.state.tileY,
+        name: objectVisual.state.name,
+        range: 1,
+        approachTileX: approach.x,
+        approachTileY: approach.y,
+      },
+      'interact',
+    );
+  }
+
+  private queueInteractionTarget(
+    target: InteractionTarget,
+    clickFeedbackKind: ClickFeedbackKind,
+  ): void {
+    this.hideContextMenu();
+    this.pendingInteractionTarget = null;
+    this.pendingInteractionRetryAt = 0;
+    this.pendingInteractionTarget = target;
+
+    this.showTileClickFeedback(target.tileX, target.tileY, clickFeedbackKind);
+
+    if (this.isWithinInteractionRange(target)) {
+      this.pendingInteractionTarget = null;
+      this.executeInteractionTarget(target);
       return;
     }
 
-    if (this.isAdjacentToTile(npcVisual.state.tileX, npcVisual.state.tileY)) {
-      const pending = this.pendingNpcAction;
-      this.pendingNpcAction = null;
-      this.executeNpcAction(pending.npcId, pending.action);
+    const destination = this.resolveWalkDestination(target.tileX, target.tileY);
+    if (destination.x === target.tileX && destination.y === target.tileY) {
+      this.pendingInteractionTarget = null;
+      this.appendSystemChatMessage(`You can't reach ${target.name} from here.`);
+      return;
+    }
+
+    this.performWalkTo(target.tileX, target.tileY, false, false);
+  }
+
+  private resolveCurrentInteractionTarget(target: InteractionTarget): InteractionTarget | null {
+    if (target.type === 'node-harvest') {
+      const node = this.worldNodes.get(target.id)?.state;
+      if (!node) {
+        return null;
+      }
+
+      return {
+        ...target,
+        tileX: node.tileX,
+        tileY: node.tileY,
+        name: node.resourceName,
+      };
+    }
+
+    if (target.type === 'npc-talk' || target.type === 'npc-trade' || target.type === 'npc-bank') {
+      const npc = this.worldNpcs.get(target.id)?.state;
+      if (!npc) {
+        return null;
+      }
+
+      return {
+        ...target,
+        tileX: npc.tileX,
+        tileY: npc.tileY,
+        name: npc.name,
+      };
+    }
+
+    if (target.type === 'enemy-attack') {
+      const enemy = this.worldEnemies.get(target.id)?.state;
+      if (!enemy || enemy.isDead) {
+        return null;
+      }
+
+      return {
+        ...target,
+        tileX: enemy.tileX,
+        tileY: enemy.tileY,
+        name: enemy.name,
+      };
+    }
+
+    if (target.type === 'ground-pickup') {
+      const groundItem = this.worldGroundItems.get(target.id)?.state;
+      if (!groundItem) {
+        return null;
+      }
+
+      return {
+        ...target,
+        tileX: groundItem.tileX,
+        tileY: groundItem.tileY,
+        name: groundItem.name,
+      };
+    }
+
+    const objectState = this.worldObjects.get(target.id)?.state;
+    if (!objectState) {
+      return null;
+    }
+
+    return {
+      ...target,
+      tileX: objectState.tileX,
+      tileY: objectState.tileY,
+      name: objectState.name,
+    };
+  }
+
+  private processPendingInteractionTarget(): void {
+    if (!this.pendingInteractionTarget) {
+      return;
+    }
+
+    const resolved = this.resolveCurrentInteractionTarget(this.pendingInteractionTarget);
+    if (!resolved) {
+      this.pendingInteractionTarget = null;
+      return;
+    }
+
+    this.pendingInteractionTarget = resolved;
+
+    if (this.isWithinInteractionRange(resolved)) {
+      this.pendingInteractionTarget = null;
+      this.executeInteractionTarget(resolved);
       return;
     }
 
@@ -2200,33 +2440,156 @@ export class WorldScene extends Phaser.Scene {
       this.localPlayerState.targetTileX === null &&
       this.localPlayerState.targetTileY === null
     ) {
-      this.pendingNpcAction = null;
+      const now = Date.now();
+      if (now < this.pendingInteractionRetryAt) {
+        return;
+      }
+
+      const destination = this.resolveWalkDestination(resolved.tileX, resolved.tileY);
+      if (destination.x === resolved.tileX && destination.y === resolved.tileY) {
+        this.pendingInteractionTarget = null;
+        this.pendingInteractionRetryAt = 0;
+        this.appendSystemChatMessage(`You can't reach ${resolved.name} from here.`);
+        return;
+      }
+
+      const localTileX = this.localTilePosition ? Math.round(this.localTilePosition.x) : null;
+      const localTileY = this.localTilePosition ? Math.round(this.localTilePosition.y) : null;
+      if (localTileX === destination.x && localTileY === destination.y) {
+        this.pendingInteractionTarget = null;
+        this.pendingInteractionRetryAt = 0;
+        return;
+      }
+
+      this.pendingInteractionRetryAt = now + 250;
+      this.performWalkTo(resolved.tileX, resolved.tileY, false, false);
     }
   }
 
-  private executeNpcAction(npcId: string, action: PendingNpcAction['action']): void {
-    if (action === 'talk') {
-      this.multiplayerClient.sendNpcTalk(npcId);
-      return;
+  private isWithinInteractionRange(target: InteractionTarget): boolean {
+    if (
+      Number.isFinite(target.approachTileX)
+      && Number.isFinite(target.approachTileY)
+    ) {
+      return this.isAtApproachTile(this.localTilePosition, target);
     }
 
-    if (action === 'bank') {
-      this.multiplayerClient.sendBankOpen(npcId);
-      return;
-    }
-
-    this.multiplayerClient.sendShopOpen(npcId);
+    return this.isWithinInteractionRangeFromPosition(this.localTilePosition, target)
+      || this.isWithinInteractionRangeFromPosition(this.localRenderedTilePosition, target);
   }
 
-  private isAdjacentToTile(tileX: number, tileY: number): boolean {
-    if (!this.localTilePosition) {
+  private isAtApproachTile(
+    position: Phaser.Math.Vector2 | null,
+    target: InteractionTarget,
+  ): boolean {
+    if (
+      !position
+      || !Number.isFinite(target.approachTileX)
+      || !Number.isFinite(target.approachTileY)
+    ) {
+      return false;
+    }
+
+    return Math.round(position.x) === target.approachTileX
+      && Math.round(position.y) === target.approachTileY;
+  }
+
+  private isWithinInteractionRangeFromPosition(
+    position: Phaser.Math.Vector2 | null,
+    target: InteractionTarget,
+  ): boolean {
+    if (!position) {
       return false;
     }
 
     const distance =
-      Math.abs(Math.round(this.localTilePosition.x) - tileX) +
-      Math.abs(Math.round(this.localTilePosition.y) - tileY);
-    return distance <= 1;
+      Math.abs(Math.round(position.x) - target.tileX)
+      + Math.abs(Math.round(position.y) - target.tileY);
+    return distance <= target.range;
+  }
+
+  private executeInteractionTarget(target: InteractionTarget): void {
+    if (target.type === 'node-harvest') {
+      this.multiplayerClient.sendInput(0, 0);
+      this.lastSentDirection.set(0, 0);
+      this.multiplayerClient.sendInteractStart(target.id);
+      return;
+    }
+
+    if (target.type === 'npc-talk') {
+      this.multiplayerClient.sendNpcTalk(target.id);
+      return;
+    }
+
+    if (target.type === 'npc-trade') {
+      this.multiplayerClient.sendShopOpen(target.id);
+      return;
+    }
+
+    if (target.type === 'npc-bank') {
+      this.multiplayerClient.sendBankOpen(target.id);
+      return;
+    }
+
+    if (target.type === 'enemy-attack') {
+      this.multiplayerClient.sendCombatAttack(target.id);
+      return;
+    }
+
+    if (target.type === 'ground-pickup') {
+      this.multiplayerClient.sendGroundItemPickup(target.id);
+      return;
+    }
+
+    if (target.type === 'object-crafting') {
+      this.multiplayerClient.sendCraftingOpen(target.id);
+      return;
+    }
+
+    if (target.type === 'object-use') {
+      const objectState = this.worldObjects.get(target.id)?.state;
+      if (objectState) {
+        this.appendSystemChatMessage(objectState.examineText);
+      }
+    }
+  }
+
+  private startEnemyAttack(enemyId: string): void {
+    const enemyVisual = this.worldEnemies.get(enemyId);
+    if (!enemyVisual || enemyVisual.state.isDead) {
+      return;
+    }
+
+    this.queueInteractionTarget(
+      {
+        type: 'enemy-attack',
+        id: enemyVisual.state.id,
+        tileX: enemyVisual.state.tileX,
+        tileY: enemyVisual.state.tileY,
+        name: enemyVisual.state.name,
+        range: 1,
+      },
+      'interact',
+    );
+  }
+
+  private startGroundItemPickup(groundItemId: string): void {
+    const groundItem = this.worldGroundItems.get(groundItemId);
+    if (!groundItem) {
+      return;
+    }
+
+    this.queueInteractionTarget(
+      {
+        type: 'ground-pickup',
+        id: groundItem.state.id,
+        tileX: groundItem.state.tileX,
+        tileY: groundItem.state.tileY,
+        name: groundItem.state.name,
+        range: 1,
+      },
+      'interact',
+    );
   }
 
   private initChatUi(): void {
@@ -2362,7 +2725,7 @@ export class WorldScene extends Phaser.Scene {
 
     const skillsContent = document.createElement('div');
     skillsContent.style.whiteSpace = 'pre-line';
-    skillsContent.textContent = 'Woodcutting Lv 1\nMining Lv 1';
+    skillsContent.textContent = 'Woodcutting Lv 1\nMining Lv 1\nSmithing Lv 1\nFletching Lv 1';
 
     const inventoryContent = document.createElement('div');
     inventoryContent.style.display = 'flex';
@@ -2529,6 +2892,7 @@ export class WorldScene extends Phaser.Scene {
   private openShop(shopId: string): void {
     this.activeShopId = shopId;
     this.lastRenderedShopSignature = null;
+    this.closeCrafting();
     if (this.shopRootElement) {
       this.shopRootElement.style.display = 'flex';
     }
@@ -2618,6 +2982,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.closeShop();
+    this.closeCrafting();
     this.bankInventoryState = bank;
     this.bankVisible = true;
     this.lastRenderedBankSignature = null;
@@ -2635,6 +3000,58 @@ export class WorldScene extends Phaser.Scene {
     this.hideBankQuantityPrompt();
     if (this.bankRootElement) {
       this.bankRootElement.style.display = 'none';
+    }
+  }
+
+  private initCraftingUi(): void {
+    const appElement = document.querySelector<HTMLDivElement>('#app');
+    if (!appElement) {
+      return;
+    }
+
+    const { root, body } = this.createStandardPanel('Crafting', 560, 420, 2850, () => {
+      this.closeCrafting();
+    });
+
+    const content = document.createElement('div');
+    content.style.flex = '1';
+    content.style.minHeight = '0';
+    content.style.overflowY = 'auto';
+    content.style.whiteSpace = 'pre-line';
+
+    body.append(content);
+    appElement.append(root);
+
+    this.craftingRootElement = root;
+    this.craftingContentElement = content;
+  }
+
+  private openCrafting(state: CraftingOpenState): void {
+    if (this.localPlayerState) {
+      this.localPlayerState.inventory = state.inventory;
+    }
+
+    this.closeShop();
+    this.closeBank();
+    this.activeCraftingObjectId = state.objectId;
+    this.activeCraftingStationType = state.stationType;
+    this.activeCraftingTitle = state.title;
+    this.craftingRecipes = Array.isArray(state.recipes) ? state.recipes : [];
+    this.craftingVisible = true;
+    this.lastRenderedCraftingSignature = null;
+
+    if (this.craftingRootElement) {
+      this.craftingRootElement.style.display = 'flex';
+    }
+
+    this.renderCraftingPanel();
+  }
+
+  private closeCrafting(): void {
+    this.craftingVisible = false;
+    this.lastRenderedCraftingSignature = null;
+    if (this.craftingRootElement) {
+      this.craftingRootElement.style.display = 'none';
     }
   }
 
@@ -3035,6 +3452,7 @@ export class WorldScene extends Phaser.Scene {
     this.renderGearPanel();
     this.renderShopPanel();
     this.renderBankPanel();
+    this.renderCraftingPanel();
   }
 
   private renderSkillsPanel(): void {
@@ -3045,6 +3463,8 @@ export class WorldScene extends Phaser.Scene {
     const skillLines = [
       { label: 'Woodcutting', value: this.localPlayerState.skills.woodcutting },
       { label: 'Mining', value: this.localPlayerState.skills.mining },
+      { label: 'Smithing', value: this.localPlayerState.skills.smithing },
+      { label: 'Fletching', value: this.localPlayerState.skills.fletching },
       { label: 'Strength', value: this.localPlayerState.skills.strength },
       { label: 'Defense', value: this.localPlayerState.skills.defense },
       { label: 'Constitution', value: this.localPlayerState.skills.constitution },
@@ -3924,6 +4344,107 @@ export class WorldScene extends Phaser.Scene {
 
   }
 
+  private renderCraftingPanel(): void {
+    if (!this.craftingVisible || !this.craftingContentElement || !this.localPlayerState) {
+      return;
+    }
+
+    const inventorySignature = this.localPlayerState.inventory.slots
+      .map((slot) => `${slot.itemId}:${slot.quantity}`)
+      .sort()
+      .join('|');
+    const recipeSignature = this.craftingRecipes
+      .map((recipe) => `${recipe.id}:${recipe.requiredLevel}:${recipe.inputs.length}:${recipe.outputs.length}`)
+      .join('|');
+    const signature = [
+      this.activeCraftingObjectId ?? '',
+      this.activeCraftingStationType ?? '',
+      this.activeCraftingTitle,
+      inventorySignature,
+      recipeSignature,
+    ].join('::');
+
+    if (this.lastRenderedCraftingSignature === signature) {
+      return;
+    }
+
+    this.lastRenderedCraftingSignature = signature;
+    this.craftingContentElement.innerHTML = '';
+
+    const title = document.createElement('div');
+    title.textContent = this.activeCraftingTitle;
+    title.style.color = '#fff4c7';
+    title.style.fontWeight = 'bold';
+    title.style.marginBottom = '6px';
+    this.craftingContentElement.appendChild(title);
+
+    if (this.craftingRecipes.length === 0) {
+      const empty = document.createElement('div');
+      empty.textContent = 'No recipes available here.';
+      this.craftingContentElement.appendChild(empty);
+      return;
+    }
+
+    for (const recipe of this.craftingRecipes) {
+      const row = document.createElement('div');
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '1fr auto auto';
+      row.style.gap = '8px';
+      row.style.alignItems = 'center';
+      row.style.padding = '4px 0';
+      row.style.borderBottom = '1px solid rgba(160, 145, 103, 0.3)';
+
+      const inputText = recipe.inputs
+        .map((entry) => `${entry.name} x${entry.quantity}`)
+        .join(', ');
+      const outputText = recipe.outputs
+        .map((entry) => `${entry.name} x${entry.quantity}`)
+        .join(', ');
+
+      const detail = document.createElement('div');
+      detail.textContent = `${recipe.name} (Lv ${recipe.requiredLevel}, XP ${recipe.xp})\nIn: ${inputText}\nOut: ${outputText}`;
+
+      const hasAllInputs = recipe.inputs.every((entry) => {
+        const count = this.localPlayerState?.inventory.slots
+          .find((slot) => slot.itemId === entry.itemId)?.quantity ?? 0;
+        return count >= entry.quantity;
+      });
+
+      const makeOneButton = document.createElement('button');
+      makeOneButton.textContent = 'Make 1';
+      makeOneButton.style.fontFamily = 'monospace';
+      makeOneButton.style.fontSize = '11px';
+      makeOneButton.style.cursor = hasAllInputs ? 'pointer' : 'default';
+      makeOneButton.disabled = !hasAllInputs;
+      makeOneButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.activeCraftingObjectId) {
+          return;
+        }
+        this.multiplayerClient.sendCraftingMake(recipe.id, 1, this.activeCraftingObjectId);
+      });
+
+      const makeAllButton = document.createElement('button');
+      makeAllButton.textContent = 'Make all';
+      makeAllButton.style.fontFamily = 'monospace';
+      makeAllButton.style.fontSize = '11px';
+      makeAllButton.style.cursor = hasAllInputs ? 'pointer' : 'default';
+      makeAllButton.disabled = !hasAllInputs;
+      makeAllButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.activeCraftingObjectId) {
+          return;
+        }
+        this.multiplayerClient.sendCraftingMake(recipe.id, 28, this.activeCraftingObjectId);
+      });
+
+      row.append(detail, makeOneButton, makeAllButton);
+      this.craftingContentElement.appendChild(row);
+    }
+  }
+
   private renderDebugHud(): void {
     if (!this.debugHudVisible || !this.debugHudLogElement) {
       if (this.debugHudRootElement) this.debugHudRootElement.style.display = 'none';
@@ -4031,11 +4552,15 @@ export class WorldScene extends Phaser.Scene {
     this.worldObjects.clear();
     this.worldEnemies.clear();
     this.worldGroundItems.clear();
+    this.blockedNodeTiles.clear();
+    this.blockedNpcTiles.clear();
+    this.blockedObjectTiles.clear();
     this.pendingGroundItemTextureLoads.clear();
     this.shopDefinitions = {};
     this.activeShopId = null;
     this.lastRenderedShopSignature = null;
-    this.pendingNpcAction = null;
+    this.pendingInteractionTarget = null;
+    this.pendingInteractionRetryAt = 0;
     this.hideContextMenu();
     this.hideItemTooltip();
     this.localPlayerState = null;
@@ -4077,6 +4602,15 @@ export class WorldScene extends Phaser.Scene {
     this.bankVisible = false;
     this.lastRenderedBankSignature = null;
     this.hideBankQuantityPrompt();
+    this.craftingRootElement?.remove();
+    this.craftingRootElement = null;
+    this.craftingContentElement = null;
+    this.activeCraftingObjectId = null;
+    this.activeCraftingStationType = null;
+    this.activeCraftingTitle = 'Crafting';
+    this.craftingRecipes = [];
+    this.craftingVisible = false;
+    this.lastRenderedCraftingSignature = null;
     this.itemTooltipElement?.remove();
     this.itemTooltipElement = null;
     this.localHealthBar?.destroy();

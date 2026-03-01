@@ -1,0 +1,37 @@
+{
+  "skill": "fletching",
+  "recipes": [
+    {
+      "id": "wooden_arrows",
+      "requiredLevel": 1,
+      "durationMs": 1400,
+      "successChance": 1,
+      "xp": 5,
+      "inputs": [
+        { "itemId": "logs", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "wooden_arrows", "quantity": 10 }
+      ]
+    },
+    {
+      "id": "wooden_shortbow",
+      "requiredLevel": 3,
+      "durationMs": 1800,
+      "successChance": 1,
+      "xp": 9,
+      "inputs": [
+        { "itemId": "logs", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "wooden_shortbow", "quantity": 1 }
+      ]
+    }
+  ],
+  "messages": {
+    "locked": "Requires level {requiredLevel}.",
+    "missingItems": "You don't have the required logs.",
+    "success": "You fletch the item.",
+    "failure": "You fail to shape the wood."
+  }
+}

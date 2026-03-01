@@ -98,6 +98,14 @@ export interface RemotePlayerState {
       xp: number;
       level: number;
     };
+    smithing: {
+      xp: number;
+      level: number;
+    };
+    fletching: {
+      xp: number;
+      level: number;
+    };
     strength: {
       xp: number;
       level: number;
@@ -202,6 +210,31 @@ export interface ShopState {
   listings: ShopListingState[];
 }
 
+export interface CraftingRecipeEntryState {
+  itemId: string;
+  name: string;
+  quantity: number;
+}
+
+export interface CraftingRecipeState {
+  id: string;
+  name: string;
+  requiredLevel: number;
+  durationMs: number;
+  successChance: number;
+  xp: number;
+  inputs: CraftingRecipeEntryState[];
+  outputs: CraftingRecipeEntryState[];
+}
+
+export interface CraftingOpenState {
+  stationType: string;
+  title: string;
+  objectId: string;
+  inventory: InventoryState;
+  recipes: CraftingRecipeState[];
+}
+
 export interface ChatMessageState {
   id: string;
   text: string;
@@ -249,6 +282,15 @@ interface BankOpenMessage {
   bank: InventoryState;
 }
 
+interface CraftingOpenMessage {
+  type: 'craftingOpen';
+  stationType: string;
+  title: string;
+  objectId: string;
+  inventory: InventoryState;
+  recipes: CraftingRecipeState[];
+}
+
 interface PlayerJoinedMessage {
   type: 'playerJoined';
   player: RemotePlayerState;
@@ -282,6 +324,7 @@ type ServerMessage =
   | ChatMessage
   | ShopOpenMessage
   | BankOpenMessage
+  | CraftingOpenMessage
   | {
       type: 'authRequired';
       usernamePattern: string;
@@ -326,6 +369,7 @@ export class MultiplayerClient {
     private readonly onChatMessage: (message: ChatMessageState) => void,
     private readonly onShopOpen: (shopId: string) => void,
     private readonly onBankOpen: (inventory: InventoryState, bank: InventoryState) => void,
+    private readonly onCraftingOpen: (state: CraftingOpenState) => void,
     private readonly onAuthFailure: (reason: string) => void,
   ) {}
 
@@ -457,6 +501,17 @@ export class MultiplayerClient {
 
       if (message.type === 'bankOpen') {
         this.onBankOpen(message.inventory, message.bank);
+        return;
+      }
+
+      if (message.type === 'craftingOpen') {
+        this.onCraftingOpen({
+          stationType: message.stationType,
+          title: message.title,
+          objectId: message.objectId,
+          inventory: message.inventory,
+          recipes: message.recipes,
+        });
       }
     });
   }
@@ -700,6 +755,36 @@ export class MultiplayerClient {
         to,
         slotIndex,
         quantity,
+      }),
+    );
+  }
+
+  sendCraftingOpen(objectId: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'craftingOpen',
+        objectId,
+      }),
+    );
+  }
+
+  sendCraftingMake(recipeId: string, quantity = 1, objectId?: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'craftingMake',
+        recipeId,
+        quantity,
+        objectId,
       }),
     );
   }

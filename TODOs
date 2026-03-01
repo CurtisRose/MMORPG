@@ -27,23 +27,27 @@ Next Roadmap (in order)
 - [x] Add chunk coordinate workflow with per-chunk load/export.
 
 5) Player login + account security
-- [ ] Add account registration/login (email or username + password).
-- [ ] Store passwords with salted hash (Argon2/bcrypt), never plain text.
-- [ ] Add signed session/auth token flow with server-side validation.
-- [ ] Bind profile saves/loads to authenticated account IDs only.
-- [ ] Add basic anti-tamper controls (request validation + rate limiting).
+- [x] Add account registration/login (email or username + password).
+- [x] Store passwords with salted hash (Argon2/bcrypt), never plain text.
+- [x] Add signed session/auth token flow with server-side validation.
+- [x] Bind profile saves/loads to authenticated account IDs only.
+- [x] Add basic anti-tamper controls (request validation + rate limiting).
 
 6) Quest / task loop
-- [ ] Add basic kill tasks.
-- [ ] Add basic gather tasks.
-- [ ] Add coin/xp/gear reward hooks.
+- [x] Add basic kill tasks.
+- [x] Add basic gather tasks.
+- [x] Add coin/xp/gear reward hooks.
 
-7) Economy balancing
+7) Crafting
+- [ ] Add basic crafting station interaction.
+- [ ] Add at least one starter recipe flow.
+
+8) Economy balancing
 - [ ] Re-tune buy/sell pricing curves.
 - [ ] Add at least one coin sink (repair, fees, etc.).
 - [ ] Add economy telemetry counters for tuning.
 
-8) Save/profile hardening
+9) Save/profile hardening
 - [ ] Add profile schema version field.
 - [ ] Add migration pipeline for old profiles.
 - [ ] Add migration safety/fallback logging.
