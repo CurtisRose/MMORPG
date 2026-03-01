@@ -66,6 +66,7 @@ button {
 }
 
 select,
+input[type='text'],
 input[type='number'],
 input[type='range'] {
   width: 100%;
@@ -74,6 +75,16 @@ input[type='range'] {
   border: 1px solid #3b4559;
   border-radius: 6px;
   padding: 6px;
+}
+
+textarea {
+  width: 100%;
+  background: #0f141c;
+  color: #e8edf4;
+  border: 1px solid #3b4559;
+  border-radius: 6px;
+  padding: 6px;
+  resize: vertical;
 }
 
 button {

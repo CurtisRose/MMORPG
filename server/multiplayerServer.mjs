@@ -27,6 +27,10 @@ const MINING_XP_PER_GATHER_DEFAULT = 26;
 const GATHER_INTERVAL_MS_DEFAULT = 1200;
 const HARVEST_SUCCESS_CHANCE_BONUS_PER_LEVEL = 0.005;
 const HARVEST_SUCCESS_CHANCE_BONUS_MAX = 0.3;
+const HARVEST_HAND_SUCCESS_CHANCE_PENALTY = 0.08;
+const HARVEST_HAND_GATHER_INTERVAL_MULTIPLIER = 1.2;
+const HARVEST_CORRECT_TOOL_SUCCESS_CHANCE_BONUS = 0.05;
+const HARVEST_CORRECT_TOOL_GATHER_INTERVAL_MULTIPLIER = 0.9;
 const STRENGTH_XP_PER_HIT = 16;
 const CONSTITUTION_XP_PER_HIT = 6;
 const DEFENSE_XP_PER_HIT_TAKEN = 12;
@@ -259,6 +263,44 @@ function createFilledTerrainGrid(width, height, fill) {
   return Array.from({ length: safeHeight }, () => Array.from({ length: safeWidth }, () => fill));
 }
 
+function normalizeNpcQuestDefinition(rawQuest, fallbackQuestId) {
+  if (!rawQuest || typeof rawQuest !== 'object') {
+    return null;
+  }
+
+  const id = String(rawQuest.id ?? fallbackQuestId ?? '').trim();
+  const title = String(rawQuest.title ?? '').trim();
+  const objectiveTargetId = String(rawQuest.objectiveTargetId ?? '').trim();
+  if (!id || !title || !objectiveTargetId) {
+    return null;
+  }
+
+  const objectiveType = rawQuest.objectiveType === 'gather' ? 'gather' : 'kill';
+  const requiredCount = Math.max(1, Math.floor(Number(rawQuest.requiredCount ?? 1)));
+  const rewardGold = Math.max(0, Math.floor(Number(rawQuest.rewardGold ?? 0)));
+  const rewardItemId = String(rawQuest.rewardItemId ?? '').trim();
+  const rewardItemQuantity = Math.max(1, Math.floor(Number(rawQuest.rewardItemQuantity ?? 1)));
+  const missionText = String(rawQuest.missionText ?? `Complete: ${title}`).trim();
+  const startText = String(rawQuest.startText ?? `I need help with ${title}.`).trim();
+  const progressText = String(rawQuest.progressText ?? 'Keep going, you are making progress.').trim();
+  const completeText = String(rawQuest.completeText ?? 'Excellent work. Here is your reward.').trim();
+
+  return {
+    id,
+    title,
+    missionText,
+    startText,
+    progressText,
+    completeText,
+    objectiveType,
+    objectiveTargetId,
+    requiredCount,
+    rewardGold,
+    rewardItemId,
+    rewardItemQuantity,
+  };
+}
+
 function normalizeWorldMapData(raw) {
   const fallback = createDefaultWorldMapData();
   const rawChunkWidth = Math.floor(Number(raw?.chunkWidth ?? DEFAULT_WORLD_WIDTH_TILES));
@@ -348,14 +390,16 @@ function normalizeWorldMapData(raw) {
         for (const entry of chunk.npcs) {
           const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
           const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+          const npcId = String(entry?.id ?? `npc-${npcs.length + 1}`);
           npcs.push({
-            id: String(entry?.id ?? `npc-${npcs.length + 1}`),
+            id: npcId,
             type: String(entry?.type ?? 'villager'),
             name: String(entry?.name ?? `NPC ${npcs.length + 1}`),
             tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
             tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
             examineText: String(entry?.examineText ?? "It's someone."),
             talkText: String(entry?.talkText ?? 'Hello there.'),
+            quest: normalizeNpcQuestDefinition(entry?.quest, `quest-${npcId}`),
           });
         }
 
@@ -429,15 +473,19 @@ function normalizeWorldMapData(raw) {
     : fallback.monsters;
 
   const npcs = Array.isArray(source?.npcs)
-    ? source.npcs.map((entry, index) => ({
-      id: String(entry?.id ?? `npc-${index + 1}`),
-      type: String(entry?.type ?? 'villager'),
-      name: String(entry?.name ?? `NPC ${index + 1}`),
-      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
-      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
-      examineText: String(entry?.examineText ?? "It's someone."),
-      talkText: String(entry?.talkText ?? 'Hello there.'),
-    }))
+    ? source.npcs.map((entry, index) => {
+      const npcId = String(entry?.id ?? `npc-${index + 1}`);
+      return {
+        id: npcId,
+        type: String(entry?.type ?? 'villager'),
+        name: String(entry?.name ?? `NPC ${index + 1}`),
+        tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
+        tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
+        examineText: String(entry?.examineText ?? "It's someone."),
+        talkText: String(entry?.talkText ?? 'Hello there.'),
+        quest: normalizeNpcQuestDefinition(entry?.quest, `quest-${npcId}`),
+      };
+    })
     : fallback.npcs;
 
   const objects = Array.isArray(source?.objects)
@@ -2713,6 +2761,7 @@ function createPlayer(id) {
     bank: createInventory(BANK_MAX_SLOTS),
     equipment: createEquipment(),
     skills: createSkills(),
+    quests: sanitizeQuestProgress(null),
     lastActionText: null,
     lastInputAt: Date.now(),
   };
@@ -2895,6 +2944,39 @@ function cloneEquipment(equipment) {
   return normalized;
 }
 
+function sanitizeQuestProgress(rawQuestProgress) {
+  const activeRaw = rawQuestProgress?.active;
+  const completedRaw = rawQuestProgress?.completed;
+
+  const active = {};
+  if (activeRaw && typeof activeRaw === 'object') {
+    for (const [questId, value] of Object.entries(activeRaw)) {
+      const normalizedQuestId = String(questId ?? '').trim();
+      if (!normalizedQuestId) {
+        continue;
+      }
+
+      const count = Math.max(0, Math.floor(Number(value?.count ?? 0)));
+      active[normalizedQuestId] = { count };
+    }
+  }
+
+  const completed = Array.isArray(completedRaw)
+    ? Array.from(
+      new Set(
+        completedRaw
+          .map((entry) => String(entry ?? '').trim())
+          .filter((entry) => entry.length > 0),
+      ),
+    )
+    : [];
+
+  return {
+    active,
+    completed,
+  };
+}
+
 function sanitizePlayerProfile(rawProfile) {
   const inventory = cloneInventory(rawProfile?.inventory);
   const bank = cloneInventory(rawProfile?.bank, BANK_MAX_SLOTS);
@@ -2953,6 +3035,7 @@ function sanitizePlayerProfile(rawProfile) {
     bank,
     equipment,
     skills,
+    quests: sanitizeQuestProgress(rawProfile?.quests),
   };
 }
 
@@ -3218,6 +3301,7 @@ function capturePlayerProfile(player) {
     bank: player.bank,
     equipment: player.equipment,
     skills: player.skills,
+    quests: player.quests,
   });
 }
 
@@ -3243,6 +3327,7 @@ function applyPersistedProfile(player, profile) {
   player.bank = cloneInventory(safeProfile.bank, BANK_MAX_SLOTS);
   player.equipment = cloneEquipment(safeProfile.equipment);
   player.skills = cloneSkills(safeProfile.skills);
+  player.quests = sanitizeQuestProgress(safeProfile.quests);
   player.skills.woodcutting.level = getLevelForXp(player.skills.woodcutting.xp);
   player.skills.mining.level = getLevelForXp(player.skills.mining.xp);
   player.skills.strength.level = getLevelForXp(player.skills.strength.xp);
@@ -3660,6 +3745,23 @@ function isPlayerMoving(player) {
   );
 }
 
+function isCorrectHarvestToolEquipped(player, skillName) {
+  const mainHandItemId = String(player?.equipment?.mainHand?.itemId ?? '').toLowerCase();
+  if (!mainHandItemId) {
+    return false;
+  }
+
+  if (skillName === 'woodcutting') {
+    return mainHandItemId.includes('axe');
+  }
+
+  if (skillName === 'mining') {
+    return mainHandItemId.includes('pickaxe');
+  }
+
+  return false;
+}
+
 function getPlayerSkillActionBonuses(player, skillName) {
   let successChanceBonus = 0;
   let gatherIntervalMultiplier = 1;
@@ -3681,6 +3783,15 @@ function getPlayerSkillActionBonuses(player, skillName) {
     if (Number.isFinite(multiplier) && multiplier > 0) {
       gatherIntervalMultiplier *= multiplier;
     }
+  }
+
+  const hasCorrectToolEquipped = isCorrectHarvestToolEquipped(player, skillName);
+  if (hasCorrectToolEquipped) {
+    successChanceBonus += HARVEST_CORRECT_TOOL_SUCCESS_CHANCE_BONUS;
+    gatherIntervalMultiplier *= HARVEST_CORRECT_TOOL_GATHER_INTERVAL_MULTIPLIER;
+  } else {
+    successChanceBonus -= HARVEST_HAND_SUCCESS_CHANCE_PENALTY;
+    gatherIntervalMultiplier *= HARVEST_HAND_GATHER_INTERVAL_MULTIPLIER;
   }
 
   return {
@@ -4118,6 +4229,200 @@ function isWithinNpcRange(player, npc) {
   return manhattanDistance <= INTERACTION_RANGE_TILES;
 }
 
+function getQuestObjectiveLabel(quest) {
+  const typeLabel = quest.objectiveType === 'gather' ? 'Gather' : 'Defeat';
+  return `${typeLabel} ${quest.objectiveTargetId} (${quest.requiredCount})`;
+}
+
+function getQuestProgressRecord(player, questId) {
+  const safeQuestId = String(questId ?? '').trim();
+  if (!safeQuestId) {
+    return null;
+  }
+
+  if (!player.quests || typeof player.quests !== 'object') {
+    player.quests = sanitizeQuestProgress(null);
+  }
+
+  if (!player.quests.active || typeof player.quests.active !== 'object') {
+    player.quests.active = {};
+  }
+
+  const existing = player.quests.active[safeQuestId];
+  if (!existing) {
+    return null;
+  }
+
+  const count = Math.max(0, Math.floor(Number(existing.count ?? 0)));
+  return { count };
+}
+
+function setQuestProgressRecord(player, questId, count) {
+  const safeQuestId = String(questId ?? '').trim();
+  if (!safeQuestId) {
+    return;
+  }
+
+  if (!player.quests || typeof player.quests !== 'object') {
+    player.quests = sanitizeQuestProgress(null);
+  }
+
+  if (!player.quests.active || typeof player.quests.active !== 'object') {
+    player.quests.active = {};
+  }
+
+  player.quests.active[safeQuestId] = {
+    count: Math.max(0, Math.floor(Number(count ?? 0))),
+  };
+}
+
+function isQuestCompleted(player, questId) {
+  const safeQuestId = String(questId ?? '').trim();
+  if (!safeQuestId) {
+    return false;
+  }
+
+  if (!player.quests || typeof player.quests !== 'object') {
+    player.quests = sanitizeQuestProgress(null);
+  }
+
+  if (!Array.isArray(player.quests.completed)) {
+    player.quests.completed = [];
+  }
+
+  return player.quests.completed.includes(safeQuestId);
+}
+
+function getNpcQuestStatus(player, quest) {
+  if (!quest) {
+    return 'none';
+  }
+
+  if (isQuestCompleted(player, quest.id)) {
+    return 'completed';
+  }
+
+  const progress = getQuestProgressRecord(player, quest.id);
+  if (!progress) {
+    return 'not_started';
+  }
+
+  if (progress.count >= quest.requiredCount) {
+    return 'completable';
+  }
+
+  return 'active';
+}
+
+function sendQuestProgressToPlayer(player, text) {
+  const client = clients.get(player.id);
+  if (!client || client.socket.readyState !== 1) {
+    return;
+  }
+
+  sendChatToSocket(client.socket, text);
+}
+
+function startNpcQuestForPlayer(player, npc, quest) {
+  setQuestProgressRecord(player, quest.id, 0);
+  player.lastActionText = `Accepted quest: ${quest.title}`;
+  sendQuestProgressToPlayer(player, `[${npc.name}] ${quest.startText}`);
+  sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: ${quest.missionText}`);
+  sendQuestProgressToPlayer(player, `[Quest] Objective: ${getQuestObjectiveLabel(quest)}`);
+}
+
+function completeNpcQuestForPlayer(player, npc, quest) {
+  const rewardItemId = String(quest.rewardItemId ?? '').trim();
+  const rewardItemQuantity = Math.max(1, Math.floor(Number(quest.rewardItemQuantity ?? 1)));
+  const rewardGold = Math.max(0, Math.floor(Number(quest.rewardGold ?? 0)));
+
+  if (rewardItemId) {
+    const itemDefinition = getItemDefinition(rewardItemId);
+    if (!itemDefinition) {
+      sendQuestProgressToPlayer(player, '[Quest] Reward item configuration is invalid.');
+      return false;
+    }
+
+    const addedItem = addItemToInventory(player, rewardItemId, rewardItemQuantity);
+    if (!addedItem) {
+      sendQuestProgressToPlayer(player, '[Quest] Not enough inventory space for quest rewards.');
+      return false;
+    }
+  }
+
+  if (rewardGold > 0) {
+    addPlayerGold(player, rewardGold);
+  }
+
+  if (!Array.isArray(player.quests.completed)) {
+    player.quests.completed = [];
+  }
+
+  delete player.quests.active[quest.id];
+  if (!player.quests.completed.includes(quest.id)) {
+    player.quests.completed.push(quest.id);
+  }
+
+  const rewardParts = [];
+  if (rewardGold > 0) {
+    rewardParts.push(`${rewardGold} gold`);
+  }
+  if (rewardItemId) {
+    const itemName = getItemDefinition(rewardItemId)?.name ?? rewardItemId;
+    rewardParts.push(`${itemName}${rewardItemQuantity > 1 ? ` x${rewardItemQuantity}` : ''}`);
+  }
+  const rewardSummary = rewardParts.length > 0 ? rewardParts.join(', ') : 'no tangible rewards';
+
+  player.lastActionText = `Completed quest: ${quest.title}`;
+  sendQuestProgressToPlayer(player, `[${npc.name}] ${quest.completeText}`);
+  sendQuestProgressToPlayer(player, `[Quest] Completed: ${quest.title}. Rewards: ${rewardSummary}.`);
+  return true;
+}
+
+function applyQuestObjectiveProgress(player, objectiveType, objectiveTargetId, amount = 1) {
+  if (!objectiveTargetId) {
+    return;
+  }
+
+  const safeTargetId = String(objectiveTargetId).trim();
+  if (!safeTargetId) {
+    return;
+  }
+
+  const objectiveCount = Math.max(1, Math.floor(Number(amount ?? 1)));
+  for (const npc of Object.values(NPC_DEFINITIONS)) {
+    const quest = npc?.quest;
+    if (!quest) {
+      continue;
+    }
+
+    if (quest.objectiveType !== objectiveType || String(quest.objectiveTargetId) !== safeTargetId) {
+      continue;
+    }
+
+    if (isQuestCompleted(player, quest.id)) {
+      continue;
+    }
+
+    const progress = getQuestProgressRecord(player, quest.id);
+    if (!progress) {
+      continue;
+    }
+
+    const nextCount = Math.min(quest.requiredCount, progress.count + objectiveCount);
+    if (nextCount === progress.count) {
+      continue;
+    }
+
+    setQuestProgressRecord(player, quest.id, nextCount);
+    if (nextCount >= quest.requiredCount) {
+      sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: objective complete. Return to ${npc.name}.`);
+    } else {
+      sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: ${nextCount}/${quest.requiredCount}.`);
+    }
+  }
+}
+
 function getNodeSnapshot(now) {
   const nodes = {};
 
@@ -4485,6 +4790,8 @@ function processInteraction(player, nowMs) {
     return;
   }
 
+  applyQuestObjectiveProgress(player, 'gather', rewardItem.id, rewardQuantity);
+
   const xpResult = addSkillXp(player, resourceConfig.skill, selectedDrop.xp);
   player.lastActionText = interpolateTemplate(resourceConfig.messages.success, {
     quantity: rewardQuantity,
@@ -4598,6 +4905,11 @@ function processPlayerCombat(player, nowMs) {
   player.lastActionText = `You hit ${enemy.name} for ${damage}.`;
 
   if (enemy.hp <= 0) {
+    const questTargetId = String(enemy.minionTypeId ?? enemy.type ?? '').trim();
+    if (questTargetId) {
+      applyQuestObjectiveProgress(player, 'kill', questTargetId, 1);
+    }
+
     const dropResult = applyMinionDropsToPlayer(player, enemy);
     const droppedDrops = dropResult.droppedDrops;
     enemy.deadUntil = nowMs + enemy.respawnMs;
@@ -5245,6 +5557,31 @@ wss.on('connection', (socket) => {
         if (npc.type === 'bank_chest') {
           sendChatToSocket(socket, `[${npc.name}] Your valuables are safe inside.`);
           return;
+        }
+
+        const quest = npc.quest ?? null;
+        if (quest) {
+          const questStatus = getNpcQuestStatus(player, quest);
+          if (questStatus === 'not_started') {
+            startNpcQuestForPlayer(player, npc, quest);
+            return;
+          }
+
+          if (questStatus === 'active') {
+            const progress = getQuestProgressRecord(player, quest.id) ?? { count: 0 };
+            sendChatToSocket(
+              socket,
+              `[${npc.name}] ${quest.progressText} (${progress.count}/${quest.requiredCount})`,
+            );
+            return;
+          }
+
+          if (questStatus === 'completable') {
+            const completed = completeNpcQuestForPlayer(player, npc, quest);
+            if (completed) {
+              return;
+            }
+          }
         }
 
         sendChatToSocket(socket, `[${npc.name}] ${npc.talkText}`);
