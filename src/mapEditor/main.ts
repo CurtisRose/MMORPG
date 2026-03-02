@@ -1,5 +1,5 @@
 import '../mapEditor/styles.css';
-import { MAP_HEIGHT_TILES, MAP_WIDTH_TILES } from '../game/config/gameConfig';
+import { MAP_HEIGHT_TILES, MAP_WIDTH_TILES, TILE_SIZE } from '../game/config/gameConfig';
 import { generateTerrainData } from '../game/world/generateTerrainData';
 
 type LayerMode = 'terrain' | 'resources' | 'monsters' | 'objects' | 'npcs';
@@ -7,6 +7,8 @@ type ToolMode = 'paint' | 'select';
 const WORLD_DATA_VERSION = 1;
 const MAX_HISTORY_STEPS = 100;
 const CANONICAL_WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
+const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+const TERRAIN_TILESET_URL = `${import.meta.env.BASE_URL}assets/terrain/terrain_tileset.png`;
 const QUEST_INDEX_URL = `${import.meta.env.BASE_URL}data/quests/index.json`;
 const DEBUG_LOG_MAX_LINES = 160;
 const SIDEBAR_WIDTH_STORAGE_KEY = 'mapEditor.sidebarWidth';
@@ -118,6 +120,13 @@ type SelectedTile = {
   worldTileY: number;
 };
 
+type TileTypeDefinition = {
+  id: number;
+  label: string;
+  color: string;
+  image: string;
+};
+
 type QuestPreviewContext = {
   questId: string | null;
   zoneIds: Set<string>;
@@ -129,12 +138,12 @@ type QuestPreviewContext = {
   travelTiles: Array<{ tileX: number; tileY: number }>;
 };
 
-const TILE_TYPES = [
-  { id: 0, label: 'Grass', color: '#4f8f4a' },
-  { id: 1, label: 'Dirt', color: '#7c6642' },
-  { id: 2, label: 'Water', color: '#355f9c' },
-  { id: 3, label: 'Sand', color: '#b9a56d' },
-] as const;
+const DEFAULT_TILE_TYPES: TileTypeDefinition[] = [
+  { id: 0, label: 'Grass', color: '#4f8f4a', image: '' },
+  { id: 1, label: 'Dirt', color: '#7c6642', image: '' },
+  { id: 2, label: 'Water', color: '#355f9c', image: '' },
+  { id: 3, label: 'Sand', color: '#b9a56d', image: '' },
+];
 
 const RESOURCE_TYPES: Array<{ id: string; label: string; nodeType: 'tree' | 'rock'; respawnMs: number }> = [
   { id: 'birch_tree', label: 'Birch Tree', nodeType: 'tree', respawnMs: 5000 },
@@ -256,6 +265,7 @@ const state: {
   activeChunkKey: string;
   toolMode: ToolMode;
   layer: LayerMode;
+  tileTypes: TileTypeDefinition[];
   selectedTileType: number;
   selectedResourceId: string;
   selectedMonsterId: string;
@@ -279,6 +289,7 @@ const state: {
   activeChunkKey: getChunkKey(0, 0),
   toolMode: 'paint',
   layer: 'terrain',
+  tileTypes: DEFAULT_TILE_TYPES.map((entry) => ({ ...entry })),
   selectedTileType: 0,
   selectedResourceId: RESOURCE_TYPES[0].id,
   selectedMonsterId: MONSTER_TYPES[0].id,
@@ -312,7 +323,7 @@ const objectSelectOptions = OBJECT_TYPES.map(
 const npcSelectOptions = NPC_TYPES.map(
   (entry) => `<option value="${entry.id}">${entry.label}</option>`,
 ).join('');
-const tileSelectOptions = TILE_TYPES.map(
+const tileSelectOptions = state.tileTypes.map(
   (entry) => `<option value="${entry.id}">${entry.label}</option>`,
 ).join('');
 
@@ -825,6 +836,7 @@ const zoneEditorDeleteButton = requireElement<HTMLButtonElement>('#zoneEditorDel
 const hoverSummaryElement = requireElement<HTMLDivElement>('#hoverSummary', 'Hover summary not found');
 const debugLogElement = requireElement<HTMLDivElement>('#debugLog', 'Debug log element not found');
 const clearDebugLogButton = requireElement<HTMLButtonElement>('#clearDebugLog', 'Clear debug log button not found');
+const tileImageCache = new Map<string, HTMLImageElement | null>();
 
 let isMiddleMousePanning = false;
 let panStartClientX = 0;
@@ -844,6 +856,7 @@ const debugLogLines: string[] = [];
 let questEditorDraft: QuestIndexEntry = buildDefaultQuestDefinition('');
 let questEditorSelectedStepIndex = 0;
 let questEditorSelectedObjectiveIndex = 0;
+let tileTypesSyncSignature = '';
 
 function appendDebugLog(label: string, details: string): void {
   const time = new Date().toISOString().slice(11, 23);
@@ -855,6 +868,144 @@ function appendDebugLog(label: string, details: string): void {
 
   debugLogElement.textContent = debugLogLines.join('\n');
   console.debug('[MapEditor]', line);
+}
+
+function normalizeTileTypes(input: unknown): TileTypeDefinition[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((entry) => {
+      const candidate = entry as Record<string, unknown>;
+      const id = Number(candidate?.id ?? NaN);
+      const label = String(candidate?.label ?? '').trim();
+      const color = String(candidate?.color ?? '').trim();
+      const image = String(candidate?.image ?? '').trim();
+      if (!Number.isFinite(id) || !label || !color) {
+        return null;
+      }
+
+      return {
+        id,
+        label,
+        color,
+        image,
+      };
+    })
+    .filter((entry): entry is TileTypeDefinition => entry !== null)
+    .sort((a, b) => a.id - b.id);
+}
+
+function resolveTileImageUrl(input: string): string {
+  const trimmed = String(input ?? '').trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const normalized = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  return `${import.meta.env.BASE_URL}${normalized}`;
+}
+
+function getTileImageForTileId(tileId: number): HTMLImageElement | null {
+  const tile = state.tileTypes.find((entry) => entry.id === tileId);
+  const imagePath = String(tile?.image ?? '').trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const imageUrl = resolveTileImageUrl(imagePath);
+  const cached = tileImageCache.get(imageUrl);
+  if (typeof cached !== 'undefined') {
+    return cached;
+  }
+
+  const image = new Image();
+  image.decoding = 'async';
+  image.onload = () => {
+    tileImageCache.set(imageUrl, image);
+    drawGrid();
+  };
+  image.onerror = () => {
+    tileImageCache.set(imageUrl, null);
+  };
+  tileImageCache.set(imageUrl, null);
+  image.src = imageUrl;
+  return null;
+}
+
+function getSharedTerrainTilesetImage(): HTMLImageElement | null {
+  const cached = tileImageCache.get(TERRAIN_TILESET_URL);
+  if (typeof cached !== 'undefined') {
+    return cached;
+  }
+
+  const image = new Image();
+  image.decoding = 'async';
+  image.onload = () => {
+    tileImageCache.set(TERRAIN_TILESET_URL, image);
+    drawGrid();
+  };
+  image.onerror = () => {
+    tileImageCache.set(TERRAIN_TILESET_URL, null);
+  };
+  tileImageCache.set(TERRAIN_TILESET_URL, null);
+  image.src = TERRAIN_TILESET_URL;
+  return null;
+}
+
+function refreshTileTypeSelectOptions(): void {
+  const optionsMarkup = state.tileTypes
+    .map((entry) => `<option value="${entry.id}">${entry.label}</option>`)
+    .join('');
+
+  tileTypeSelect.innerHTML = optionsMarkup;
+  selectionTerrainTypeSelect.innerHTML = optionsMarkup;
+
+  const hasCurrent = state.tileTypes.some((entry) => entry.id === state.selectedTileType);
+  if (!hasCurrent) {
+    state.selectedTileType = state.tileTypes[0]?.id ?? 0;
+  }
+
+  tileTypeSelect.value = String(state.selectedTileType);
+  selectionTerrainTypeSelect.value = String(state.selectedTileType);
+}
+
+async function loadTileTypesIfAvailable(): Promise<void> {
+  try {
+    const response = await fetch(TILE_TYPES_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      appendDebugLog('tile-types', `Failed to fetch tileTypes.json (${response.status}); using defaults.`);
+      refreshTileTypeSelectOptions();
+      return;
+    }
+
+    const parsed = normalizeTileTypes(await response.json());
+    if (!parsed.length) {
+      appendDebugLog('tile-types', 'tileTypes.json was empty or invalid; using defaults.');
+      refreshTileTypeSelectOptions();
+      return;
+    }
+
+    const signature = JSON.stringify(parsed);
+    if (signature === tileTypesSyncSignature) {
+      return;
+    }
+
+    state.tileTypes = parsed;
+    tileTypesSyncSignature = signature;
+    appendDebugLog('tile-types', `Loaded tile types: ${state.tileTypes.length}`);
+    refreshTileTypeSelectOptions();
+    drawGrid();
+    updateStatus();
+  } catch (error) {
+    appendDebugLog('tile-types', `Exception: ${error instanceof Error ? error.message : String(error)}`);
+    refreshTileTypeSelectOptions();
+  }
 }
 
 function clampSidebarWidth(width: number): number {
@@ -2304,7 +2455,7 @@ function updateSelectionPanel(): void {
   const { worldTileX, worldTileY } = state.selectedTile;
   const mapped = ensureChunkVisibleByWorldTile(worldTileX, worldTileY);
   const terrainId = mapped.chunk.terrain[mapped.localTileY]?.[mapped.localTileX] ?? 0;
-  const terrainLabel = TILE_TYPES.find((entry) => entry.id === terrainId)?.label ?? `Tile ${terrainId}`;
+  const terrainLabel = state.tileTypes.find((entry) => entry.id === terrainId)?.label ?? `Tile ${terrainId}`;
   const resource = getResourceAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const monster = getMonsterAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const object = getObjectAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
@@ -2467,7 +2618,7 @@ function updateStatus(
 }
 
 function getTileColor(tileId: number): string {
-  const entry = TILE_TYPES.find((tile) => tile.id === tileId);
+  const entry = state.tileTypes.find((tile) => tile.id === tileId);
   return entry?.color ?? '#222833';
 }
 
@@ -2521,19 +2672,43 @@ function drawGrid(): void {
   const height = heightInChunks * MAP_HEIGHT_TILES;
   canvas.width = width * tileSize;
   canvas.height = height * tileSize;
+  const sharedTileset = getSharedTerrainTilesetImage();
   for (const entry of chunkEntries) {
     const chunkOffsetTileX = (entry.chunkX - minChunkX) * MAP_WIDTH_TILES;
     const chunkOffsetTileY = (entry.chunkY - minChunkY) * MAP_HEIGHT_TILES;
     for (let y = 0; y < MAP_HEIGHT_TILES; y += 1) {
       for (let x = 0; x < MAP_WIDTH_TILES; x += 1) {
         const tileId = entry.chunk.terrain[y]?.[x] ?? 0;
+        const pixelX = (chunkOffsetTileX + x) * tileSize;
+        const pixelY = (chunkOffsetTileY + y) * tileSize;
         context.fillStyle = getTileColor(tileId);
-        context.fillRect(
-          (chunkOffsetTileX + x) * tileSize,
-          (chunkOffsetTileY + y) * tileSize,
-          tileSize,
-          tileSize,
+        context.fillRect(pixelX, pixelY, tileSize, tileSize);
+
+        const tilesetHasFrame = Boolean(
+          sharedTileset
+          && sharedTileset.complete
+          && sharedTileset.naturalWidth >= (tileId + 1) * TILE_SIZE
+          && sharedTileset.naturalHeight >= TILE_SIZE,
         );
+        if (tilesetHasFrame && sharedTileset) {
+          context.drawImage(
+            sharedTileset,
+            tileId * TILE_SIZE,
+            0,
+            TILE_SIZE,
+            TILE_SIZE,
+            pixelX,
+            pixelY,
+            tileSize,
+            tileSize,
+          );
+          continue;
+        }
+
+        const tileImage = getTileImageForTileId(tileId);
+        if (tileImage && tileImage.complete && tileImage.naturalWidth > 0) {
+          context.drawImage(tileImage, pixelX, pixelY, tileSize, tileSize);
+        }
       }
     }
   }
@@ -3995,4 +4170,19 @@ updateStatus();
 refreshZoneEditorOptions();
 setZoneEditorFormFromZone(null);
 void loadCanonicalWorldMapIfAvailable();
+void loadTileTypesIfAvailable();
 void loadQuestIndexIfAvailable();
+
+window.addEventListener('focus', () => {
+  void loadTileTypesIfAvailable();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    void loadTileTypesIfAvailable();
+  }
+});
+
+window.setInterval(() => {
+  void loadTileTypesIfAvailable();
+}, 4000);

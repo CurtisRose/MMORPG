@@ -174,8 +174,34 @@ textarea {
   object-fit: contain;
 }
 
+.preview-frame canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.tile-fallback-preview {
+  width: 100%;
+  height: 100%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 8px;
+  font-weight: 600;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
 .preview-hint {
   margin-top: 6px;
+  font-size: 12px;
+  color: #9aa7bc;
+}
+
+.preview-inline-note {
+  align-self: center;
   font-size: 12px;
   color: #9aa7bc;
 }
