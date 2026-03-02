@@ -92,6 +92,12 @@ const DEBUG_HUD_VISIBLE_BY_DEFAULT =
 const DEBUG_INTERACTION_TRACE =
   String(import.meta.env.VITE_DEBUG_INTERACTION ?? 'true').toLowerCase() === 'true';
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
+const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+
+type TerrainTileDefinition = {
+  id?: unknown;
+  walkable?: unknown;
+};
 
 const RESOURCE_MINIMAP_COLORS: Record<string, number> = {
   birch_tree: 0x9ed37c,
@@ -310,6 +316,7 @@ export class WorldScene extends Phaser.Scene {
   private blockedNodeTiles = new Set<string>();
   private blockedNpcTiles = new Set<string>();
   private blockedObjectTiles = new Set<string>();
+  private blockedTerrainTileIds = new Set<number>([WATER_TILE_ID]);
   private pendingGroundItemTextureLoads = new Set<string>();
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
@@ -470,6 +477,7 @@ export class WorldScene extends Phaser.Scene {
     this.input.mouse?.disableContextMenu();
 
     this.terrainData = await this.loadTerrainData();
+    this.blockedTerrainTileIds = await this.loadBlockedTerrainTileIds();
     this.worldHeightTiles = this.terrainData.length;
     this.worldWidthTiles = this.terrainData[0]?.length ?? MAP_WIDTH_TILES;
     const terrainMap = this.make.tilemap({
@@ -496,7 +504,7 @@ export class WorldScene extends Phaser.Scene {
       throw new Error('Failed to create terrain layer.');
     }
 
-    terrainLayer.setCollision([WATER_TILE_ID]);
+    terrainLayer.setCollision(Array.from(this.blockedTerrainTileIds));
 
     this.player = this.add.sprite(
       this.worldWidthTiles * TILE_SIZE * 0.5,
@@ -589,6 +597,41 @@ export class WorldScene extends Phaser.Scene {
       return terrain;
     } catch {
       return generateTerrainData();
+    }
+  }
+
+  private async loadBlockedTerrainTileIds(): Promise<Set<number>> {
+    try {
+      const response = await fetch(TILE_TYPES_URL, { cache: 'no-store' });
+      if (!response.ok) {
+        return new Set<number>([WATER_TILE_ID]);
+      }
+
+      const raw = await response.json() as unknown;
+      if (!Array.isArray(raw)) {
+        return new Set<number>([WATER_TILE_ID]);
+      }
+
+      const blocked = new Set<number>();
+      for (const entry of raw as TerrainTileDefinition[]) {
+        const tileId = Number(entry?.id);
+        if (!Number.isFinite(tileId)) {
+          continue;
+        }
+
+        const walkable = entry?.walkable;
+        if (walkable === false) {
+          blocked.add(tileId);
+        }
+      }
+
+      if (!blocked.size) {
+        blocked.add(WATER_TILE_ID);
+      }
+
+      return blocked;
+    } catch {
+      return new Set<number>([WATER_TILE_ID]);
     }
   }
 
@@ -2640,7 +2683,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     const tileId = this.terrainData[tileY]?.[tileX];
-    if (tileId === WATER_TILE_ID) {
+    if (this.blockedTerrainTileIds.has(Number(tileId))) {
       return false;
     }
 

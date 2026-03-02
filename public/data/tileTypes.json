@@ -1,0 +1,37 @@
+[
+  {
+    "id": 0,
+    "label": "Grass",
+    "color": "#4f8f4a",
+    "image": "",
+    "walkable": true
+  },
+  {
+    "id": 1,
+    "label": "Dirt",
+    "color": "#7c6642",
+    "image": "",
+    "walkable": true
+  },
+  {
+    "id": 2,
+    "label": "Water",
+    "color": "#355f9c",
+    "image": "",
+    "walkable": false
+  },
+  {
+    "id": 3,
+    "label": "Sand",
+    "color": "#b9a56d",
+    "image": "",
+    "walkable": true
+  },
+  {
+    "id": 4,
+    "label": "Stone",
+    "color": "#4f8f4a",
+    "image": "/assets/terrain/terrain_tileset.png",
+    "walkable": true
+  }
+]

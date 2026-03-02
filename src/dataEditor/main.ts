@@ -1,6 +1,6 @@
 import './styles.css';
 
-type EditorTab = 'items' | 'npcs' | 'minions';
+type EditorTab = 'items' | 'npcs' | 'minions' | 'tiles';
 
 type ItemDefinition = {
   id: string;
@@ -72,8 +72,16 @@ type WorldMapData = {
   [key: string]: unknown;
 };
 
+type TileDefinition = {
+  id: number;
+  label: string;
+  color: string;
+  image?: string;
+  walkable: boolean;
+};
+
 type PendingImageImport = {
-  targetId: string;
+  targetId: string | number;
   file: File;
   objectUrl: string;
 };
@@ -88,6 +96,9 @@ const ITEMS_URL = `${import.meta.env.BASE_URL}server/data/content/items.json`;
 const GEAR_URL = `${import.meta.env.BASE_URL}server/data/content/gear.json`;
 const MINIONS_URL = `${import.meta.env.BASE_URL}server/data/content/minions.json`;
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
+const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+const TERRAIN_TILESET_RELATIVE_PATH = 'public/assets/terrain/terrain_tileset.png';
+const TILESET_TILE_SIZE = 32;
 const DEBUG_PREFIX = '[DataEditor Debug]';
 
 function debugLog(step: string, details?: unknown): void {
@@ -113,29 +124,35 @@ const state: {
   items: ItemRecord[];
   minions: MinionDefinition[];
   npcs: NpcPlacement[];
+  tileTypes: TileDefinition[];
   worldMap: WorldMapData | null;
   projectDirectoryHandle: any | null;
   projectDirectoryName: string | null;
   pendingItemImageImport: PendingImageImport | null;
   pendingNpcImageImport: PendingImageImport | null;
   pendingMinionImageImport: PendingImageImport | null;
+  pendingTileImageImport: PendingImageImport | null;
   selectedItemId: string | null;
   selectedNpcId: string | null;
   selectedMinionId: string | null;
+  selectedTileId: number | null;
 } = {
   tab: 'items',
   items: [],
   minions: [],
   npcs: [],
+  tileTypes: [],
   worldMap: null,
   projectDirectoryHandle: null,
   projectDirectoryName: null,
   pendingItemImageImport: null,
   pendingNpcImageImport: null,
   pendingMinionImageImport: null,
+  pendingTileImageImport: null,
   selectedItemId: null,
   selectedNpcId: null,
   selectedMinionId: null,
+  selectedTileId: null,
 };
 
 function setStatus(message: string): void {
@@ -408,6 +425,134 @@ async function writeProjectJsonFile(relativeFilePath: string, value: unknown): P
   }
 }
 
+async function writeProjectBlobFile(relativeFilePath: string, blob: Blob): Promise<void> {
+  if (!state.projectDirectoryHandle) {
+    const connected = await connectProjectFolder();
+    if (!connected || !state.projectDirectoryHandle) {
+      throw new Error('Project folder not connected.');
+    }
+  }
+
+  await ensureProjectFolderWritePermission(state.projectDirectoryHandle);
+  await validateProjectRootFolder(state.projectDirectoryHandle);
+
+  const normalized = String(relativeFilePath ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const pathParts = normalized.split('/').filter(Boolean);
+  if (pathParts.length < 2) {
+    throw new Error(`Invalid relative path '${relativeFilePath}'.`);
+  }
+
+  const fileName = pathParts[pathParts.length - 1];
+  const directoryParts = pathParts.slice(0, -1);
+  const directoryHandle = await getOrCreateDirectory(state.projectDirectoryHandle, directoryParts);
+  const fileHandle = await directoryHandle.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(await blob.arrayBuffer());
+  await writable.close();
+}
+
+async function readProjectFileAsBlob(relativeFilePath: string): Promise<Blob | null> {
+  if (!state.projectDirectoryHandle) {
+    return null;
+  }
+
+  const normalized = String(relativeFilePath ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const pathParts = normalized.split('/').filter(Boolean);
+  if (pathParts.length < 2) {
+    return null;
+  }
+
+  const fileName = pathParts[pathParts.length - 1];
+  const directoryParts = pathParts.slice(0, -1);
+
+  try {
+    let directory = state.projectDirectoryHandle;
+    for (const segment of directoryParts) {
+      directory = await directory.getDirectoryHandle(segment, { create: false });
+    }
+
+    const fileHandle = await directory.getFileHandle(fileName, { create: false });
+    const file = await fileHandle.getFile();
+    if (!file || file.size <= 0) {
+      return null;
+    }
+
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('Failed to encode terrain tileset PNG.'));
+        return;
+      }
+
+      resolve(blob);
+    }, 'image/png');
+  });
+}
+
+async function writeTileImageIntoTerrainTileset(tileImageFile: File, tileId: number): Promise<void> {
+  if (!Number.isInteger(tileId) || tileId < 0) {
+    throw new Error('Tile id must be a non-negative integer to write into terrain tileset.');
+  }
+
+  if (!state.projectDirectoryHandle) {
+    const connected = await connectProjectFolder();
+    if (!connected || !state.projectDirectoryHandle) {
+      throw new Error('Project folder not connected.');
+    }
+  }
+
+  await ensureProjectFolderWritePermission(state.projectDirectoryHandle);
+  await validateProjectRootFolder(state.projectDirectoryHandle);
+
+  debugLog('Writing tile image into terrain tileset', {
+    tileId,
+    fileName: tileImageFile.name,
+    target: TERRAIN_TILESET_RELATIVE_PATH,
+  });
+
+  const existingBlob = await readProjectFileAsBlob(TERRAIN_TILESET_RELATIVE_PATH);
+  const sourceImage = await createImageBitmap(tileImageFile);
+  let existingImage: ImageBitmap | null = null;
+  if (existingBlob) {
+    existingImage = await createImageBitmap(existingBlob);
+  }
+
+  const requiredWidth = (tileId + 1) * TILESET_TILE_SIZE;
+  const existingWidth = existingImage?.width ?? 0;
+  const existingHeight = existingImage?.height ?? 0;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(requiredWidth, existingWidth || requiredWidth);
+  canvas.height = Math.max(TILESET_TILE_SIZE, existingHeight || TILESET_TILE_SIZE);
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not get canvas context to update terrain tileset.');
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (existingImage) {
+    context.drawImage(existingImage, 0, 0);
+  }
+
+  const targetX = tileId * TILESET_TILE_SIZE;
+  context.clearRect(targetX, 0, TILESET_TILE_SIZE, TILESET_TILE_SIZE);
+  context.drawImage(sourceImage, targetX, 0, TILESET_TILE_SIZE, TILESET_TILE_SIZE);
+
+  const updatedBlob = await canvasToPngBlob(canvas);
+  await writeProjectBlobFile(TERRAIN_TILESET_RELATIVE_PATH, updatedBlob);
+
+  sourceImage.close?.();
+  existingImage?.close?.();
+}
+
 function buildWorldMapWithNpcChanges(): WorldMapData {
   if (!state.worldMap) {
     throw new Error('World map data is not loaded.');
@@ -523,6 +668,7 @@ function renderShell(): void {
         <button id="tab-items" class="tab-button">Items</button>
         <button id="tab-npcs" class="tab-button">NPCs</button>
         <button id="tab-minions" class="tab-button">Minions</button>
+        <button id="tab-tiles" class="tab-button">Tiles</button>
         <button id="connect-folder" class="action-button">Connect Project Folder</button>
         <span id="folder-status" class="folder-status"></span>
       </div>
@@ -543,6 +689,10 @@ function renderShell(): void {
     state.tab = 'minions';
     render();
   });
+  document.querySelector<HTMLButtonElement>('#tab-tiles')?.addEventListener('click', () => {
+    state.tab = 'tiles';
+    render();
+  });
   document.querySelector<HTMLButtonElement>('#connect-folder')?.addEventListener('click', () => {
     void connectProjectFolder();
   });
@@ -554,6 +704,7 @@ function renderTabsActiveState(): void {
     items: '#tab-items',
     npcs: '#tab-npcs',
     minions: '#tab-minions',
+    tiles: '#tab-tiles',
   };
 
   for (const [tab, selector] of Object.entries(buttonMap) as Array<[EditorTab, string]>) {
@@ -588,6 +739,313 @@ function getSelectedMinion(): MinionDefinition | null {
   }
 
   return state.minions.find((entry) => entry.id === state.selectedMinionId) ?? null;
+}
+
+function getSelectedTileDefinition(): TileDefinition | null {
+  if (state.selectedTileId === null || state.selectedTileId === undefined) {
+    return null;
+  }
+
+  return state.tileTypes.find((entry) => entry.id === state.selectedTileId) ?? null;
+}
+
+function renderTilesTab(workspace: HTMLDivElement): void {
+  const selected = getSelectedTileDefinition();
+
+  workspace.innerHTML = `
+    <div class="list-panel">
+      <h3>Tiles</h3>
+      <div class="form-actions">
+        <button id="tile-add" class="action-button">Add Tile</button>
+        <button id="tile-delete" class="action-button">Delete</button>
+      </div>
+      <div id="tile-list" class="list-items"></div>
+    </div>
+    <div class="form-panel">
+      <h3>Tile Definition</h3>
+      <div class="preview-card">
+        <h4>Tile Preview</h4>
+        <div class="preview-frame">
+          <canvas id="tile-image-preview-canvas" width="32" height="32"></canvas>
+          <div id="tile-fallback-preview" class="tile-fallback-preview"></div>
+        </div>
+        <div id="tile-image-preview-hint" class="preview-hint">No image path set.</div>
+        <div class="form-actions">
+          <button id="tile-choose-image" class="action-button" type="button">Choose Local Image</button>
+          <span class="preview-inline-note">Image should be 32x32</span>
+          <input id="tile-choose-image-input" type="file" accept="image/*" style="display:none;" />
+        </div>
+      </div>
+      <div class="form-grid">
+        <label class="form-field"><span>ID</span><input id="tile-id" type="number" value="${selected?.id ?? ''}" /></label>
+        <label class="form-field"><span>Label</span><input id="tile-label" value="${selected?.label ?? ''}" /></label>
+        <label class="form-field"><span>Color</span><input id="tile-color" value="${selected?.color ?? ''}" /></label>
+        <label class="form-field"><span>Walkable</span><select id="tile-walkable"><option value="true">true</option><option value="false">false</option></select></label>
+        <label class="form-field full"><span>Image</span><input id="tile-image" value="${selected?.image ?? ''}" /></label>
+      </div>
+      <div class="form-actions">
+        <button id="tile-save-row" class="action-button">Apply Changes</button>
+        <button id="tile-export" class="action-button">Save tileTypes.json</button>
+      </div>
+      <div class="preview-hint">Map Editor reads tiles from: <strong>public/data/tileTypes.json</strong>.</div>
+    </div>
+  `;
+
+  const listRoot = document.querySelector<HTMLDivElement>('#tile-list');
+  if (listRoot) {
+    const sorted = [...state.tileTypes].sort((a, b) => a.id - b.id);
+    for (const tile of sorted) {
+      const button = document.createElement('button');
+      button.className = `list-button${tile.id === state.selectedTileId ? ' selected' : ''}`;
+      button.textContent = `${tile.id} — ${tile.label}`;
+      button.addEventListener('click', () => {
+        state.selectedTileId = tile.id;
+        render();
+      });
+      listRoot.appendChild(button);
+    }
+  }
+
+  const tileImageInput = document.querySelector<HTMLInputElement>('#tile-image');
+  const tileColorInput = document.querySelector<HTMLInputElement>('#tile-color');
+  const tileLabelInput = document.querySelector<HTMLInputElement>('#tile-label');
+  const tileWalkableSelect = document.querySelector<HTMLSelectElement>('#tile-walkable');
+  const tileIdInput = document.querySelector<HTMLInputElement>('#tile-id');
+  const tileImagePreviewCanvas = document.querySelector<HTMLCanvasElement>('#tile-image-preview-canvas');
+  const tileImagePreviewHint = document.querySelector<HTMLDivElement>('#tile-image-preview-hint');
+  const tileFallbackPreview = document.querySelector<HTMLDivElement>('#tile-fallback-preview');
+  if (tileWalkableSelect) {
+    tileWalkableSelect.value = selected?.walkable === false ? 'false' : 'true';
+  }
+  const drawPreviewImageFromSource = (sourceUrl: string, tileId: number, cropTileset: boolean): Promise<boolean> => {
+    return new Promise((resolve) => {
+    if (!tileImagePreviewCanvas || !tileFallbackPreview) {
+      resolve(false);
+      return;
+    }
+
+    const context = tileImagePreviewCanvas.getContext('2d');
+    if (!context) {
+      resolve(false);
+      return;
+    }
+
+    const image = new Image();
+    image.onload = () => {
+      context.clearRect(0, 0, 32, 32);
+      if (cropTileset && image.naturalWidth >= (tileId + 1) * 32 && image.naturalHeight >= 32) {
+        context.drawImage(image, tileId * 32, 0, 32, 32, 0, 0, 32, 32);
+        if (tileImagePreviewHint) {
+          tileImagePreviewHint.textContent = `${tileImageInput?.value ?? ''} (slot ${tileId})`;
+        }
+      } else {
+        context.drawImage(image, 0, 0, 32, 32);
+        if (tileImagePreviewHint) {
+          tileImagePreviewHint.textContent = String(tileImageInput?.value ?? '').trim() || 'Selected local tile image';
+        }
+      }
+
+      tileFallbackPreview.style.display = 'none';
+      tileImagePreviewCanvas.style.display = 'block';
+      resolve(true);
+    };
+    image.onerror = () => {
+      if (tileImagePreviewHint) {
+        tileImagePreviewHint.textContent = `Image not found: ${tileImageInput?.value ?? ''}`;
+      }
+      tileImagePreviewCanvas.style.display = 'none';
+      tileFallbackPreview.style.display = 'flex';
+      resolve(false);
+    };
+    image.src = sourceUrl;
+    });
+  };
+
+  const refreshTileFallbackPreview = async () => {
+    if (!tileFallbackPreview || !tileImagePreviewCanvas) {
+      return;
+    }
+
+    const color = String(tileColorInput?.value ?? '').trim() || '#4f8f4a';
+    const label = String(tileLabelInput?.value ?? '').trim() || 'Tile';
+    const tileId = forceNumber(tileIdInput?.value ?? String(selected?.id ?? 0), selected?.id ?? 0);
+    tileFallbackPreview.style.background = color;
+    tileFallbackPreview.textContent = label;
+
+    const pending = state.pendingTileImageImport;
+    if (pending && pending.targetId === tileId) {
+      await drawPreviewImageFromSource(pending.objectUrl, tileId, false);
+      return;
+    }
+
+    const sharedTilesetUrl = resolveAssetUrl('/assets/terrain/terrain_tileset.png');
+    const drewSharedTilesetSlot = await drawPreviewImageFromSource(sharedTilesetUrl, tileId, true);
+    if (drewSharedTilesetSlot) {
+      if (tileImagePreviewHint) {
+        tileImagePreviewHint.textContent = `Shared tileset slot ${tileId} from /assets/terrain/terrain_tileset.png`;
+      }
+      return;
+    }
+
+    const imagePath = String(tileImageInput?.value ?? '').trim();
+    if (!imagePath) {
+      tileImagePreviewCanvas.style.display = 'none';
+      tileFallbackPreview.style.display = 'flex';
+      if (tileImagePreviewHint) {
+        tileImagePreviewHint.textContent = 'No image path set.';
+      }
+      return;
+    }
+
+    const imageUrl = resolveAssetUrl(imagePath);
+    const shouldCropTileset = /terrain_tileset\.png$/i.test(imagePath) || /terrain_tileset\.png$/i.test(imageUrl);
+    await drawPreviewImageFromSource(imageUrl, tileId, shouldCropTileset);
+  };
+
+  tileImageInput?.addEventListener('input', refreshTileFallbackPreview);
+  tileColorInput?.addEventListener('input', refreshTileFallbackPreview);
+  tileLabelInput?.addEventListener('input', refreshTileFallbackPreview);
+  tileIdInput?.addEventListener('input', refreshTileFallbackPreview);
+
+  document.querySelector<HTMLButtonElement>('#tile-choose-image')?.addEventListener('click', () => {
+    document.querySelector<HTMLInputElement>('#tile-choose-image-input')?.click();
+  });
+  document.querySelector<HTMLInputElement>('#tile-choose-image-input')?.addEventListener('change', async (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const current = getSelectedTileDefinition();
+      if (!current) {
+        throw new Error('Select a tile first.');
+      }
+
+      clearPendingImport(state.pendingTileImageImport);
+      state.pendingTileImageImport = {
+        targetId: current.id,
+        file,
+        objectUrl: URL.createObjectURL(file),
+      };
+      setStatus(`Selected local image '${file.name}'. Click Apply Changes to copy it into public/assets/tiles.`);
+      void refreshTileFallbackPreview();
+    } catch (error) {
+      setStatus((error as Error).message);
+    } finally {
+      input.value = '';
+    }
+  });
+
+  void refreshTileFallbackPreview();
+
+  document.querySelector<HTMLButtonElement>('#tile-add')?.addEventListener('click', () => {
+    const maxId = state.tileTypes.reduce((highest, tile) => Math.max(highest, tile.id), -1);
+    const id = maxId + 1;
+    state.tileTypes.push({
+      id,
+      label: `Tile ${id}`,
+      color: '#4f8f4a',
+      walkable: true,
+    });
+    state.selectedTileId = id;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#tile-delete')?.addEventListener('click', () => {
+    if (state.selectedTileId === null || state.selectedTileId === undefined) {
+      return;
+    }
+
+    state.tileTypes = state.tileTypes.filter((entry) => entry.id !== state.selectedTileId);
+    state.selectedTileId = state.tileTypes[0]?.id ?? null;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#tile-save-row')?.addEventListener('click', async () => {
+    const current = getSelectedTileDefinition();
+    if (!current) {
+      return;
+    }
+
+    try {
+      debugLog('Tile apply clicked', {
+        selectedTileId: current.id,
+        hasPendingImage: Boolean(state.pendingTileImageImport),
+        hasConnectedFolder: Boolean(state.projectDirectoryHandle),
+        projectFolderName: state.projectDirectoryName,
+      });
+
+      const previousTileId = current.id;
+      const nextId = forceNumber(document.querySelector<HTMLInputElement>('#tile-id')?.value ?? '0', current.id);
+      const nextLabel = String(document.querySelector<HTMLInputElement>('#tile-label')?.value ?? '').trim();
+      const nextColor = String(document.querySelector<HTMLInputElement>('#tile-color')?.value ?? '').trim();
+      const nextImage = String(document.querySelector<HTMLInputElement>('#tile-image')?.value ?? '').trim();
+      const nextWalkable = document.querySelector<HTMLSelectElement>('#tile-walkable')?.value !== 'false';
+
+      if (!Number.isFinite(nextId)) {
+        throw new Error('Tile id must be a valid number.');
+      }
+
+      if (!nextLabel) {
+        throw new Error('Tile label is required.');
+      }
+
+      if (!nextColor) {
+        throw new Error('Tile color is required.');
+      }
+
+      const duplicate = state.tileTypes.find((entry) => entry.id === nextId && entry !== current);
+      if (duplicate) {
+        throw new Error(`Tile id ${nextId} already exists.`);
+      }
+
+      current.id = nextId;
+      current.label = nextLabel;
+      current.color = nextColor;
+      current.image = nextImage;
+      current.walkable = nextWalkable;
+
+      if (state.pendingTileImageImport && state.pendingTileImageImport.targetId === previousTileId) {
+        await writeTileImageIntoTerrainTileset(state.pendingTileImageImport.file, current.id);
+        current.image = '/assets/terrain/terrain_tileset.png';
+        const imageInput = document.querySelector<HTMLInputElement>('#tile-image');
+        if (imageInput) {
+          imageInput.value = current.image;
+          imageInput.dispatchEvent(new Event('input'));
+        }
+        clearPendingImport(state.pendingTileImageImport);
+        state.pendingTileImageImport = null;
+      }
+
+      state.tileTypes.sort((a, b) => a.id - b.id);
+      await writeProjectJsonFile('public/data/tileTypes.json', state.tileTypes);
+
+      state.selectedTileId = current.id;
+      setStatus(`Updated tile '${current.label}' and saved to public/data/tileTypes.json.`);
+      render();
+    } catch (error) {
+      debugError('Tile apply failed', error);
+      setStatus((error as Error).message);
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>('#tile-export')?.addEventListener('click', async () => {
+    try {
+      debugLog('Tile save clicked', {
+        tileCount: state.tileTypes.length,
+        hasConnectedFolder: Boolean(state.projectDirectoryHandle),
+        projectFolderName: state.projectDirectoryName,
+      });
+      await writeProjectJsonFile('public/data/tileTypes.json', state.tileTypes);
+      setStatus('Saved directly to public/data/tileTypes.json.');
+    } catch (error) {
+      debugError('Tile save fell back to download', error);
+      downloadJsonFile('tileTypes.json', state.tileTypes);
+      setStatus(`Could not write to project folder, downloaded tileTypes.json instead: ${(error as Error).message}`);
+    }
+  });
 }
 
 function renderItemsTab(workspace: HTMLDivElement): void {
@@ -1237,6 +1695,11 @@ function render(): void {
     return;
   }
 
+  if (state.tab === 'tiles') {
+    renderTilesTab(workspace);
+    return;
+  }
+
   renderMinionsTab(workspace);
 }
 
@@ -1244,11 +1707,12 @@ async function init(): Promise<void> {
   renderShell();
 
   try {
-    const [itemsRaw, gearRaw, minionsRaw, worldMapRaw] = await Promise.all([
+    const [itemsRaw, gearRaw, minionsRaw, worldMapRaw, tileTypesRaw] = await Promise.all([
       loadJson<ItemDefinition[]>(ITEMS_URL),
       loadJson<GearDefinition[]>(GEAR_URL),
       loadJson<MinionDefinition[]>(MINIONS_URL),
       loadJson<WorldMapData>(WORLD_MAP_URL),
+      loadJson<TileDefinition[]>(TILE_TYPES_URL),
     ]);
 
     const gearByItemId = new Map<string, GearDefinition>();
@@ -1262,6 +1726,18 @@ async function init(): Promise<void> {
     }));
 
     state.minions = Array.isArray(minionsRaw) ? minionsRaw.map((entry) => ({ ...entry })) : [];
+    state.tileTypes = Array.isArray(tileTypesRaw)
+      ? tileTypesRaw
+        .map((entry) => ({
+          id: Number(entry?.id ?? 0),
+          label: String(entry?.label ?? ''),
+          color: String(entry?.color ?? '#4f8f4a'),
+          image: String(entry?.image ?? ''),
+          walkable: typeof entry?.walkable === 'boolean' ? entry.walkable : Number(entry?.id ?? 0) !== 2,
+        }))
+        .filter((entry) => Number.isFinite(entry.id) && entry.label.trim().length > 0)
+      : [];
+    state.tileTypes.sort((a, b) => a.id - b.id);
     state.worldMap = worldMapRaw;
     state.npcs = [];
 
@@ -1292,8 +1768,9 @@ async function init(): Promise<void> {
     state.selectedItemId = state.items[0]?.item.id ?? null;
     state.selectedNpcId = state.npcs[0]?.id ?? null;
     state.selectedMinionId = state.minions[0]?.id ?? null;
+    state.selectedTileId = state.tileTypes[0]?.id ?? null;
 
-    setStatus('Loaded items, NPCs, and minions. Edit values and use Save buttons to export updated files.');
+    setStatus('Loaded items, NPCs, minions, and tiles. Edit values and use Save buttons to export updated files.');
     render();
   } catch (error) {
     setStatus((error as Error).message);

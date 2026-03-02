@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { TILE_SIZE } from '../config/gameConfig';
 
 const TERRAIN_TEXTURE_KEY = 'terrain-tiles';
+const TERRAIN_TILESET_URL = `${import.meta.env.BASE_URL}assets/terrain/terrain_tileset.png`;
 const PLAYER_TEXTURE_KEY = 'player';
 const TREE_TEXTURE_KEY = 'resource-tree';
 const ROCK_TEXTURE_KEY = 'resource-rock';
@@ -11,8 +12,14 @@ export class BootScene extends Phaser.Scene {
     super('boot');
   }
 
+  preload(): void {
+    this.load.image(TERRAIN_TEXTURE_KEY, TERRAIN_TILESET_URL);
+  }
+
   create(): void {
-    this.createTerrainTexture();
+    if (!this.textures.exists(TERRAIN_TEXTURE_KEY)) {
+      this.createTerrainTexture();
+    }
     this.createPlayerTexture();
     this.createTreeTexture();
     this.createRockTexture();
