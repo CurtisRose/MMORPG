@@ -353,6 +353,7 @@ export class WorldScene extends Phaser.Scene {
   private activeCraftingStationType: string | null = null;
   private activeCraftingTitle = 'Crafting';
   private craftingRecipes: CraftingRecipeState[] = [];
+  private selectedSmithingMaterialTab: 'bronze' | 'iron' = 'bronze';
   private craftingVisible = false;
   private lastRenderedCraftingSignature: string | null = null;
   private questJournalRootElement: HTMLDivElement | null = null;
@@ -3506,7 +3507,13 @@ export class WorldScene extends Phaser.Scene {
     this.activeCraftingObjectId = state.objectId;
     this.activeCraftingStationType = state.stationType;
     this.activeCraftingTitle = state.title;
-    this.craftingRecipes = Array.isArray(state.recipes) ? state.recipes : [];
+    if (state.stationType !== 'smithing_station') {
+      this.selectedSmithingMaterialTab = 'bronze';
+    }
+    this.craftingRecipes = this.getSortedCraftingRecipes(
+      Array.isArray(state.recipes) ? state.recipes : [],
+      state.stationType,
+    );
     this.craftingVisible = true;
     this.lastRenderedCraftingSignature = null;
 
@@ -3515,6 +3522,131 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.renderCraftingPanel();
+  }
+
+  private getSortedCraftingRecipes(recipes: CraftingRecipeState[], stationType: string): CraftingRecipeState[] {
+    const safeRecipes = [...recipes];
+    if (stationType === 'smelting_station') {
+      return safeRecipes.sort((first, second) => {
+        const levelDelta = first.requiredLevel - second.requiredLevel;
+        if (levelDelta !== 0) {
+          return levelDelta;
+        }
+
+        return first.name.localeCompare(second.name);
+      });
+    }
+
+    if (stationType !== 'smithing_station') {
+      return safeRecipes;
+    }
+
+    return safeRecipes.sort((first, second) => {
+      const materialDelta = this.getSmithingMaterialRank(first) - this.getSmithingMaterialRank(second);
+      if (materialDelta !== 0) {
+        return materialDelta;
+      }
+
+      const typeDelta = this.getSmithingTypeRank(first) - this.getSmithingTypeRank(second);
+      if (typeDelta !== 0) {
+        return typeDelta;
+      }
+
+      const levelDelta = first.requiredLevel - second.requiredLevel;
+      if (levelDelta !== 0) {
+        return levelDelta;
+      }
+
+      return first.name.localeCompare(second.name);
+    });
+  }
+
+  private getSmithingMaterialRank(recipe: CraftingRecipeState): number {
+    const outputItemId = String(recipe.outputs[0]?.itemId ?? '').trim().toLowerCase();
+    if (outputItemId.startsWith('bronze_')) {
+      return 0;
+    }
+
+    if (outputItemId.startsWith('iron_')) {
+      return 1;
+    }
+
+    return 99;
+  }
+
+  private getSmithingTypeRank(recipe: CraftingRecipeState): number {
+    const outputItemId = String(recipe.outputs[0]?.itemId ?? '').trim().toLowerCase();
+    if (outputItemId.endsWith('_axe')) {
+      return 0;
+    }
+
+    if (outputItemId.endsWith('_pickaxe')) {
+      return 1;
+    }
+
+    if (outputItemId.endsWith('_dagger')) {
+      return 2;
+    }
+
+    if (outputItemId.endsWith('_sword')) {
+      return 3;
+    }
+
+    if (outputItemId.endsWith('_spear')) {
+      return 4;
+    }
+
+    if (outputItemId.endsWith('_helmet')) {
+      return 5;
+    }
+
+    if (outputItemId.endsWith('_platelegs')) {
+      return 6;
+    }
+
+    if (outputItemId.endsWith('_platebody')) {
+      return 7;
+    }
+
+    return 99;
+  }
+
+  private getSmithingMaterialLabel(recipe: CraftingRecipeState): string | null {
+    const outputItemId = String(recipe.outputs[0]?.itemId ?? '').trim().toLowerCase();
+    if (outputItemId.startsWith('bronze_')) {
+      return 'Bronze';
+    }
+
+    if (outputItemId.startsWith('iron_')) {
+      return 'Iron';
+    }
+
+    return null;
+  }
+
+  private getCraftingSkillLevel(): number {
+    const skills = this.localPlayerState?.skills;
+    if (!skills) {
+      return 1;
+    }
+
+    if (this.activeCraftingStationType === 'fletching_station') {
+      return Math.max(1, Math.floor(Number(skills.fletching?.level ?? 1)));
+    }
+
+    return Math.max(1, Math.floor(Number(skills.smithing?.level ?? 1)));
+  }
+
+  private getFilteredCraftingRecipes(): CraftingRecipeState[] {
+    if (this.activeCraftingStationType !== 'smithing_station') {
+      return this.craftingRecipes;
+    }
+
+    const selectedMaterial = this.selectedSmithingMaterialTab;
+    return this.craftingRecipes.filter((recipe) => {
+      const outputItemId = String(recipe.outputs[0]?.itemId ?? '').trim().toLowerCase();
+      return outputItemId.startsWith(`${selectedMaterial}_`);
+    });
   }
 
   private closeCrafting(): void {
@@ -4755,6 +4887,7 @@ export class WorldScene extends Phaser.Scene {
       this.activeCraftingObjectId ?? '',
       this.activeCraftingStationType ?? '',
       this.activeCraftingTitle,
+      this.selectedSmithingMaterialTab,
       inventorySignature,
       recipeSignature,
     ].join('::');
@@ -4773,14 +4906,89 @@ export class WorldScene extends Phaser.Scene {
     title.style.marginBottom = '6px';
     this.craftingContentElement.appendChild(title);
 
-    if (this.craftingRecipes.length === 0) {
+    if (this.activeCraftingStationType === 'smithing_station') {
+      const tabRow = document.createElement('div');
+      tabRow.style.display = 'flex';
+      tabRow.style.gap = '6px';
+      tabRow.style.marginBottom = '6px';
+
+      const bronzeTab = document.createElement('button');
+      bronzeTab.textContent = 'Bronze';
+      bronzeTab.style.fontFamily = 'monospace';
+      bronzeTab.style.fontSize = '11px';
+      bronzeTab.style.cursor = 'pointer';
+      bronzeTab.style.background = this.selectedSmithingMaterialTab === 'bronze'
+        ? 'rgba(90, 82, 56, 0.98)'
+        : 'rgba(64, 58, 41, 0.95)';
+      bronzeTab.style.color = this.selectedSmithingMaterialTab === 'bronze' ? '#fff4c7' : '#f0e5c1';
+      bronzeTab.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      bronzeTab.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (this.selectedSmithingMaterialTab === 'bronze') {
+          return;
+        }
+
+        this.selectedSmithingMaterialTab = 'bronze';
+        this.lastRenderedCraftingSignature = null;
+        this.renderCraftingPanel();
+      });
+
+      const ironTab = document.createElement('button');
+      ironTab.textContent = 'Iron';
+      ironTab.style.fontFamily = 'monospace';
+      ironTab.style.fontSize = '11px';
+      ironTab.style.cursor = 'pointer';
+      ironTab.style.background = this.selectedSmithingMaterialTab === 'iron'
+        ? 'rgba(90, 82, 56, 0.98)'
+        : 'rgba(64, 58, 41, 0.95)';
+      ironTab.style.color = this.selectedSmithingMaterialTab === 'iron' ? '#fff4c7' : '#f0e5c1';
+      ironTab.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      ironTab.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (this.selectedSmithingMaterialTab === 'iron') {
+          return;
+        }
+
+        this.selectedSmithingMaterialTab = 'iron';
+        this.lastRenderedCraftingSignature = null;
+        this.renderCraftingPanel();
+      });
+
+      tabRow.append(bronzeTab, ironTab);
+      this.craftingContentElement.appendChild(tabRow);
+    }
+
+    const visibleRecipes = this.getFilteredCraftingRecipes();
+
+    if (visibleRecipes.length === 0) {
       const empty = document.createElement('div');
-      empty.textContent = 'No recipes available here.';
+      empty.textContent = this.activeCraftingStationType === 'smithing_station'
+        ? 'No recipes available for this material yet.'
+        : 'No recipes available here.';
       this.craftingContentElement.appendChild(empty);
       return;
     }
 
-    for (const recipe of this.craftingRecipes) {
+    let previousMaterialLabel: string | null = null;
+    const craftingLevel = this.getCraftingSkillLevel();
+
+    for (const recipe of visibleRecipes) {
+      if (this.activeCraftingStationType === 'smithing_station') {
+        const currentMaterialLabel = this.getSmithingMaterialLabel(recipe);
+        if (currentMaterialLabel && currentMaterialLabel !== previousMaterialLabel) {
+          const sectionLabel = document.createElement('div');
+          sectionLabel.textContent = `${currentMaterialLabel} Gear`;
+          sectionLabel.style.marginTop = previousMaterialLabel ? '8px' : '2px';
+          sectionLabel.style.marginBottom = '2px';
+          sectionLabel.style.color = '#fff4c7';
+          sectionLabel.style.fontWeight = 'bold';
+          this.craftingContentElement.appendChild(sectionLabel);
+          previousMaterialLabel = currentMaterialLabel;
+        }
+      }
+
       const row = document.createElement('div');
       row.style.display = 'grid';
       row.style.gridTemplateColumns = '1fr auto auto';
@@ -4797,20 +5005,23 @@ export class WorldScene extends Phaser.Scene {
         .join(', ');
 
       const detail = document.createElement('div');
-      detail.textContent = `${recipe.name} (Lv ${recipe.requiredLevel}, XP ${recipe.xp})\nIn: ${inputText}\nOut: ${outputText}`;
+      const hasRequiredLevel = craftingLevel >= recipe.requiredLevel;
+      const levelStatus = hasRequiredLevel ? '' : ` [Locked: requires level ${recipe.requiredLevel}]`;
+      detail.textContent = `${recipe.name} (Lv ${recipe.requiredLevel}, XP ${recipe.xp})${levelStatus}\nIn: ${inputText}\nOut: ${outputText}`;
 
       const hasAllInputs = recipe.inputs.every((entry) => {
         const count = this.localPlayerState?.inventory.slots
           .find((slot) => slot.itemId === entry.itemId)?.quantity ?? 0;
         return count >= entry.quantity;
       });
+      const canCraftRecipe = hasRequiredLevel && hasAllInputs;
 
       const makeOneButton = document.createElement('button');
       makeOneButton.textContent = 'Make 1';
       makeOneButton.style.fontFamily = 'monospace';
       makeOneButton.style.fontSize = '11px';
-      makeOneButton.style.cursor = hasAllInputs ? 'pointer' : 'default';
-      makeOneButton.disabled = !hasAllInputs;
+      makeOneButton.style.cursor = canCraftRecipe ? 'pointer' : 'default';
+      makeOneButton.disabled = !canCraftRecipe;
       makeOneButton.addEventListener('pointerdown', (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -4824,8 +5035,8 @@ export class WorldScene extends Phaser.Scene {
       makeAllButton.textContent = 'Make all';
       makeAllButton.style.fontFamily = 'monospace';
       makeAllButton.style.fontSize = '11px';
-      makeAllButton.style.cursor = hasAllInputs ? 'pointer' : 'default';
-      makeAllButton.disabled = !hasAllInputs;
+      makeAllButton.style.cursor = canCraftRecipe ? 'pointer' : 'default';
+      makeAllButton.disabled = !canCraftRecipe;
       makeAllButton.addEventListener('pointerdown', (event) => {
         event.preventDefault();
         event.stopPropagation();

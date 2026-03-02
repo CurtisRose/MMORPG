@@ -14,12 +14,25 @@
       "outputs": [
         { "itemId": "bronze_bar", "quantity": 1 }
       ]
+    },
+    {
+      "id": "iron_bar",
+      "requiredLevel": 10,
+      "durationMs": 1900,
+      "successChance": 1,
+      "xp": 10,
+      "inputs": [
+        { "itemId": "iron_ore", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "iron_bar", "quantity": 1 }
+      ]
     }
   ],
   "messages": {
     "locked": "Requires level {requiredLevel}.",
     "missingItems": "You need the required ores.",
-    "success": "You smelt a bronze bar.",
+    "success": "You smelt the bar.",
     "failure": "You fail to smelt the metal."
   }
 }

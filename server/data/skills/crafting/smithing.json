@@ -41,6 +41,45 @@
       ]
     },
     {
+      "id": "bronze_dagger",
+      "requiredLevel": 3,
+      "durationMs": 1750,
+      "successChance": 1,
+      "xp": 12,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_dagger", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "bronze_sword",
+      "requiredLevel": 4,
+      "durationMs": 1900,
+      "successChance": 1,
+      "xp": 14,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 2 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_sword", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "bronze_spear",
+      "requiredLevel": 5,
+      "durationMs": 1950,
+      "successChance": 1,
+      "xp": 15,
+      "inputs": [
+        { "itemId": "bronze_bar", "quantity": 2 }
+      ],
+      "outputs": [
+        { "itemId": "bronze_spear", "quantity": 1 }
+      ]
+    },
+    {
       "id": "bronze_platelegs",
       "requiredLevel": 4,
       "durationMs": 2200,
@@ -64,6 +103,110 @@
       ],
       "outputs": [
         { "itemId": "bronze_platebody", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_helmet",
+      "requiredLevel": 12,
+      "durationMs": 1900,
+      "successChance": 1,
+      "xp": 16,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "iron_helmet", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_axe",
+      "requiredLevel": 12,
+      "durationMs": 1900,
+      "successChance": 1,
+      "xp": 16,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "iron_axe", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_pickaxe",
+      "requiredLevel": 13,
+      "durationMs": 2000,
+      "successChance": 1,
+      "xp": 18,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "iron_pickaxe", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_dagger",
+      "requiredLevel": 14,
+      "durationMs": 1950,
+      "successChance": 1,
+      "xp": 20,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 1 }
+      ],
+      "outputs": [
+        { "itemId": "iron_dagger", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_sword",
+      "requiredLevel": 15,
+      "durationMs": 2100,
+      "successChance": 1,
+      "xp": 22,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 2 }
+      ],
+      "outputs": [
+        { "itemId": "iron_sword", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_spear",
+      "requiredLevel": 16,
+      "durationMs": 2150,
+      "successChance": 1,
+      "xp": 23,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 2 }
+      ],
+      "outputs": [
+        { "itemId": "iron_spear", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_platelegs",
+      "requiredLevel": 17,
+      "durationMs": 2400,
+      "successChance": 1,
+      "xp": 28,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 2 }
+      ],
+      "outputs": [
+        { "itemId": "iron_platelegs", "quantity": 1 }
+      ]
+    },
+    {
+      "id": "iron_platebody",
+      "requiredLevel": 20,
+      "durationMs": 2800,
+      "successChance": 1,
+      "xp": 36,
+      "inputs": [
+        { "itemId": "iron_bar", "quantity": 3 }
+      ],
+      "outputs": [
+        { "itemId": "iron_platebody", "quantity": 1 }
       ]
     }
   ],
