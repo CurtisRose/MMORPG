@@ -15,7 +15,7 @@ body {
 
 #app {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: var(--sidebar-width, 320px) 8px 1fr;
   height: 100vh;
   min-height: 100vh;
 }
@@ -27,7 +27,26 @@ body {
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
+  min-width: 220px;
+}
+
+.sidebar-resizer {
+  width: 8px;
+  cursor: col-resize;
+  background: #111722;
+  border-right: 1px solid #2e3542;
+  border-left: 1px solid #2e3542;
+}
+
+.sidebar-resizer:hover {
+  background: #1b2433;
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .panel {
@@ -87,6 +106,20 @@ textarea {
   resize: vertical;
 }
 
+input[type='checkbox'] {
+  width: auto;
+}
+
+.quest-editor-gui {
+  max-height: 58vh;
+  min-height: 280px;
+  overflow-y: auto;
+  border: 1px solid #303848;
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+}
+
 button {
   background: #2e6ad9;
   color: #ffffff;
@@ -104,6 +137,7 @@ button.secondary {
   padding: 12px;
   overflow: hidden;
   min-height: 0;
+  min-width: 0;
 }
 
 .canvas-shell {

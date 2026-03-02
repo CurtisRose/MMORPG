@@ -8,7 +8,7 @@
       "successChance": 1,
       "xp": 5,
       "inputs": [
-        { "itemId": "logs", "quantity": 1 }
+        { "itemId": "birch_logs", "quantity": 1 }
       ],
       "outputs": [
         { "itemId": "wooden_arrows", "quantity": 10 }
@@ -21,7 +21,7 @@
       "successChance": 1,
       "xp": 9,
       "inputs": [
-        { "itemId": "logs", "quantity": 1 }
+        { "itemId": "oak_logs", "quantity": 1 }
       ],
       "outputs": [
         { "itemId": "wooden_shortbow", "quantity": 1 }
@@ -30,7 +30,7 @@
   ],
   "messages": {
     "locked": "Requires level {requiredLevel}.",
-    "missingItems": "You don't have the required logs.",
+    "missingItems": "You don't have the required wood.",
     "success": "You fletch the item.",
     "failure": "You fail to shape the wood."
   }

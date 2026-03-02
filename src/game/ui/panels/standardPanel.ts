@@ -16,8 +16,12 @@ function createStandardPanelHeader(titleText: string, onClose: () => void): HTML
 
   const closeButton = document.createElement('button');
   closeButton.textContent = 'Close';
+  closeButton.style.background = 'rgba(64, 58, 41, 0.95)';
+  closeButton.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+  closeButton.style.color = '#f0e5c1';
   closeButton.style.fontFamily = 'monospace';
-  closeButton.style.fontSize = '11px';
+  closeButton.style.fontSize = '12px';
+  closeButton.style.padding = '4px 8px';
   closeButton.style.cursor = 'pointer';
   closeButton.addEventListener('pointerdown', (event) => {
     event.preventDefault();

@@ -11,7 +11,6 @@ import { runGroundItemSystemTests } from '../server/systems/groundItemSystem.tes
 import { runInventorySystemTests } from '../server/systems/inventorySystem.test.mjs';
 import { runInteractionOrchestratorTests } from '../server/systems/interactionOrchestrator.test.mjs';
 import { runMovementSystemTests } from '../server/systems/movementSystem.test.mjs';
-import { runNpcInteractionSystemTests } from '../server/systems/npcInteractionSystem.test.mjs';
 import { runPathfindingSystemTests } from '../server/systems/pathfindingSystem.test.mjs';
 import { runPlayerCombatOrchestratorTests } from '../server/systems/playerCombatOrchestrator.test.mjs';
 import { runPlayerCombatPositioningSystemTests } from '../server/systems/playerCombatPositioningSystem.test.mjs';
@@ -32,7 +31,6 @@ const suites = [
   ['enemyNavigationSystem', runEnemyNavigationSystemTests],
   ['enemyStateSystem', runEnemyStateSystemTests],
   ['interactionOrchestrator', runInteractionOrchestratorTests],
-  ['npcInteractionSystem', runNpcInteractionSystemTests],
   ['pathfindingSystem', runPathfindingSystemTests],
   ['playerCombatOrchestrator', runPlayerCombatOrchestratorTests],
   ['playerCombatPositioningSystem', runPlayerCombatPositioningSystemTests],

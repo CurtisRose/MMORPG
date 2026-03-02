@@ -2,6 +2,32 @@
   "version": 1,
   "chunkWidth": 80,
   "chunkHeight": 80,
+  "questZones": [
+    {
+      "id": "mining-yard",
+      "name": "Mining Yard",
+      "rects": [
+        {
+          "x": 30,
+          "y": 41,
+          "width": 18,
+          "height": 8
+        }
+      ]
+    },
+    {
+      "id": "goblin-outskirts",
+      "name": "Goblin Outskirts",
+      "rects": [
+        {
+          "x": 14,
+          "y": 34,
+          "width": 6,
+          "height": 5
+        }
+      ]
+    }
+  ],
   "chunks": [
     {
       "version": 1,
@@ -13468,7 +13494,10 @@
           "tileX": 40,
           "tileY": 40,
           "examineText": "A friendly general store shopkeeper.",
-          "talkText": "Hello there! Need supplies or want to sell your goods?"
+          "talkText": "Hello there! Need supplies or want to sell your goods?",
+          "questStartIds": [
+            "quest-delivery-copper"
+          ]
         },
         {
           "id": "npc-bank-chest",
@@ -13477,7 +13506,8 @@
           "tileX": 42,
           "tileY": 38,
           "examineText": "A sturdy chest for secure item storage.",
-          "talkText": "Your valuables are safe inside."
+          "talkText": "Your valuables are safe inside.",
+          "questStartIds": []
         },
         {
           "id": "npc-villager-1",
@@ -13487,20 +13517,9 @@
           "tileY": 31,
           "examineText": "A seasoned guard watching the roads.",
           "talkText": "The roads aren’t safe with goblins around.",
-          "quest": {
-            "id": "quest-npc-villager-1",
-            "title": "Goblin Menace",
-            "missionText": "Defeat 10 goblins threatening the village outskirts.",
-            "startText": "We need your help. Slay 10 goblins and report back.",
-            "progressText": "Keep going. The village is counting on you.",
-            "completeText": "Excellent work. The roads are safer now.",
-            "objectiveType": "kill",
-            "objectiveTargetId": "goblin",
-            "requiredCount": 10,
-            "rewardGold": 100,
-            "rewardItemId": "bronze_axe",
-            "rewardItemQuantity": 1
-          }
+          "questStartIds": [
+            "quest-npc-villager-1"
+          ]
         },
         {
           "id": "npc-shopkeeper-3",
@@ -13510,7 +13529,9 @@
           "tileY": 32,
           "examineText": "A burly smith.",
           "talkText": "Hello there! Need supplies or want to sell your goods?",
-          "quest": null
+          "questStartIds": [
+            "quest-chain-forge-trial"
+          ]
         },
         {
           "id": "npc-shopkeeper-2",
@@ -13520,7 +13541,9 @@
           "tileY": 35,
           "examineText": "A friendly fletcher",
           "talkText": "Hello there! Need supplies or want to sell your goods?",
-          "quest": null
+          "questStartIds": [
+            "quest-travel-outskirts"
+          ]
         }
       ]
     }

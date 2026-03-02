@@ -35,7 +35,6 @@ import {
   sellToShop,
   transferBankItem,
 } from './systems/commerceSystem.mjs';
-import { handleNpcTalk } from './systems/npcInteractionSystem.mjs';
 import { processPlayerCombat as processPlayerCombatFromSystem } from './systems/playerCombatSystem.mjs';
 
 const SERVER_PORT = Number(process.env.MULTIPLAYER_PORT ?? 2567);
@@ -43,6 +42,7 @@ const TILE_SIZE = 32;
 const DEFAULT_WORLD_WIDTH_TILES = 80;
 const DEFAULT_WORLD_HEIGHT_TILES = 80;
 const PROFILE_COORDINATE_SPACE_VERSION = 2;
+const QUEST_PROGRESS_VERSION = 2;
 const NEW_PLAYER_SPAWN_LOCAL_TILE_X = 40;
 const NEW_PLAYER_SPAWN_LOCAL_TILE_Y = 36;
 let WORLD_WIDTH_TILES = DEFAULT_WORLD_WIDTH_TILES;
@@ -117,6 +117,7 @@ const HARVESTING_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'harvesting');
 const CRAFTING_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'crafting');
 const COMBAT_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'combat');
 const CONTENT_DATA_DIR = path.join(DATA_DIR, 'content');
+const QUEST_DATA_DIR = path.join(DATA_DIR, 'quests');
 const WORLD_MAP_PATH = path.join(PUBLIC_DIR, 'data', 'worldMap.json');
 const ITEM_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'items.json');
 const RESOURCE_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'resources.json');
@@ -326,42 +327,388 @@ function createFilledTerrainGrid(width, height, fill) {
   return Array.from({ length: safeHeight }, () => Array.from({ length: safeWidth }, () => fill));
 }
 
-function normalizeNpcQuestDefinition(rawQuest, fallbackQuestId) {
-  if (!rawQuest || typeof rawQuest !== 'object') {
+function normalizeQuestStringList(rawList) {
+  if (!Array.isArray(rawList)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      rawList
+        .map((entry) => String(entry ?? '').trim())
+        .filter((entry) => entry.length > 0),
+    ),
+  );
+}
+
+function normalizeQuestDialogue(rawQuest, title) {
+  const missionText = String(rawQuest?.missionText ?? rawQuest?.summary ?? `Complete: ${title}`).trim();
+  const startText = String(rawQuest?.startText ?? `I need help with ${title}.`).trim();
+  const progressText = String(rawQuest?.progressText ?? 'Keep going, you are making progress.').trim();
+  const completeText = String(rawQuest?.completeText ?? 'Excellent work. Here is your reward.').trim();
+
+  return {
+    missionText,
+    startText,
+    progressText,
+    completeText,
+  };
+}
+
+function normalizeQuestRequirementsV2(rawRequirements) {
+  if (!rawRequirements || typeof rawRequirements !== 'object' || Array.isArray(rawRequirements)) {
+    return null;
+  }
+
+  const requiredQuestIds = normalizeQuestStringList(rawRequirements.requiredQuestIds);
+  const requiredSkillLevels = Array.isArray(rawRequirements.requiredSkillLevels)
+    ? rawRequirements.requiredSkillLevels
+      .map((entry) => ({
+        skill: String(entry?.skill ?? '').trim(),
+        level: Math.max(1, Math.floor(Number(entry?.level ?? 1))),
+      }))
+      .filter((entry) => entry.skill.length > 0)
+    : [];
+  const requiredItems = Array.isArray(rawRequirements.requiredItems)
+    ? rawRequirements.requiredItems
+      .map((entry) => ({
+        itemId: String(entry?.itemId ?? '').trim(),
+        quantity: Math.max(1, Math.floor(Number(entry?.quantity ?? 1))),
+      }))
+      .filter((entry) => entry.itemId.length > 0)
+    : [];
+
+  if (requiredQuestIds.length === 0 && requiredSkillLevels.length === 0 && requiredItems.length === 0) {
+    return null;
+  }
+
+  return {
+    ...(requiredQuestIds.length > 0 ? { requiredQuestIds } : {}),
+    ...(requiredSkillLevels.length > 0 ? { requiredSkillLevels } : {}),
+    ...(requiredItems.length > 0 ? { requiredItems } : {}),
+  };
+}
+
+function normalizeQuestRewardsV2(rawRewards) {
+  const rewardsSource = rawRewards && typeof rawRewards === 'object' && !Array.isArray(rawRewards)
+    ? rawRewards
+    : {};
+  const gold = Math.max(0, Math.floor(Number(rewardsSource.gold ?? 0)));
+  const items = Array.isArray(rewardsSource.items)
+    ? rewardsSource.items
+      .map((entry) => ({
+        itemId: String(entry?.itemId ?? '').trim(),
+        quantity: Math.max(1, Math.floor(Number(entry?.quantity ?? 1))),
+      }))
+      .filter((entry) => entry.itemId.length > 0)
+    : [];
+
+  const xp = Array.isArray(rewardsSource.xp)
+    ? rewardsSource.xp
+      .map((entry) => ({
+        skill: String(entry?.skill ?? '').trim(),
+        amount: Math.max(1, Math.floor(Number(entry?.amount ?? 1))),
+      }))
+      .filter((entry) => entry.skill.length > 0)
+    : [];
+  const unlockQuestIds = normalizeQuestStringList(rewardsSource.unlockQuestIds);
+
+  return {
+    ...(gold > 0 ? { gold } : {}),
+    ...(items.length > 0 ? { items } : {}),
+    ...(xp.length > 0 ? { xp } : {}),
+    ...(unlockQuestIds.length > 0 ? { unlockQuestIds } : {}),
+  };
+}
+
+function normalizeQuestObjectiveV2(rawObjective, index) {
+  const normalizeConstraints = () => {
+    const zoneId = String(rawObjective?.zoneId ?? '').trim();
+    const timeLimitMsRaw = Number(rawObjective?.timeLimitMs);
+    const requiredItems = Array.isArray(rawObjective?.requiredItems)
+      ? rawObjective.requiredItems
+        .map((entry) => ({
+          itemId: String(entry?.itemId ?? '').trim(),
+          quantity: Math.max(1, Math.floor(Number(entry?.quantity ?? 1))),
+        }))
+        .filter((entry) => entry.itemId.length > 0)
+      : [];
+    const requiredQuestIds = normalizeQuestStringList(rawObjective?.requiredQuestIds);
+
+    return {
+      ...(zoneId ? { zoneId } : {}),
+      ...(Number.isFinite(timeLimitMsRaw) && timeLimitMsRaw > 0
+        ? { timeLimitMs: Math.floor(timeLimitMsRaw) }
+        : {}),
+      ...(requiredItems.length > 0 ? { requiredItems } : {}),
+      ...(requiredQuestIds.length > 0 ? { requiredQuestIds } : {}),
+    };
+  };
+
+  const type = String(rawObjective?.type ?? '').trim();
+  const baseCount = Math.max(1, Math.floor(Number(rawObjective?.count ?? 1)));
+  const constraints = normalizeConstraints();
+
+  if (type === 'kill') {
+    const targetId = String(rawObjective?.targetId ?? '').trim();
+    if (!targetId) {
+      return null;
+    }
+
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      targetId,
+      count: baseCount,
+      ...constraints,
+    };
+  }
+
+  if (type === 'gather') {
+    const itemId = String(rawObjective?.itemId ?? '').trim();
+    if (!itemId) {
+      return null;
+    }
+
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      itemId,
+      count: baseCount,
+      ...constraints,
+    };
+  }
+
+  if (type === 'delivery') {
+    const itemId = String(rawObjective?.itemId ?? '').trim();
+    const toNpcId = String(rawObjective?.toNpcId ?? '').trim();
+    if (!itemId || !toNpcId) {
+      return null;
+    }
+
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      itemId,
+      quantity: Math.max(1, Math.floor(Number(rawObjective?.quantity ?? 1))),
+      toNpcId,
+      ...constraints,
+    };
+  }
+
+  if (type === 'travel') {
+    const travelZoneId = String(rawObjective?.zoneId ?? '').trim();
+    if (!travelZoneId) {
+      return null;
+    }
+
+    const tileXRaw = Number(rawObjective?.tileX);
+    const tileYRaw = Number(rawObjective?.tileY);
+    const radiusRaw = Number(rawObjective?.radius);
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      zoneId: travelZoneId,
+      ...(Number.isFinite(tileXRaw) ? { tileX: Math.floor(tileXRaw) } : {}),
+      ...(Number.isFinite(tileYRaw) ? { tileY: Math.floor(tileYRaw) } : {}),
+      ...(Number.isFinite(radiusRaw) ? { radius: Math.max(1, Math.floor(radiusRaw)) } : {}),
+      ...(constraints.timeLimitMs != null ? { timeLimitMs: constraints.timeLimitMs } : {}),
+      ...(constraints.requiredItems ? { requiredItems: constraints.requiredItems } : {}),
+      ...(constraints.requiredQuestIds ? { requiredQuestIds: constraints.requiredQuestIds } : {}),
+    };
+  }
+
+  if (type === 'item_retrieval') {
+    const itemId = String(rawObjective?.itemId ?? '').trim();
+    if (!itemId) {
+      return null;
+    }
+
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      itemId,
+      quantity: Math.max(1, Math.floor(Number(rawObjective?.quantity ?? 1))),
+      ...constraints,
+    };
+  }
+
+  if (type === 'interact_object') {
+    const objectTypeId = String(rawObjective?.objectTypeId ?? '').trim();
+    const objectId = String(rawObjective?.objectId ?? '').trim();
+    if (!objectTypeId && !objectId) {
+      return null;
+    }
+
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      ...(objectTypeId ? { objectTypeId } : {}),
+      ...(objectId ? { objectId } : {}),
+      ...(rawObjective?.count != null ? { count: baseCount } : {}),
+      ...constraints,
+    };
+  }
+
+  if (type === 'talk_to_npc') {
+    const npcId = String(rawObjective?.npcId ?? '').trim();
+    if (!npcId) {
+      return null;
+    }
+
+    return {
+      id: String(rawObjective?.id ?? `objective-${index + 1}`).trim() || `objective-${index + 1}`,
+      type,
+      npcId,
+      ...constraints,
+    };
+  }
+
+  return null;
+}
+
+function normalizeQuestStepsV2(rawSteps) {
+  const normalizedSteps = Array.isArray(rawSteps)
+    ? rawSteps
+      .map((step, stepIndex) => {
+        const objectives = Array.isArray(step?.objectives)
+          ? step.objectives
+            .map((objective, objectiveIndex) => normalizeQuestObjectiveV2(objective, objectiveIndex))
+            .filter((entry) => entry !== null)
+          : [];
+
+        if (objectives.length === 0) {
+          return null;
+        }
+
+        const stepId = String(step?.id ?? `step-${stepIndex + 1}`).trim() || `step-${stepIndex + 1}`;
+        const description = String(step?.description ?? '').trim() || `Step ${stepIndex + 1}`;
+        const completion = step?.completion === 'any' ? 'any' : 'all';
+
+        return {
+          id: stepId,
+          description,
+          objectives,
+          completion,
+        };
+      })
+      .filter((entry) => entry !== null)
+    : [];
+
+  return normalizedSteps;
+}
+
+function normalizeQuestDefinitionV2(rawQuest, fallbackQuestId, fallbackStartNpcId = null) {
+  if (!rawQuest || typeof rawQuest !== 'object' || Array.isArray(rawQuest)) {
     return null;
   }
 
   const id = String(rawQuest.id ?? fallbackQuestId ?? '').trim();
   const title = String(rawQuest.title ?? '').trim();
-  const objectiveTargetId = String(rawQuest.objectiveTargetId ?? '').trim();
-  if (!id || !title || !objectiveTargetId) {
+  if (!id || !title) {
     return null;
   }
 
-  const objectiveType = rawQuest.objectiveType === 'gather' ? 'gather' : 'kill';
-  const requiredCount = Math.max(1, Math.floor(Number(rawQuest.requiredCount ?? 1)));
-  const rewardGold = Math.max(0, Math.floor(Number(rawQuest.rewardGold ?? 0)));
-  const rewardItemId = String(rawQuest.rewardItemId ?? '').trim();
-  const rewardItemQuantity = Math.max(1, Math.floor(Number(rawQuest.rewardItemQuantity ?? 1)));
-  const missionText = String(rawQuest.missionText ?? `Complete: ${title}`).trim();
-  const startText = String(rawQuest.startText ?? `I need help with ${title}.`).trim();
-  const progressText = String(rawQuest.progressText ?? 'Keep going, you are making progress.').trim();
-  const completeText = String(rawQuest.completeText ?? 'Excellent work. Here is your reward.').trim();
+  const summary = String(rawQuest.summary ?? `Complete: ${title}`).trim() || `Complete: ${title}`;
+  const startNpcId = String(rawQuest.startNpcId ?? fallbackStartNpcId ?? '').trim();
+  const repeatable = Boolean(rawQuest.repeatable);
+  const cooldownMs = Math.max(0, Math.floor(Number(rawQuest.cooldownMs ?? 0)));
+  const requirements = normalizeQuestRequirementsV2(rawQuest.requirements);
+  const steps = normalizeQuestStepsV2(rawQuest.steps);
+  if (steps.length === 0) {
+    return null;
+  }
+
+  const rewards = normalizeQuestRewardsV2(rawQuest.rewards);
+  const chain = rawQuest.chain && typeof rawQuest.chain === 'object' && !Array.isArray(rawQuest.chain)
+    ? {
+      ...(normalizeQuestStringList(rawQuest.chain.nextQuestIds).length > 0
+        ? { nextQuestIds: normalizeQuestStringList(rawQuest.chain.nextQuestIds) }
+        : {}),
+      ...(rawQuest.chain.autoStartNext != null
+        ? { autoStartNext: Boolean(rawQuest.chain.autoStartNext) }
+        : {}),
+    }
+    : null;
+  const dialogue = normalizeQuestDialogue(rawQuest, title);
 
   return {
+    version: 2,
     id,
     title,
-    missionText,
-    startText,
-    progressText,
-    completeText,
-    objectiveType,
-    objectiveTargetId,
-    requiredCount,
-    rewardGold,
-    rewardItemId,
-    rewardItemQuantity,
+    summary,
+    ...(startNpcId ? { startNpcId } : {}),
+    ...(repeatable ? { repeatable: true } : {}),
+    ...(cooldownMs > 0 ? { cooldownMs } : {}),
+    ...(requirements ? { requirements } : {}),
+    steps,
+    rewards,
+    ...(chain && (Array.isArray(chain.nextQuestIds) || chain.autoStartNext != null) ? { chain } : {}),
+    dialogue,
+    missionText: dialogue.missionText,
+    startText: dialogue.startText,
+    progressText: dialogue.progressText,
+    completeText: dialogue.completeText,
   };
+}
+
+function normalizeQuestZones(
+  rawZones,
+  worldWidth,
+  worldHeight,
+  options = {},
+) {
+  if (!Array.isArray(rawZones)) {
+    return [];
+  }
+
+  const chunkWidth = Math.max(1, Math.floor(Number(options?.chunkWidth ?? worldWidth)));
+  const chunkHeight = Math.max(1, Math.floor(Number(options?.chunkHeight ?? worldHeight)));
+  const chunkZeroOriginTileX = Math.floor(Number(options?.chunkZeroOriginTileX ?? 0));
+  const chunkZeroOriginTileY = Math.floor(Number(options?.chunkZeroOriginTileY ?? 0));
+
+  return rawZones
+    .map((zone, index) => {
+      const id = String(zone?.id ?? `zone-${index + 1}`).trim();
+      const name = String(zone?.name ?? id).trim() || id;
+      const hasZoneChunkX = Number.isFinite(Number(zone?.chunkX));
+      const hasZoneChunkY = Number.isFinite(Number(zone?.chunkY));
+      const zoneChunkX = hasZoneChunkX ? Math.trunc(Number(zone?.chunkX)) : 0;
+      const zoneChunkY = hasZoneChunkY ? Math.trunc(Number(zone?.chunkY)) : 0;
+      const zoneOriginTileX = hasZoneChunkX
+        ? chunkZeroOriginTileX + (zoneChunkX * chunkWidth)
+        : chunkZeroOriginTileX;
+      const zoneOriginTileY = hasZoneChunkY
+        ? chunkZeroOriginTileY + (zoneChunkY * chunkHeight)
+        : chunkZeroOriginTileY;
+      const rects = Array.isArray(zone?.rects)
+        ? zone.rects
+          .map((rect) => {
+            const x = Math.floor(Number(rect?.x ?? 0));
+            const y = Math.floor(Number(rect?.y ?? 0));
+            const width = Math.max(1, Math.floor(Number(rect?.width ?? 1)));
+            const height = Math.max(1, Math.floor(Number(rect?.height ?? 1)));
+            return {
+              x: clamp(zoneOriginTileX + x, 0, Math.max(0, worldWidth - 1)),
+              y: clamp(zoneOriginTileY + y, 0, Math.max(0, worldHeight - 1)),
+              width,
+              height,
+            };
+          })
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+        : [];
+
+      if (!id || rects.length === 0) {
+        return null;
+      }
+
+      return {
+        id,
+        name,
+        rects,
+      };
+    })
+    .filter((zone) => zone !== null);
 }
 
 function normalizeWorldMapData(raw) {
@@ -405,6 +752,8 @@ function normalizeWorldMapData(raw) {
       const maxChunkY = Math.max(...validChunks.map((entry) => entry.chunkY));
       const worldWidthTiles = (maxChunkX - minChunkX + 1) * chunkWidth;
       const worldHeightTiles = (maxChunkY - minChunkY + 1) * chunkHeight;
+      const chunkZeroOriginTileX = (0 - minChunkX) * chunkWidth;
+      const chunkZeroOriginTileY = (0 - minChunkY) * chunkHeight;
       const terrain = createFilledTerrainGrid(worldWidthTiles, worldHeightTiles, 0);
 
       const resources = [];
@@ -462,7 +811,7 @@ function normalizeWorldMapData(raw) {
             tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
             examineText: String(entry?.examineText ?? "It's someone."),
             talkText: String(entry?.talkText ?? 'Hello there.'),
-            quest: normalizeNpcQuestDefinition(entry?.quest, `quest-${npcId}`),
+            questStartIds: normalizeQuestStringList(entry?.questStartIds),
           });
         }
 
@@ -481,14 +830,21 @@ function normalizeWorldMapData(raw) {
         }
       }
 
+      const questZones = normalizeQuestZones(raw?.questZones, worldWidthTiles, worldHeightTiles, {
+        chunkWidth,
+        chunkHeight,
+        chunkZeroOriginTileX,
+        chunkZeroOriginTileY,
+      });
+
       return {
         version: Math.max(1, Math.floor(Number(raw?.version ?? 1))),
         chunkX: 0,
         chunkY: 0,
         chunkWidth,
         chunkHeight,
-        chunkZeroOriginTileX: (0 - minChunkX) * chunkWidth,
-        chunkZeroOriginTileY: (0 - minChunkY) * chunkHeight,
+        chunkZeroOriginTileX,
+        chunkZeroOriginTileY,
         width: worldWidthTiles,
         height: worldHeightTiles,
         terrain,
@@ -496,6 +852,7 @@ function normalizeWorldMapData(raw) {
         monsters,
         npcs,
         objects,
+        questZones,
       };
     }
   }
@@ -546,7 +903,7 @@ function normalizeWorldMapData(raw) {
         tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
         examineText: String(entry?.examineText ?? "It's someone."),
         talkText: String(entry?.talkText ?? 'Hello there.'),
-        quest: normalizeNpcQuestDefinition(entry?.quest, `quest-${npcId}`),
+        questStartIds: normalizeQuestStringList(entry?.questStartIds),
       };
     })
     : fallback.npcs;
@@ -563,6 +920,8 @@ function normalizeWorldMapData(raw) {
     }))
     : fallback.objects;
 
+  const questZones = normalizeQuestZones(source?.questZones, width, height);
+
   return {
     version: Math.max(1, Math.floor(Number(raw?.version ?? source?.version ?? 1))),
     chunkX: Math.floor(Number(source?.chunkX ?? 0)),
@@ -578,6 +937,7 @@ function normalizeWorldMapData(raw) {
     monsters,
     npcs,
     objects,
+    questZones,
   };
 }
 
@@ -1127,6 +1487,7 @@ const RESOURCE_DEFINITIONS = loadResourceDefinitions();
 const GEAR_DEFINITIONS = loadGearDefinitions();
 const LOOT_TABLE_DEFINITIONS = loadLootTableDefinitions();
 const MINION_DEFINITIONS = loadMinionDefinitions();
+const QUEST_DEFINITIONS_V2 = loadQuestDefinitionsV2();
 
 function getMinionDefinition(minionTypeId) {
   return MINION_DEFINITIONS[String(minionTypeId ?? '')] ?? null;
@@ -1162,8 +1523,104 @@ function getGearDefinition(itemId) {
   return GEAR_DEFINITIONS[String(itemId ?? '')] ?? null;
 }
 
+function getQuestDefinitionV2(questId) {
+  return QUEST_DEFINITIONS_V2[String(questId ?? '')] ?? null;
+}
+
+function resolveNpcQuestDefinition(entry) {
+  const questStartIds = normalizeQuestStringList(entry?.questStartIds);
+
+  for (const questId of questStartIds) {
+    const loadedQuest = getQuestDefinitionV2(questId);
+    if (loadedQuest) {
+      return {
+        ...loadedQuest,
+        startNpcId: String(loadedQuest.startNpcId ?? entry?.id ?? '').trim() || undefined,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getNpcQuestDefinitions(npc) {
+  const questDefinitions = [];
+  const seenQuestIds = new Set();
+  const questStartIds = normalizeQuestStringList(npc?.questStartIds);
+
+  for (const questId of questStartIds) {
+    const loadedQuest = getQuestDefinitionV2(questId);
+    if (!loadedQuest) {
+      continue;
+    }
+
+    const safeQuestId = String(loadedQuest.id ?? '').trim();
+    if (!safeQuestId || seenQuestIds.has(safeQuestId)) {
+      continue;
+    }
+
+    seenQuestIds.add(safeQuestId);
+    questDefinitions.push({
+      ...loadedQuest,
+      startNpcId: String(loadedQuest.startNpcId ?? npc?.id ?? '').trim() || undefined,
+    });
+  }
+
+  const legacyQuest = npc?.quest ?? null;
+  const legacyQuestId = String(legacyQuest?.id ?? '').trim();
+  if (legacyQuest && legacyQuestId && !seenQuestIds.has(legacyQuestId)) {
+    seenQuestIds.add(legacyQuestId);
+    questDefinitions.push(legacyQuest);
+  }
+
+  return questDefinitions;
+}
+
+function selectNpcDialogueQuest(player, npc, requestedQuestId = '') {
+  const quests = getNpcQuestDefinitions(npc);
+  if (quests.length === 0) {
+    return null;
+  }
+
+  const safeRequestedQuestId = String(requestedQuestId ?? '').trim();
+  if (safeRequestedQuestId) {
+    return quests.find((quest) => String(quest?.id ?? '').trim() === safeRequestedQuestId) ?? null;
+  }
+
+  const statusPriority = {
+    completable: 0,
+    not_started: 1,
+    active: 2,
+    locked: 3,
+    completed: 4,
+    none: 5,
+  };
+
+  let selectedQuest = quests[0];
+  let bestPriority = Number.POSITIVE_INFINITY;
+  for (const quest of quests) {
+    const status = getNpcQuestStatus(player, quest);
+    const priority = statusPriority[status] ?? statusPriority.none;
+    if (priority < bestPriority) {
+      bestPriority = priority;
+      selectedQuest = quest;
+      if (bestPriority === 0) {
+        break;
+      }
+    }
+  }
+
+  return selectedQuest;
+}
+
 const NPC_DEFINITIONS = Object.fromEntries(
-  WORLD_MAP_DATA.npcs.map((entry) => [entry.id, entry]),
+  WORLD_MAP_DATA.npcs.map((entry) => {
+    const quest = resolveNpcQuestDefinition(entry);
+    return [entry.id, {
+      ...entry,
+      quest,
+    }];
+  }),
 );
 
 function getNpcById(npcId) {
@@ -2013,6 +2470,51 @@ function loadCombatSkillConfigs() {
   return combatConfigs;
 }
 
+function loadQuestDefinitionEntriesFromFile(raw, filePath) {
+  if (Array.isArray(raw)) {
+    return raw.map((entry, index) => ({
+      fallbackId: `${path.basename(filePath, '.json')}-${index + 1}`,
+      raw: entry,
+    }));
+  }
+
+  return [
+    {
+      fallbackId: path.basename(filePath, '.json'),
+      raw,
+    },
+  ];
+}
+
+function loadQuestDefinitionsV2() {
+  if (!existsSync(QUEST_DATA_DIR)) {
+    return {};
+  }
+
+  const map = {};
+  const entries = readdirSync(QUEST_DATA_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name === 'schema.json') {
+      continue;
+    }
+
+    const filePath = path.join(QUEST_DATA_DIR, entry.name);
+    const raw = loadRequiredJsonFile(filePath);
+    const fileDefinitions = loadQuestDefinitionEntriesFromFile(raw, filePath);
+
+    for (const definition of fileDefinitions) {
+      const normalized = normalizeQuestDefinitionV2(definition.raw, definition.fallbackId);
+      if (!normalized) {
+        throw new Error(`Invalid quest definition in ${filePath}`);
+      }
+
+      map[normalized.id] = normalized;
+    }
+  }
+
+  return map;
+}
+
 function buildHarvestResourceConfigMap(harvestingSkillConfigs) {
   const resourcesById = {};
 
@@ -2150,6 +2652,11 @@ function addItemToInventory(player, itemId, quantity) {
     const existingSlot = slots.find((slot) => slot.itemId === itemId);
     if (existingSlot) {
       existingSlot.quantity += quantity;
+      applyQuestProgressEvent(player, {
+        type: 'inventory_changed',
+        itemId,
+        amount: Math.max(1, Math.floor(Number(quantity ?? 1))),
+      });
       return true;
     }
   }
@@ -2162,12 +2669,23 @@ function addItemToInventory(player, itemId, quantity) {
 
   if (itemDefinition.stackable) {
     slots.push(createInventorySlot(itemDefinition, quantity));
+    applyQuestProgressEvent(player, {
+      type: 'inventory_changed',
+      itemId,
+      amount: Math.max(1, Math.floor(Number(quantity ?? 1))),
+    });
     return true;
   }
 
   for (let index = 0; index < quantity; index += 1) {
     slots.push(createInventorySlot(itemDefinition, 1));
   }
+
+  applyQuestProgressEvent(player, {
+    type: 'inventory_changed',
+    itemId,
+    amount: Math.max(1, Math.floor(Number(quantity ?? 1))),
+  });
 
   return true;
 }
@@ -2195,6 +2713,11 @@ function removeItemFromInventory(player, itemId, quantity) {
     }
 
     if (remaining <= 0) {
+      applyQuestProgressEvent(player, {
+        type: 'inventory_changed',
+        itemId,
+        amount: Math.max(1, Math.floor(Number(quantity ?? 1))),
+      });
       return true;
     }
   }
@@ -2580,6 +3103,7 @@ function createPlayer(id) {
     equipment: createEquipment(),
     skills: createSkills(),
     quests: sanitizeQuestProgress(null),
+    questJournalSelectedQuestId: null,
     lastActionText: null,
     lastInputAt: Date.now(),
   };
@@ -2789,8 +3313,32 @@ function sanitizeQuestProgress(rawQuestProgress) {
         continue;
       }
 
-      const count = Math.max(0, Math.floor(Number(value?.count ?? 0)));
-      active[normalizedQuestId] = { count };
+      const stepIndex = Math.max(0, Math.floor(Number(value?.stepIndex ?? 0)));
+      const objectiveCountsRaw = value?.objectiveCounts;
+      const objectiveCounts = {};
+
+      if (objectiveCountsRaw && typeof objectiveCountsRaw === 'object') {
+        for (const [objectiveId, objectiveValue] of Object.entries(objectiveCountsRaw)) {
+          const normalizedObjectiveId = String(objectiveId ?? '').trim();
+          if (!normalizedObjectiveId) {
+            continue;
+          }
+
+          objectiveCounts[normalizedObjectiveId] = Math.max(
+            0,
+            Math.floor(Number(objectiveValue ?? 0)),
+          );
+        }
+      }
+
+      const startedAtRaw = Number(value?.startedAt);
+      const updatedAtRaw = Number(value?.updatedAt);
+      active[normalizedQuestId] = {
+        stepIndex,
+        objectiveCounts,
+        startedAt: Number.isFinite(startedAtRaw) ? Math.floor(startedAtRaw) : null,
+        updatedAt: Number.isFinite(updatedAtRaw) ? Math.floor(updatedAtRaw) : null,
+      };
     }
   }
 
@@ -2805,6 +3353,7 @@ function sanitizeQuestProgress(rawQuestProgress) {
     : [];
 
   return {
+    version: QUEST_PROGRESS_VERSION,
     active,
     completed,
   };
@@ -3897,7 +4446,16 @@ function setPathTarget(entity, tileX, tileY) {
   return pathfindingService.setPathTarget(entity, tileX, tileY);
 }
 
-function getNpcSnapshot() {
+function hasQuestAvailableFromNpc(player, npc) {
+  if (!player || !npc) {
+    return false;
+  }
+
+  const quests = getNpcQuestDefinitions(npc);
+  return quests.some((quest) => getNpcQuestStatus(player, quest) === 'not_started');
+}
+
+function getNpcSnapshot(viewerPlayer = null) {
   const npcs = {};
 
   for (const npc of Object.values(NPC_DEFINITIONS)) {
@@ -3908,6 +4466,7 @@ function getNpcSnapshot() {
       tileX: npc.tileX,
       tileY: npc.tileY,
       examineText: npc.examineText,
+      questAvailable: hasQuestAvailableFromNpc(viewerPlayer, npc),
     };
   }
 
@@ -4060,32 +4619,307 @@ function isWithinNpcRange(player, npc) {
   return manhattanDistance <= INTERACTION_RANGE_TILES;
 }
 
-function getQuestObjectiveLabel(quest) {
-  const typeLabel = quest.objectiveType === 'gather' ? 'Gather' : 'Defeat';
-  return `${typeLabel} ${quest.objectiveTargetId} (${quest.requiredCount})`;
-}
-
-function getQuestProgressRecord(player, questId) {
-  const safeQuestId = String(questId ?? '').trim();
-  if (!safeQuestId) {
-    return null;
-  }
-
-  if (!player.quests || typeof player.quests !== 'object') {
-    player.quests = sanitizeQuestProgress(null);
+function ensureQuestProgressState(player) {
+  if (!player.quests || typeof player.quests !== 'object' || player.quests.version !== QUEST_PROGRESS_VERSION) {
+    player.quests = sanitizeQuestProgress(player.quests);
   }
 
   if (!player.quests.active || typeof player.quests.active !== 'object') {
     player.quests.active = {};
   }
 
-  const existing = player.quests.active[safeQuestId];
+  if (!Array.isArray(player.quests.completed)) {
+    player.quests.completed = [];
+  }
+}
+
+function getQuestDefinitionById(questId) {
+  const safeQuestId = String(questId ?? '').trim();
+  if (!safeQuestId) {
+    return null;
+  }
+
+  const loaded = QUEST_DEFINITIONS_V2[safeQuestId];
+  if (loaded) {
+    return loaded;
+  }
+
+  for (const npc of Object.values(NPC_DEFINITIONS)) {
+    if (npc?.quest?.id === safeQuestId) {
+      return npc.quest;
+    }
+  }
+
+  return null;
+}
+
+function getQuestSteps(quest) {
+  return Array.isArray(quest?.steps) ? quest.steps : [];
+}
+
+function getObjectiveRequiredCount(objective) {
+  return Math.max(1, Math.floor(Number(objective?.count ?? objective?.quantity ?? 1)));
+}
+
+function getQuestZoneById(zoneId) {
+  const safeZoneId = String(zoneId ?? '').trim();
+  if (!safeZoneId) {
+    return null;
+  }
+
+  const zones = Array.isArray(WORLD_MAP_DATA?.questZones) ? WORLD_MAP_DATA.questZones : [];
+  return zones.find((entry) => String(entry?.id ?? '').trim() === safeZoneId) ?? null;
+}
+
+function formatIdentifierForUi(identifier, fallback = 'Unknown') {
+  const safeIdentifier = String(identifier ?? '').trim();
+  if (!safeIdentifier) {
+    return fallback;
+  }
+
+  return safeIdentifier
+    .replace(/^(npc|quest|item|resource|enemy|minion)[-_]/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function getItemDisplayName(itemId) {
+  return getItemDefinition(itemId)?.name ?? formatIdentifierForUi(itemId, 'Item');
+}
+
+function getNpcDisplayName(npcId) {
+  return getNpcById(npcId)?.name ?? formatIdentifierForUi(npcId, 'NPC');
+}
+
+function getQuestDisplayName(questId) {
+  return getQuestDefinitionById(questId)?.title ?? formatIdentifierForUi(questId, 'Quest');
+}
+
+function getQuestZoneDisplayName(zoneId) {
+  return getQuestZoneById(zoneId)?.name ?? formatIdentifierForUi(zoneId, 'Zone');
+}
+
+function getObjectiveTargetDisplayName(targetId) {
+  const safeTargetId = String(targetId ?? '').trim();
+  if (!safeTargetId) {
+    return 'Target';
+  }
+
+  const minionName = getMinionDefinition(safeTargetId)?.name;
+  if (minionName) {
+    return minionName;
+  }
+
+  const npcName = getNpcById(safeTargetId)?.name;
+  if (npcName) {
+    return npcName;
+  }
+
+  return formatIdentifierForUi(safeTargetId, 'Target');
+}
+
+function getSkillDisplayName(skillName) {
+  return formatIdentifierForUi(skillName, 'Skill');
+}
+
+function isTileInsideQuestZone(zoneId, tileX, tileY) {
+  const zone = getQuestZoneById(zoneId);
+  if (!zone || !Array.isArray(zone.rects)) {
+    return false;
+  }
+
+  return zone.rects.some((rect) => {
+    const rectX = Math.floor(Number(rect?.x ?? 0));
+    const rectY = Math.floor(Number(rect?.y ?? 0));
+    const rectWidth = Math.max(1, Math.floor(Number(rect?.width ?? 1)));
+    const rectHeight = Math.max(1, Math.floor(Number(rect?.height ?? 1)));
+    return tileX >= rectX
+      && tileX < rectX + rectWidth
+      && tileY >= rectY
+      && tileY < rectY + rectHeight;
+  });
+}
+
+function getQuestStepProgressRecord(player, quest) {
+  ensureQuestProgressState(player);
+
+  const active = player.quests.active[String(quest?.id ?? '').trim()];
+  if (!active) {
+    return null;
+  }
+
+  const steps = getQuestSteps(quest);
+  const stepIndex = Math.max(0, Math.floor(Number(active.stepIndex ?? 0)));
+  const clampedStepIndex = Math.min(stepIndex, Math.max(0, steps.length - 1));
+  return {
+    ...active,
+    stepIndex: clampedStepIndex,
+    objectiveCounts: active.objectiveCounts && typeof active.objectiveCounts === 'object'
+      ? active.objectiveCounts
+      : {},
+  };
+}
+
+function doesPlayerMeetQuestRequirements(player, quest) {
+  const requirements = quest?.requirements;
+  if (!requirements || typeof requirements !== 'object') {
+    return true;
+  }
+
+  if (Array.isArray(requirements.requiredQuestIds)) {
+    for (const requiredQuestId of requirements.requiredQuestIds) {
+      if (!isQuestCompleted(player, requiredQuestId)) {
+        return false;
+      }
+    }
+  }
+
+  if (Array.isArray(requirements.requiredSkillLevels)) {
+    for (const requirement of requirements.requiredSkillLevels) {
+      const skillName = String(requirement?.skill ?? '').trim();
+      if (!skillName) {
+        continue;
+      }
+
+      const requiredLevel = Math.max(1, Math.floor(Number(requirement?.level ?? 1)));
+      const currentLevel = Math.max(1, Math.floor(Number(player?.skills?.[skillName]?.level ?? 1)));
+      if (currentLevel < requiredLevel) {
+        return false;
+      }
+    }
+  }
+
+  if (Array.isArray(requirements.requiredItems)) {
+    for (const requirement of requirements.requiredItems) {
+      const itemId = String(requirement?.itemId ?? '').trim();
+      if (!itemId) {
+        continue;
+      }
+
+      const requiredQuantity = Math.max(1, Math.floor(Number(requirement?.quantity ?? 1)));
+      if (getInventoryItemCount(player, itemId) < requiredQuantity) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function isQuestStepComplete(step, objectiveCounts) {
+  if (!step || !Array.isArray(step.objectives) || step.objectives.length === 0) {
+    return false;
+  }
+
+  const checks = step.objectives.map((objective) => {
+    const objectiveId = String(objective?.id ?? '').trim();
+    const required = getObjectiveRequiredCount(objective);
+    const value = Math.max(0, Math.floor(Number(objectiveCounts?.[objectiveId] ?? 0)));
+    return value >= required;
+  });
+
+  if (step.completion === 'any') {
+    return checks.some(Boolean);
+  }
+
+  return checks.every(Boolean);
+}
+
+function getQuestRequiredCount(quest) {
+  const steps = getQuestSteps(quest);
+  const firstStep = steps[0] ?? null;
+  const firstObjective = Array.isArray(firstStep?.objectives) ? firstStep.objectives[0] : null;
+  if (!firstObjective) {
+    return 1;
+  }
+
+  return getObjectiveRequiredCount(firstObjective);
+}
+
+function getQuestObjectiveType(quest) {
+  const firstStep = getQuestSteps(quest)[0] ?? null;
+  const firstObjective = Array.isArray(firstStep?.objectives) ? firstStep.objectives[0] : null;
+  const objectiveType = String(firstObjective?.type ?? '').trim();
+  if (!objectiveType) {
+    return 'kill';
+  }
+
+  return objectiveType;
+}
+
+function getQuestObjectiveTargetId(quest) {
+  const firstStep = getQuestSteps(quest)[0] ?? null;
+  const firstObjective = Array.isArray(firstStep?.objectives) ? firstStep.objectives[0] : null;
+  if (!firstObjective) {
+    return '';
+  }
+
+  if (firstObjective.type === 'gather') {
+    return getItemDisplayName(firstObjective.itemId);
+  }
+
+  if (firstObjective.type === 'delivery') {
+    return `${getItemDisplayName(firstObjective.itemId)} to ${getNpcDisplayName(firstObjective.toNpcId)}`;
+  }
+
+  if (firstObjective.type === 'travel') {
+    return getQuestZoneDisplayName(firstObjective.zoneId);
+  }
+
+  if (firstObjective.type === 'item_retrieval') {
+    return getItemDisplayName(firstObjective.itemId);
+  }
+
+  if (firstObjective.type === 'talk_to_npc') {
+    return getNpcDisplayName(firstObjective.npcId);
+  }
+
+  return getObjectiveTargetDisplayName(firstObjective.targetId);
+}
+
+function getQuestObjectiveLabel(quest) {
+  const objectiveType = getQuestObjectiveType(quest);
+  const objectiveTarget = getQuestObjectiveTargetId(quest);
+  if (objectiveType === 'delivery' || objectiveType === 'travel' || objectiveType === 'talk_to_npc') {
+    return `${formatIdentifierForUi(objectiveType)}: ${objectiveTarget}`;
+  }
+
+  const typeLabel = objectiveType === 'gather' ? 'Gather' : objectiveType === 'item_retrieval' ? 'Collect' : 'Defeat';
+  return `${typeLabel} ${objectiveTarget} (${getQuestRequiredCount(quest)})`;
+}
+
+function getQuestProgressRecord(player, questId) {
+  const quest = getQuestDefinitionById(questId);
+  if (!quest) {
+    return null;
+  }
+
+  const existing = getQuestStepProgressRecord(player, quest);
   if (!existing) {
     return null;
   }
 
-  const count = Math.max(0, Math.floor(Number(existing.count ?? 0)));
-  return { count };
+  const steps = getQuestSteps(quest);
+  const currentStep = steps[existing.stepIndex] ?? steps[0] ?? null;
+  const firstObjective = Array.isArray(currentStep?.objectives) ? currentStep.objectives[0] : null;
+  const objectiveId = String(firstObjective?.id ?? '').trim();
+  if (!objectiveId) {
+    return null;
+  }
+  const count = Math.max(
+    0,
+    Math.floor(Number(
+      existing.objectiveCounts[objectiveId]
+      ?? 0,
+    )),
+  );
+
+  return {
+    count,
+    stepIndex: Math.max(0, Math.floor(Number(existing.stepIndex ?? 0))),
+  };
 }
 
 function setQuestProgressRecord(player, questId, count) {
@@ -4094,16 +4928,30 @@ function setQuestProgressRecord(player, questId, count) {
     return;
   }
 
-  if (!player.quests || typeof player.quests !== 'object') {
-    player.quests = sanitizeQuestProgress(null);
+  ensureQuestProgressState(player);
+  const quest = getQuestDefinitionById(safeQuestId);
+  const steps = getQuestSteps(quest);
+  const stepIndex = Math.max(0, Math.floor(Number(player.quests.active[safeQuestId]?.stepIndex ?? 0)));
+  const currentStep = steps[stepIndex] ?? steps[0] ?? null;
+  const firstObjective = Array.isArray(currentStep?.objectives) ? currentStep.objectives[0] : null;
+  const objectiveId = String(firstObjective?.id ?? '').trim();
+  if (!objectiveId) {
+    return;
   }
-
-  if (!player.quests.active || typeof player.quests.active !== 'object') {
-    player.quests.active = {};
-  }
-
+  const now = Date.now();
+  const existing = player.quests.active[safeQuestId] ?? null;
   player.quests.active[safeQuestId] = {
-    count: Math.max(0, Math.floor(Number(count ?? 0))),
+    stepIndex: Math.max(0, Math.floor(Number(existing?.stepIndex ?? 0))),
+    objectiveCounts: {
+      ...(existing?.objectiveCounts && typeof existing.objectiveCounts === 'object'
+        ? existing.objectiveCounts
+        : {}),
+      [objectiveId]: Math.max(0, Math.floor(Number(count ?? 0))),
+    },
+    startedAt: Number.isFinite(Number(existing?.startedAt))
+      ? Math.floor(Number(existing.startedAt))
+      : now,
+    updatedAt: now,
   };
 }
 
@@ -4113,15 +4961,304 @@ function isQuestCompleted(player, questId) {
     return false;
   }
 
-  if (!player.quests || typeof player.quests !== 'object') {
-    player.quests = sanitizeQuestProgress(null);
-  }
-
-  if (!Array.isArray(player.quests.completed)) {
-    player.quests.completed = [];
-  }
+  ensureQuestProgressState(player);
 
   return player.quests.completed.includes(safeQuestId);
+}
+
+function buildQuestRequirementEntries(player, quest) {
+  const requirements = quest?.requirements && typeof quest.requirements === 'object' ? quest.requirements : {};
+
+  return [
+    ...(Array.isArray(requirements.requiredQuestIds)
+      ? requirements.requiredQuestIds.map((requiredQuestId) => ({
+        label: `Complete quest: ${getQuestDisplayName(requiredQuestId)}`,
+        met: isQuestCompleted(player, requiredQuestId),
+      }))
+      : []),
+    ...(Array.isArray(requirements.requiredSkillLevels)
+      ? requirements.requiredSkillLevels.map((requiredSkill) => {
+        const skillName = String(requiredSkill?.skill ?? '').trim();
+        const requiredLevel = Math.max(1, Math.floor(Number(requiredSkill?.level ?? 1)));
+        const currentLevel = Math.max(1, Math.floor(Number(player?.skills?.[skillName]?.level ?? 1)));
+        return {
+          label: `Reach ${getSkillDisplayName(skillName)} level ${requiredLevel}`,
+          met: currentLevel >= requiredLevel,
+        };
+      })
+      : []),
+    ...(Array.isArray(requirements.requiredItems)
+      ? requirements.requiredItems.map((requiredItem) => ({
+        label: `Hold ${requiredItem.quantity} ${getItemDisplayName(requiredItem.itemId)}`,
+        met: getInventoryItemCount(player, requiredItem.itemId) >= requiredItem.quantity,
+      }))
+      : []),
+  ];
+}
+
+function findNpcForQuestId(questId) {
+  const safeQuestId = String(questId ?? '').trim();
+  if (!safeQuestId) {
+    return null;
+  }
+
+  return Object.values(NPC_DEFINITIONS).find((entry) =>
+    getNpcQuestDefinitions(entry).some((quest) => String(quest?.id ?? '').trim() === safeQuestId),
+  ) ?? null;
+}
+
+function describeQuestObjective(objective) {
+  if (!objective || typeof objective !== 'object') {
+    return 'Objective';
+  }
+
+  if (objective.type === 'kill') {
+    return `Defeat ${getObjectiveTargetDisplayName(objective.targetId)}`;
+  }
+
+  if (objective.type === 'gather') {
+    return `Gather ${getItemDisplayName(objective.itemId)}`;
+  }
+
+  if (objective.type === 'delivery') {
+    return `Deliver ${getItemDisplayName(objective.itemId)} to ${getNpcDisplayName(objective.toNpcId)}`;
+  }
+
+  if (objective.type === 'travel') {
+    return `Travel to ${getQuestZoneDisplayName(objective.zoneId)}`;
+  }
+
+  if (objective.type === 'item_retrieval') {
+    return `Collect ${getItemDisplayName(objective.itemId)}`;
+  }
+
+  if (objective.type === 'interact_object') {
+    return `Interact with ${formatIdentifierForUi(objective.objectTypeId ?? objective.objectId ?? 'object', 'Object')}`;
+  }
+
+  if (objective.type === 'talk_to_npc') {
+    return `Talk to ${getNpcDisplayName(objective.npcId)}`;
+  }
+
+  return 'Objective';
+}
+
+function buildQuestJournalEntry(player, quest, status) {
+  const progress = getQuestStepProgressRecord(player, quest);
+  const steps = getQuestSteps(quest);
+  const rewards = quest?.rewards && typeof quest.rewards === 'object' ? quest.rewards : {};
+  const requirementEntries = buildQuestRequirementEntries(player, quest);
+
+  return {
+    questId: quest.id,
+    title: quest.title,
+    status,
+    currentStepIndex: progress?.stepIndex ?? 0,
+    steps: steps.map((step, stepIndex) => {
+      const objectiveCounts = progress?.objectiveCounts ?? {};
+      const objectives = Array.isArray(step.objectives)
+        ? step.objectives.map((objective, objectiveIndex) => {
+          const objectiveId = String(objective?.id ?? '').trim();
+          const required = getObjectiveRequiredCount(objective);
+          const rawProgress = status === 'completed'
+            ? required
+            : Math.max(0, Math.floor(Number(objectiveCounts[objectiveId] ?? 0)));
+          return {
+            id: objectiveId || `objective-${step.id}-${objectiveIndex + 1}`,
+            description: describeQuestObjective(objective),
+            progress: Math.min(required, rawProgress),
+            required,
+          };
+        })
+        : [];
+
+      return {
+        id: step.id,
+        description: step.description,
+        completed: status === 'completed' || stepIndex < (progress?.stepIndex ?? 0) || isQuestStepComplete(step, objectiveCounts),
+        objectives,
+      };
+    }),
+    requirements: requirementEntries,
+    rewards: {
+      ...(Number.isFinite(Number(rewards.gold)) ? { gold: Math.max(0, Math.floor(Number(rewards.gold))) } : {}),
+      ...(Array.isArray(rewards.items) ? { items: rewards.items } : {}),
+      ...(Array.isArray(rewards.xp) ? { xp: rewards.xp } : {}),
+    },
+    chain: {
+      ...(Array.isArray(quest?.chain?.nextQuestIds) ? { nextQuestIds: quest.chain.nextQuestIds } : {}),
+    },
+  };
+}
+
+function buildQuestJournalState(player) {
+  const allQuests = Array.from(
+    new Map(
+      Object.values(NPC_DEFINITIONS)
+        .flatMap((entry) => getNpcQuestDefinitions(entry).map((quest) => [quest.id, quest])),
+    ).values(),
+  );
+
+  const active = [];
+  const completed = [];
+  for (const quest of allQuests) {
+    const status = getNpcQuestStatus(player, quest);
+    if (status === 'completed') {
+      completed.push(buildQuestJournalEntry(player, quest, 'completed'));
+      continue;
+    }
+
+    if (status === 'active' || status === 'completable') {
+      active.push(buildQuestJournalEntry(player, quest, status));
+    }
+  }
+
+  const selectedQuestId = String(player.questJournalSelectedQuestId ?? '').trim()
+    || active[0]?.questId
+    || completed[0]?.questId
+    || null;
+
+  return {
+    active,
+    completed,
+    selectedQuestId,
+  };
+}
+
+function sendQuestJournalToPlayer(player) {
+  const client = clients.get(player.id);
+  if (!client || client.socket.readyState !== 1) {
+    return;
+  }
+
+  client.socket.send(
+    JSON.stringify({
+      type: 'questJournal',
+      journal: buildQuestJournalState(player),
+    }),
+  );
+}
+
+function buildQuestDialogueState(player, npc, quest) {
+  if (!npc) {
+    return {
+      open: true,
+      npcId: '',
+      npcName: 'NPC',
+      questId: null,
+      mode: 'ambient',
+      text: 'Hello there.',
+      options: [{ id: 'close', label: 'Close', action: 'close' }],
+    };
+  }
+
+  if (!quest) {
+    return {
+      open: true,
+      npcId: npc.id,
+      npcName: npc.name,
+      questId: null,
+      mode: 'ambient',
+      text: npc.talkText,
+      options: [{ id: 'close', label: 'Close', action: 'close' }],
+    };
+  }
+
+  const status = getNpcQuestStatus(player, quest);
+  const progress = getQuestProgressRecord(player, quest.id) ?? { count: 0 };
+  const requiredCount = getQuestRequiredCount(quest);
+
+  if (status === 'locked') {
+    const requirementEntries = buildQuestRequirementEntries(player, quest);
+    const requirementLines = requirementEntries.map((entry) => `${entry.met ? '✓' : '✗'} ${entry.label}`);
+    return {
+      open: true,
+      npcId: npc.id,
+      npcName: npc.name,
+      questId: quest.id,
+      mode: 'locked',
+      text: [
+        quest.lockedText ?? 'You are not ready for this task yet.',
+        ...(requirementLines.length > 0 ? ['', 'Requirements:', ...requirementLines] : []),
+      ].join('\n'),
+      options: [{ id: 'close', label: 'Close', action: 'close' }],
+    };
+  }
+
+  if (status === 'not_started') {
+    return {
+      open: true,
+      npcId: npc.id,
+      npcName: npc.name,
+      questId: quest.id,
+      mode: 'offer',
+      text: quest.startText,
+      options: [
+        { id: 'accept', label: 'Accept', action: 'accept' },
+        { id: 'decline', label: 'Decline', action: 'decline' },
+      ],
+    };
+  }
+
+  if (status === 'completable') {
+    return {
+      open: true,
+      npcId: npc.id,
+      npcName: npc.name,
+      questId: quest.id,
+      mode: 'turnin',
+      text: `${quest.completeText} Ready to turn in?`,
+      options: [
+        { id: 'turnin', label: 'Turn in', action: 'turnin' },
+        { id: 'close', label: 'Close', action: 'close' },
+      ],
+    };
+  }
+
+  if (status === 'completed') {
+    return {
+      open: true,
+      npcId: npc.id,
+      npcName: npc.name,
+      questId: quest.id,
+      mode: 'completed',
+      text: npc.talkText,
+      options: [{ id: 'close', label: 'Close', action: 'close' }],
+    };
+  }
+
+  return {
+    open: true,
+    npcId: npc.id,
+    npcName: npc.name,
+    questId: quest.id,
+    mode: 'progress',
+    text: `${quest.progressText} (${progress.count}/${requiredCount})`,
+    options: [{ id: 'close', label: 'Close', action: 'close' }],
+  };
+}
+
+function sendQuestDialogueToSocket(socket, dialogue) {
+  socket.send(
+    JSON.stringify({
+      type: 'questDialogue',
+      dialogue,
+    }),
+  );
+}
+
+function sendQuestNotificationToPlayer(player, notification) {
+  const client = clients.get(player.id);
+  if (!client || client.socket.readyState !== 1) {
+    return;
+  }
+
+  client.socket.send(
+    JSON.stringify({
+      type: 'questNotification',
+      notification,
+    }),
+  );
 }
 
 function getNpcQuestStatus(player, quest) {
@@ -4133,50 +5270,94 @@ function getNpcQuestStatus(player, quest) {
     return 'completed';
   }
 
-  const progress = getQuestProgressRecord(player, quest.id);
+  const progress = getQuestStepProgressRecord(player, quest);
   if (!progress) {
+    if (!doesPlayerMeetQuestRequirements(player, quest)) {
+      return 'locked';
+    }
     return 'not_started';
   }
 
-  if (progress.count >= quest.requiredCount) {
+  const steps = getQuestSteps(quest);
+  if (steps.length === 0) {
+    return 'active';
+  }
+
+  const currentStep = steps[progress.stepIndex] ?? steps[steps.length - 1];
+  const currentStepComplete = isQuestStepComplete(currentStep, progress.objectiveCounts);
+  const finalStepComplete = progress.stepIndex >= steps.length - 1 && currentStepComplete;
+  if (finalStepComplete) {
     return 'completable';
   }
 
   return 'active';
 }
 
-function sendQuestProgressToPlayer(player, text) {
-  const client = clients.get(player.id);
-  if (!client || client.socket.readyState !== 1) {
-    return;
-  }
-
-  sendChatToSocket(client.socket, text);
+function sendQuestProgressToPlayer(player, text, questId = null, type = 'progress') {
+  const safeQuestId = String(questId ?? '').trim();
+  sendQuestNotificationToPlayer(player, {
+    id: randomUUID(),
+    type,
+    questId: safeQuestId,
+    text,
+    timestamp: Date.now(),
+  });
 }
 
 function startNpcQuestForPlayer(player, npc, quest) {
+  if (!doesPlayerMeetQuestRequirements(player, quest)) {
+    sendQuestProgressToPlayer(
+      player,
+      `[${npc.name}] ${quest.lockedText ?? 'You are not ready for this task yet.'}`,
+      quest?.id,
+      'failed',
+    );
+    return;
+  }
+
+  ensureQuestProgressState(player);
+  const now = Date.now();
+  player.quests.active[quest.id] = {
+    stepIndex: 0,
+    objectiveCounts: {},
+    startedAt: now,
+    updatedAt: now,
+  };
   setQuestProgressRecord(player, quest.id, 0);
+  applyQuestProgressEvent(player, {
+    type: 'inventory_changed',
+  });
   player.lastActionText = `Accepted quest: ${quest.title}`;
-  sendQuestProgressToPlayer(player, `[${npc.name}] ${quest.startText}`);
-  sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: ${quest.missionText}`);
-  sendQuestProgressToPlayer(player, `[Quest] Objective: ${getQuestObjectiveLabel(quest)}`);
+  sendQuestProgressToPlayer(player, `[${npc.name}] ${quest.startText}`, quest.id, 'progress');
+  sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: ${quest.missionText}`, quest.id, 'progress');
+  sendQuestProgressToPlayer(player, `[Quest] Objective: ${getQuestObjectiveLabel(quest)}`, quest.id, 'progress');
+  sendQuestJournalToPlayer(player);
 }
 
 function completeNpcQuestForPlayer(player, npc, quest) {
-  const rewardItemId = String(quest.rewardItemId ?? '').trim();
-  const rewardItemQuantity = Math.max(1, Math.floor(Number(quest.rewardItemQuantity ?? 1)));
-  const rewardGold = Math.max(0, Math.floor(Number(quest.rewardGold ?? 0)));
+  const rewardGold = Math.max(
+    0,
+    Math.floor(Number(quest?.rewards?.gold ?? 0)),
+  );
+  const rewardItems = Array.isArray(quest?.rewards?.items)
+    ? quest.rewards.items
+      .map((entry) => ({
+        itemId: String(entry?.itemId ?? '').trim(),
+        quantity: Math.max(1, Math.floor(Number(entry?.quantity ?? 1))),
+      }))
+      .filter((entry) => entry.itemId.length > 0)
+    : [];
 
-  if (rewardItemId) {
-    const itemDefinition = getItemDefinition(rewardItemId);
+  for (const rewardItem of rewardItems) {
+    const itemDefinition = getItemDefinition(rewardItem.itemId);
     if (!itemDefinition) {
-      sendQuestProgressToPlayer(player, '[Quest] Reward item configuration is invalid.');
+      sendQuestProgressToPlayer(player, '[Quest] Reward item configuration is invalid.', quest.id, 'failed');
       return false;
     }
 
-    const addedItem = addItemToInventory(player, rewardItemId, rewardItemQuantity);
+    const addedItem = addItemToInventory(player, rewardItem.itemId, rewardItem.quantity);
     if (!addedItem) {
-      sendQuestProgressToPlayer(player, '[Quest] Not enough inventory space for quest rewards.');
+      sendQuestProgressToPlayer(player, '[Quest] Not enough inventory space for quest rewards.', quest.id, 'failed');
       return false;
     }
   }
@@ -4185,9 +5366,7 @@ function completeNpcQuestForPlayer(player, npc, quest) {
     addPlayerGold(player, rewardGold);
   }
 
-  if (!Array.isArray(player.quests.completed)) {
-    player.quests.completed = [];
-  }
+  ensureQuestProgressState(player);
 
   delete player.quests.active[quest.id];
   if (!player.quests.completed.includes(quest.id)) {
@@ -4198,59 +5377,264 @@ function completeNpcQuestForPlayer(player, npc, quest) {
   if (rewardGold > 0) {
     rewardParts.push(`${rewardGold} gold`);
   }
-  if (rewardItemId) {
-    const itemName = getItemDefinition(rewardItemId)?.name ?? rewardItemId;
-    rewardParts.push(`${itemName}${rewardItemQuantity > 1 ? ` x${rewardItemQuantity}` : ''}`);
+  for (const rewardItem of rewardItems) {
+    const itemName = getItemDefinition(rewardItem.itemId)?.name ?? rewardItem.itemId;
+    rewardParts.push(`${itemName}${rewardItem.quantity > 1 ? ` x${rewardItem.quantity}` : ''}`);
   }
   const rewardSummary = rewardParts.length > 0 ? rewardParts.join(', ') : 'no tangible rewards';
 
   player.lastActionText = `Completed quest: ${quest.title}`;
-  sendQuestProgressToPlayer(player, `[${npc.name}] ${quest.completeText}`);
-  sendQuestProgressToPlayer(player, `[Quest] Completed: ${quest.title}. Rewards: ${rewardSummary}.`);
+  sendQuestProgressToPlayer(player, `[${npc.name}] ${quest.completeText}`, quest.id, 'quest_complete');
+  sendQuestProgressToPlayer(player, `[Quest] Completed: ${quest.title}. Rewards: ${rewardSummary}.`, quest.id, 'quest_complete');
+  sendQuestJournalToPlayer(player);
   return true;
 }
 
-function applyQuestObjectiveProgress(player, objectiveType, objectiveTargetId, amount = 1) {
-  if (!objectiveTargetId) {
-    return;
-  }
+function applyQuestProgressEvent(player, event) {
+  ensureQuestProgressState(player);
 
-  const safeTargetId = String(objectiveTargetId).trim();
-  if (!safeTargetId) {
-    return;
-  }
-
-  const objectiveCount = Math.max(1, Math.floor(Number(amount ?? 1)));
   for (const npc of Object.values(NPC_DEFINITIONS)) {
     const quest = npc?.quest;
-    if (!quest) {
+    if (!quest || isQuestCompleted(player, quest.id)) {
       continue;
     }
 
-    if (quest.objectiveType !== objectiveType || String(quest.objectiveTargetId) !== safeTargetId) {
-      continue;
-    }
-
-    if (isQuestCompleted(player, quest.id)) {
-      continue;
-    }
-
-    const progress = getQuestProgressRecord(player, quest.id);
+    const progress = getQuestStepProgressRecord(player, quest);
     if (!progress) {
       continue;
     }
 
-    const nextCount = Math.min(quest.requiredCount, progress.count + objectiveCount);
-    if (nextCount === progress.count) {
+    const steps = getQuestSteps(quest);
+    const step = steps[progress.stepIndex] ?? null;
+    if (!step || !Array.isArray(step.objectives) || step.objectives.length === 0) {
       continue;
     }
 
-    setQuestProgressRecord(player, quest.id, nextCount);
-    if (nextCount >= quest.requiredCount) {
-      sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: objective complete. Return to ${npc.name}.`);
-    } else {
-      sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: ${nextCount}/${quest.requiredCount}.`);
+    const nextObjectiveCounts = {
+      ...progress.objectiveCounts,
+    };
+    let changed = false;
+
+    const isConstraintSatisfied = (objective) => {
+      if (Array.isArray(objective.requiredQuestIds) && objective.requiredQuestIds.some((questId) => !isQuestCompleted(player, questId))) {
+        return false;
+      }
+
+      if (Array.isArray(objective.requiredItems)) {
+        for (const requiredItem of objective.requiredItems) {
+          if (getInventoryItemCount(player, requiredItem.itemId) < requiredItem.quantity) {
+            return false;
+          }
+        }
+      }
+
+      const timeLimitMs = Number(objective.timeLimitMs);
+      const startedAt = Number(progress.startedAt);
+      if (Number.isFinite(timeLimitMs) && timeLimitMs > 0 && Number.isFinite(startedAt)) {
+        if (Date.now() > startedAt + timeLimitMs) {
+          return false;
+        }
+      }
+
+      const objectiveZoneId = String(objective.zoneId ?? '').trim();
+      if (objectiveZoneId && objective.type !== 'travel') {
+        const eventTileX = Number(event.tileX ?? player.tileX);
+        const eventTileY = Number(event.tileY ?? player.tileY);
+        if (!isTileInsideQuestZone(objectiveZoneId, Math.floor(eventTileX), Math.floor(eventTileY))) {
+          return false;
+        }
+      }
+
+      return true;
+    };
+
+    const doesEventMatch = (objective) => {
+      if (objective.type === 'kill') {
+        return event.type === 'kill' && String(event.targetId ?? '').trim() === String(objective.targetId ?? '').trim();
+      }
+
+      if (objective.type === 'gather') {
+        return event.type === 'gather' && String(event.itemId ?? '').trim() === String(objective.itemId ?? '').trim();
+      }
+
+      if (objective.type === 'talk_to_npc') {
+        return event.type === 'talk_to_npc' && String(event.npcId ?? '').trim() === String(objective.npcId ?? '').trim();
+      }
+
+      if (objective.type === 'interact_object') {
+        if (event.type !== 'interact_object') {
+          return false;
+        }
+
+        const eventObjectId = String(event.objectId ?? '').trim();
+        const eventObjectTypeId = String(event.objectTypeId ?? '').trim();
+        const expectedObjectId = String(objective.objectId ?? '').trim();
+        const expectedObjectTypeId = String(objective.objectTypeId ?? '').trim();
+        if (expectedObjectId && eventObjectId !== expectedObjectId) {
+          return false;
+        }
+        if (expectedObjectTypeId && eventObjectTypeId !== expectedObjectTypeId) {
+          return false;
+        }
+
+        return true;
+      }
+
+      if (objective.type === 'travel') {
+        if (event.type !== 'travel') {
+          return false;
+        }
+
+        const eventTileX = Math.floor(Number(event.tileX ?? player.tileX));
+        const eventTileY = Math.floor(Number(event.tileY ?? player.tileY));
+        if (!isTileInsideQuestZone(String(objective.zoneId ?? ''), eventTileX, eventTileY)) {
+          return false;
+        }
+
+        const targetXRaw = Number(objective.tileX);
+        const targetYRaw = Number(objective.tileY);
+        if (!Number.isFinite(targetXRaw) || !Number.isFinite(targetYRaw)) {
+          return true;
+        }
+
+        const radius = Math.max(0, Math.floor(Number(objective.radius ?? 0)));
+        const targetX = Math.floor(targetXRaw);
+        const targetY = Math.floor(targetYRaw);
+        const candidateTargets = [
+          { x: targetX, y: targetY },
+        ];
+
+        if (CHUNK_ZERO_ORIGIN_TILE_X !== 0 || CHUNK_ZERO_ORIGIN_TILE_Y !== 0) {
+          candidateTargets.push({
+            x: targetX + CHUNK_ZERO_ORIGIN_TILE_X,
+            y: targetY + CHUNK_ZERO_ORIGIN_TILE_Y,
+          });
+        }
+
+        return candidateTargets.some((target) => {
+          const dx = Math.abs(eventTileX - target.x);
+          const dy = Math.abs(eventTileY - target.y);
+          return dx + dy <= radius;
+        });
+      }
+
+      if (objective.type === 'item_retrieval') {
+        return event.type === 'inventory_changed'
+          && (!event.itemId || String(event.itemId ?? '').trim() === String(objective.itemId ?? '').trim());
+      }
+
+      if (objective.type === 'delivery') {
+        return event.type === 'talk_to_npc' && String(event.npcId ?? '').trim() === String(objective.toNpcId ?? '').trim();
+      }
+
+      return false;
+    };
+
+    for (const objective of step.objectives) {
+      const objectiveId = String(objective?.id ?? '').trim();
+      if (!objectiveId) {
+        continue;
+      }
+
+      const required = getObjectiveRequiredCount(objective);
+      const current = Math.max(0, Math.floor(Number(nextObjectiveCounts[objectiveId] ?? 0)));
+      if (current >= required) {
+        continue;
+      }
+
+      if (!doesEventMatch(objective) || !isConstraintSatisfied(objective)) {
+        continue;
+      }
+
+      let next = current;
+      if (objective.type === 'talk_to_npc' || objective.type === 'travel') {
+        next = required;
+      } else if (objective.type === 'item_retrieval') {
+        next = Math.min(required, getInventoryItemCount(player, objective.itemId));
+      } else if (objective.type === 'delivery') {
+        const remaining = required - current;
+        const available = getInventoryItemCount(player, objective.itemId);
+        const deliverQuantity = Math.max(0, Math.min(remaining, available));
+        if (deliverQuantity <= 0) {
+          continue;
+        }
+
+        const removed = removeItemFromInventory(player, objective.itemId, deliverQuantity);
+        if (!removed) {
+          continue;
+        }
+
+        next = Math.min(required, current + deliverQuantity);
+      } else {
+        next = Math.min(required, current + Math.max(1, Math.floor(Number(event.amount ?? 1))));
+      }
+
+      if (next === current) {
+        continue;
+      }
+
+      nextObjectiveCounts[objectiveId] = next;
+      changed = true;
     }
+
+    if (!changed) {
+      continue;
+    }
+
+    player.quests.active[quest.id] = {
+      ...progress,
+      objectiveCounts: nextObjectiveCounts,
+      updatedAt: Date.now(),
+    };
+
+    const currentStepComplete = isQuestStepComplete(step, nextObjectiveCounts);
+    if (currentStepComplete) {
+      const nextStepIndex = progress.stepIndex + 1;
+      if (nextStepIndex < steps.length) {
+        player.quests.active[quest.id].stepIndex = nextStepIndex;
+        sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: step ${nextStepIndex} complete.`, quest.id, 'step_complete');
+      } else {
+        sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: objective complete. Return to ${npc.name}.`, quest.id, 'step_complete');
+      }
+      sendQuestJournalToPlayer(player);
+      continue;
+    }
+
+    const progressRecord = getQuestProgressRecord(player, quest.id);
+    if (progressRecord) {
+      const requiredCount = getQuestRequiredCount(quest);
+      sendQuestProgressToPlayer(player, `[Quest] ${quest.title}: ${progressRecord.count}/${requiredCount}.`, quest.id, 'progress');
+      sendQuestJournalToPlayer(player);
+    }
+  }
+}
+
+function applyQuestObjectiveProgress(player, objectiveType, objectiveTargetId, amount = 1) {
+  const safeTargetId = String(objectiveTargetId ?? '').trim();
+  const objectiveCount = Math.max(1, Math.floor(Number(amount ?? 1)));
+  if (!safeTargetId) {
+    return;
+  }
+
+  if (objectiveType === 'kill') {
+    applyQuestProgressEvent(player, {
+      type: 'kill',
+      targetId: safeTargetId,
+      amount: objectiveCount,
+      tileX: player.tileX,
+      tileY: player.tileY,
+    });
+    return;
+  }
+
+  if (objectiveType === 'gather') {
+    applyQuestProgressEvent(player, {
+      type: 'gather',
+      itemId: safeTargetId,
+      amount: objectiveCount,
+      tileX: player.tileX,
+      tileY: player.tileY,
+    });
   }
 }
 
@@ -4320,6 +5704,9 @@ function getObjectSnapshot() {
 }
 
 function makeSnapshot(now, viewerPlayerId = null) {
+  const viewerPlayer = viewerPlayerId
+    ? clients.get(viewerPlayerId)?.player ?? null
+    : null;
   const players = {};
 
   for (const [id, client] of clients.entries()) {
@@ -4383,7 +5770,7 @@ function makeSnapshot(now, viewerPlayerId = null) {
   return {
     players,
     nodes: getNodeSnapshot(now),
-    npcs: getNpcSnapshot(),
+    npcs: getNpcSnapshot(viewerPlayer),
     objects: getObjectSnapshot(),
     shops: getShopSnapshot(),
     enemies: getEnemySnapshot(now),
@@ -4496,7 +5883,16 @@ setInterval(() => {
 
   for (const client of clients.values()) {
     normalizePlayerContainersForCurrentItems(client.player);
+    const previousTileX = client.player.tileX;
+    const previousTileY = client.player.tileY;
     stepPlayerIfPossible(client.player, now);
+    if (client.player.tileX !== previousTileX || client.player.tileY !== previousTileY) {
+      applyQuestProgressEvent(client.player, {
+        type: 'travel',
+        tileX: client.player.tileX,
+        tileY: client.player.tileY,
+      });
+    }
     processInteraction(client.player, now);
     processPlayerCombat(client.player, now);
     processPlayerHealthRegeneration(client.player, now);
@@ -4570,6 +5966,8 @@ wss.on('connection', (socket) => {
         ...makeSnapshot(Date.now(), id),
       }),
     );
+
+    sendQuestJournalToPlayer(player);
 
     broadcast({
       type: 'playerJoined',
@@ -4955,21 +6353,92 @@ wss.on('connection', (socket) => {
       }
 
       if (message.type === 'npcTalk') {
-        const result = handleNpcTalk(player, message.npcId, {
-          getNpcById,
-          isWithinNpcRange,
-          getNpcQuestStatus,
-          startNpcQuestForPlayer,
-          getQuestProgressRecord,
-          completeNpcQuestForPlayer,
-        });
-        if (!result.handled) {
+        const npcId = String(message.npcId ?? '').trim();
+        const npc = getNpcById(npcId);
+        if (!npc || !isWithinNpcRange(player, npc)) {
           return;
         }
 
-        if (result.chatText) {
-          sendChatToSocket(socket, result.chatText);
+        if (npcId) {
+          applyQuestProgressEvent(player, {
+            type: 'talk_to_npc',
+            npcId,
+            tileX: player.tileX,
+            tileY: player.tileY,
+          });
         }
+
+        const dialogueQuest = selectNpcDialogueQuest(player, npc);
+        const dialogue = buildQuestDialogueState(player, npc, dialogueQuest);
+        sendQuestDialogueToSocket(socket, dialogue);
+        sendQuestJournalToPlayer(player);
+        return;
+      }
+
+      if (message.type === 'questDialogueAction') {
+        const npcId = String(message.npcId ?? '').trim();
+        const action = String(message.action ?? '').trim();
+        const requestedQuestId = String(message.questId ?? '').trim();
+        const npc = getNpcById(npcId);
+        if (!npc || !isWithinNpcRange(player, npc)) {
+          return;
+        }
+
+        const quest = selectNpcDialogueQuest(player, npc, requestedQuestId);
+        if (!quest) {
+          sendQuestDialogueToSocket(socket, {
+            open: false,
+            npcId,
+            npcName: npc.name,
+            questId: null,
+            mode: 'ambient',
+            text: '',
+            options: [],
+          });
+          return;
+        }
+
+        if (requestedQuestId && requestedQuestId !== quest.id) {
+          return;
+        }
+
+        const status = getNpcQuestStatus(player, quest);
+        const dialogue = buildQuestDialogueState(player, npc, quest);
+        const allowedActions = new Set(dialogue.options.map((option) => option.action));
+        if (!allowedActions.has(action)) {
+          return;
+        }
+
+        if (action === 'accept' && status === 'not_started') {
+          startNpcQuestForPlayer(player, npc, quest);
+        } else if (action === 'turnin' && status === 'completable') {
+          completeNpcQuestForPlayer(player, npc, quest);
+        }
+
+        if (action === 'close' || action === 'decline' || action === 'continue') {
+          sendQuestDialogueToSocket(socket, {
+            open: false,
+            npcId,
+            npcName: npc.name,
+            questId: quest.id,
+            mode: 'ambient',
+            text: '',
+            options: [],
+          });
+          sendQuestJournalToPlayer(player);
+          return;
+        }
+
+        const updatedDialogue = buildQuestDialogueState(player, npc, quest);
+        sendQuestDialogueToSocket(socket, updatedDialogue);
+        sendQuestJournalToPlayer(player);
+        return;
+      }
+
+      if (message.type === 'questJournalSelect') {
+        const questId = String(message.questId ?? '').trim();
+        player.questJournalSelectedQuestId = questId || null;
+        sendQuestJournalToPlayer(player);
         return;
       }
 
@@ -5049,6 +6518,15 @@ wss.on('connection', (socket) => {
           stationType: station.stationType,
         });
 
+        applyQuestProgressEvent(player, {
+          type: 'interact_object',
+          objectId: objectEntry.id,
+          objectTypeId: objectEntry.objectTypeId,
+          tileX: player.tileX,
+          tileY: player.tileY,
+          amount: 1,
+        });
+
         sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
         return;
       }
@@ -5092,6 +6570,15 @@ wss.on('connection', (socket) => {
           socket,
           `[Crafting] Crafted ${result.recipe.name} x${result.craftedCount}${result.partial ? ' (stopped early)' : ''}. Outputs: ${outputSummary}.`,
         );
+
+        applyQuestProgressEvent(player, {
+          type: 'interact_object',
+          objectId: objectEntry.id,
+          objectTypeId: objectEntry.objectTypeId,
+          tileX: player.tileX,
+          tileY: player.tileY,
+          amount: Math.max(1, Math.floor(Number(result.craftedCount ?? 1))),
+        });
 
         sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
         return;

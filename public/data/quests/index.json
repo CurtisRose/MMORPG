@@ -1,0 +1,100 @@
+[
+  {
+    "id": "quest-chain-forge-trial",
+    "startNpcId": "npc-shopkeeper-3",
+    "steps": [
+      {
+        "id": "step-retrieve",
+        "objectives": [
+          {
+            "id": "retrieve-tin",
+            "type": "item_retrieval"
+          }
+        ]
+      },
+      {
+        "id": "step-anvil",
+        "objectives": [
+          {
+            "id": "use-anvil",
+            "type": "interact_object"
+          }
+        ]
+      },
+      {
+        "id": "step-report",
+        "objectives": [
+          {
+            "id": "report-joseph",
+            "type": "talk_to_npc"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "quest-delivery-copper",
+    "startNpcId": "npc-shopkeeper-bob",
+    "steps": [
+      {
+        "id": "step-gather",
+        "objectives": [
+          {
+            "id": "gather-copper",
+            "type": "gather",
+            "zoneId": "mining-yard"
+          }
+        ]
+      },
+      {
+        "id": "step-deliver",
+        "objectives": [
+          {
+            "id": "deliver-copper",
+            "type": "delivery"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "quest-npc-villager-1",
+    "startNpcId": "npc-villager-1",
+    "steps": [
+      {
+        "id": "step-1",
+        "objectives": [
+          {
+            "id": "kill-goblins",
+            "type": "kill"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "quest-travel-outskirts",
+    "startNpcId": "npc-shopkeeper-2",
+    "steps": [
+      {
+        "id": "step-scout",
+        "objectives": [
+          {
+            "id": "travel-outskirts",
+            "type": "travel",
+            "zoneId": "goblin-outskirts"
+          }
+        ]
+      },
+      {
+        "id": "step-report",
+        "objectives": [
+          {
+            "id": "report-frank",
+            "type": "talk_to_npc"
+          }
+        ]
+      }
+    ]
+  }
+]

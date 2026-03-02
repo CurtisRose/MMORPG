@@ -15,6 +15,9 @@ import {
   type InventoryState,
   MultiplayerClient,
   type NpcState,
+  type QuestDialogueState,
+  type QuestJournalState,
+  type QuestNotificationState,
   type RemotePlayerState,
   type ShopState,
   type WorldObjectState,
@@ -29,6 +32,9 @@ import { createBankPanel } from '../ui/panels/bankPanel';
 import { createCharacterPanel } from '../ui/panels/characterPanel';
 import { createChatPanel } from '../ui/panels/chatPanel';
 import { createCraftingPanel } from '../ui/panels/craftingPanel';
+import { createQuestDialoguePanel } from '../ui/panels/questDialoguePanel';
+import { createQuestJournalPanel } from '../ui/panels/questJournalPanel';
+import { createQuestNotificationFeed } from '../ui/panels/questNotificationFeed';
 import { createShopPanel } from '../ui/panels/shopPanel';
 import {
   type ClickFeedbackKind,
@@ -70,6 +76,9 @@ const DIAGONAL_MOVE_DURATION_MS = Math.round(CARDINAL_MOVE_DURATION_MS * 1.65);
 const CARDINAL_MOVE_TILES_PER_MS = 1 / CARDINAL_MOVE_DURATION_MS;
 const DIAGONAL_MOVE_TILES_PER_MS = Math.SQRT2 / DIAGONAL_MOVE_DURATION_MS;
 const HEALTH_BAR_VISIBLE_MS = 3000;
+const ACTIVE_QUESTS_EXPANDED_STORAGE_KEY = 'game-active-quests-expanded-v1';
+const QUEST_DIALOGUE_RETRY_INTERVAL_MS = 350;
+const QUEST_DIALOGUE_RETRY_TIMEOUT_MS = 9000;
 const HEALTH_BAR_WIDTH = 26;
 const HEALTH_BAR_HEIGHT = 4;
 const DEBUG_HUD_VISIBLE_BY_DEFAULT =
@@ -265,11 +274,13 @@ export class WorldScene extends Phaser.Scene {
   private actionStatusText!: Phaser.GameObjects.Text;
   private debugHudVisible = DEBUG_HUD_VISIBLE_BY_DEFAULT;
   private debugToggleKey: Phaser.Input.Keyboard.Key | null = null;
+  private questJournalToggleKey: Phaser.Input.Keyboard.Key | null = null;
   private lastStateUpdateAt: number | null = null;
   private snapshotCount = 0;
   private remotePlayers = new Map<string, RemotePlayerVisual>();
   private worldNodes = new Map<string, WorldNodeVisual>();
   private worldNpcs = new Map<string, NpcVisual>();
+  private npcQuestMarkers = new Map<string, Phaser.GameObjects.Text>();
   private worldObjects = new Map<string, WorldObjectVisual>();
   private worldEnemies = new Map<string, EnemyVisual>();
   private worldGroundItems = new Map<string, GroundItemVisual>();
@@ -321,6 +332,23 @@ export class WorldScene extends Phaser.Scene {
   private craftingRecipes: CraftingRecipeState[] = [];
   private craftingVisible = false;
   private lastRenderedCraftingSignature: string | null = null;
+  private questJournalRootElement: HTMLDivElement | null = null;
+  private questJournalActiveContentElement: HTMLDivElement | null = null;
+  private questJournalCompletedContentElement: HTMLDivElement | null = null;
+  private questJournalDetailsContentElement: HTMLDivElement | null = null;
+  private questDialogueRootElement: HTMLDivElement | null = null;
+  private questDialogueTextContentElement: HTMLDivElement | null = null;
+  private questDialogueOptionsRowElement: HTMLDivElement | null = null;
+  private questNotificationContentElement: HTMLDivElement | null = null;
+  private questJournalState: QuestJournalState | null = null;
+  private questDialogueState: QuestDialogueState | null = null;
+  private pendingQuestDialogueNpcId: string | null = null;
+  private nextQuestDialogueRetryAt = 0;
+  private questDialogueRetryTimeoutAt = 0;
+  private selectedQuestJournalQuestId: string | null = null;
+  private questNotifications: QuestNotificationState[] = [];
+  private expandedActiveQuestIds = new Set<string>();
+  private activeQuestExpansionLoaded = false;
   private interactionTargetRuntime = new InteractionTargetRuntime();
   private pendingInteractionController = new PendingInteractionController();
   private localHealthBar: Phaser.GameObjects.Graphics | null = null;
@@ -379,6 +407,15 @@ export class WorldScene extends Phaser.Scene {
     },
     handleChatMessage: (message: ChatMessageState) => {
       this.handleChatMessage(message);
+    },
+    handleQuestJournal: (journal: QuestJournalState) => {
+      this.handleQuestJournal(journal);
+    },
+    handleQuestDialogue: (dialogue: QuestDialogueState) => {
+      this.handleQuestDialogue(dialogue);
+    },
+    handleQuestNotification: (notification: QuestNotificationState) => {
+      this.handleQuestNotification(notification);
     },
     openShop: (shopId: string) => {
       this.openShop(shopId);
@@ -466,6 +503,7 @@ export class WorldScene extends Phaser.Scene {
 
 
     this.debugToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
+  this.questJournalToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.J);
     this.initDebugHudPanel();
 
     this.actionStatusText = this.add
@@ -484,6 +522,9 @@ export class WorldScene extends Phaser.Scene {
     this.initShopUi();
     this.initBankUi();
     this.initCraftingUi();
+    this.initQuestJournalUi();
+    this.initQuestDialogueUi();
+    this.initQuestNotificationFeedUi();
     this.appendSystemChatMessage('Welcome to the world.');
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
@@ -539,6 +580,12 @@ export class WorldScene extends Phaser.Scene {
       }
     }
 
+    if (this.questJournalToggleKey && Phaser.Input.Keyboard.JustDown(this.questJournalToggleKey)) {
+      if (!this.isTextInputFocused()) {
+        this.toggleQuestJournal();
+      }
+    }
+
     this.updatePlayerSmoothing(delta);
 
     if (
@@ -552,9 +599,51 @@ export class WorldScene extends Phaser.Scene {
     this.renderHealthBars(Date.now());
     this.updateHarvestingActionIndicator(delta);
     this.updateRemoteHarvestingActionIndicators(delta);
+    this.updatePendingQuestDialogueRequest();
 
     this.renderActionStatus();
     this.renderDebugHud();
+  }
+
+  private beginQuestDialogueRequest(npcId: string): void {
+    const now = Date.now();
+    this.pendingQuestDialogueNpcId = npcId;
+    this.nextQuestDialogueRetryAt = now;
+    this.questDialogueRetryTimeoutAt = now + QUEST_DIALOGUE_RETRY_TIMEOUT_MS;
+  }
+
+  private clearQuestDialogueRequest(): void {
+    this.pendingQuestDialogueNpcId = null;
+    this.nextQuestDialogueRetryAt = 0;
+    this.questDialogueRetryTimeoutAt = 0;
+  }
+
+  private updatePendingQuestDialogueRequest(): void {
+    if (!this.pendingQuestDialogueNpcId) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now >= this.questDialogueRetryTimeoutAt) {
+      if (this.questDialogueState?.open && this.questDialogueState.npcId === this.pendingQuestDialogueNpcId) {
+        this.questDialogueState = {
+          ...this.questDialogueState,
+          text: 'Unable to start dialogue. Move next to the NPC and try again.',
+          options: [{ id: 'close', label: 'Close', action: 'close' }],
+        };
+        this.renderQuestDialoguePanel();
+      }
+
+      this.clearQuestDialogueRequest();
+      return;
+    }
+
+    if (now < this.nextQuestDialogueRetryAt) {
+      return;
+    }
+
+    this.multiplayerClient.sendNpcTalk(this.pendingQuestDialogueNpcId);
+    this.nextQuestDialogueRetryAt = now + QUEST_DIALOGUE_RETRY_INTERVAL_MS;
   }
 
   private createHarvestIndicatorTextures(): void {
@@ -1111,6 +1200,46 @@ export class WorldScene extends Phaser.Scene {
       },
       defaultTextureKey: PLAYER_TEXTURE_KEY,
     });
+
+    this.syncNpcQuestMarkers();
+  }
+
+  private syncNpcQuestMarkers(): void {
+    for (const [npcId, npcVisual] of this.worldNpcs.entries()) {
+      const hasAvailableQuest = Boolean(npcVisual.state?.questAvailable);
+      const marker = this.npcQuestMarkers.get(npcId);
+
+      if (!hasAvailableQuest) {
+        marker?.destroy();
+        this.npcQuestMarkers.delete(npcId);
+        continue;
+      }
+
+      const markerX = npcVisual.sprite.x;
+      const markerY = npcVisual.sprite.y - TILE_SIZE * 0.9;
+      if (marker) {
+        marker.setPosition(markerX, markerY);
+      } else {
+        const createdMarker = this.add.text(markerX, markerY, '!', {
+          fontFamily: 'monospace',
+          fontSize: '18px',
+          color: '#ffe07a',
+          stroke: '#000000',
+          strokeThickness: 3,
+        });
+        createdMarker.setOrigin(0.5, 1).setDepth(7);
+        this.npcQuestMarkers.set(npcId, createdMarker);
+      }
+    }
+
+    for (const [npcId, marker] of this.npcQuestMarkers.entries()) {
+      if (this.worldNpcs.has(npcId)) {
+        continue;
+      }
+
+      marker.destroy();
+      this.npcQuestMarkers.delete(npcId);
+    }
   }
 
   private applyObjectSnapshot(objects: Record<string, WorldObjectState>): void {
@@ -2065,6 +2194,22 @@ export class WorldScene extends Phaser.Scene {
 
   private talkToNpc(npcId: string): void {
     this.hideContextMenu();
+
+    const npcVisual = this.worldNpcs.get(npcId);
+    this.beginQuestDialogueRequest(npcId);
+
+    const localTile = this.localTilePosition;
+    if (npcVisual && localTile) {
+      const distance =
+        Math.abs(Math.round(localTile.x) - npcVisual.state.tileX)
+        + Math.abs(Math.round(localTile.y) - npcVisual.state.tileY);
+      if (distance <= 1) {
+        this.multiplayerClient.sendNpcTalk(npcId);
+        this.nextQuestDialogueRetryAt = Date.now() + QUEST_DIALOGUE_RETRY_INTERVAL_MS;
+        return;
+      }
+    }
+
     this.startNpcAction(npcId, 'talk');
   }
 
@@ -2436,6 +2581,341 @@ export class WorldScene extends Phaser.Scene {
     this.appendChatLine(message.text);
   }
 
+  private handleQuestJournal(journal: QuestJournalState): void {
+    this.questJournalState = journal;
+    this.selectedQuestJournalQuestId = journal.selectedQuestId;
+    this.renderQuestJournalPanel();
+    this.renderQuestNotificationFeed();
+  }
+
+  private handleQuestDialogue(dialogue: QuestDialogueState): void {
+    if (this.pendingQuestDialogueNpcId && dialogue.npcId === this.pendingQuestDialogueNpcId) {
+      this.clearQuestDialogueRequest();
+    }
+
+    this.questDialogueState = dialogue;
+    if (!dialogue.open) {
+      this.closeQuestDialogue(false);
+      return;
+    }
+
+    this.openQuestDialogue();
+    this.renderQuestDialoguePanel();
+  }
+
+  private handleQuestNotification(notification: QuestNotificationState): void {
+    this.questNotifications.push(notification);
+    if (this.questNotifications.length > 12) {
+      this.questNotifications.shift();
+    }
+  }
+
+  private getActiveQuestsExpansionStorageKey(): string {
+    const username = String(window.localStorage.getItem('game-auth-username') ?? '').trim().toLowerCase();
+    return `${ACTIVE_QUESTS_EXPANDED_STORAGE_KEY}:${username || 'guest'}`;
+  }
+
+  private loadActiveQuestExpansionState(): void {
+    if (this.activeQuestExpansionLoaded) {
+      return;
+    }
+
+    this.activeQuestExpansionLoaded = true;
+
+    try {
+      const raw = window.localStorage.getItem(this.getActiveQuestsExpansionStorageKey());
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) {
+        this.expandedActiveQuestIds = new Set(parsed.map((entry) => String(entry ?? '').trim()).filter(Boolean));
+      }
+    } catch {
+      this.expandedActiveQuestIds = new Set();
+    }
+  }
+
+  private saveActiveQuestExpansionState(): void {
+    try {
+      window.localStorage.setItem(
+        this.getActiveQuestsExpansionStorageKey(),
+        JSON.stringify(Array.from(this.expandedActiveQuestIds.values())),
+      );
+    } catch {
+      return;
+    }
+  }
+
+  private toggleActiveQuestExpanded(questId: string): void {
+    const safeQuestId = String(questId ?? '').trim();
+    if (!safeQuestId) {
+      return;
+    }
+
+    this.loadActiveQuestExpansionState();
+    if (this.expandedActiveQuestIds.has(safeQuestId)) {
+      this.expandedActiveQuestIds.delete(safeQuestId);
+    } else {
+      this.expandedActiveQuestIds.add(safeQuestId);
+    }
+
+    this.saveActiveQuestExpansionState();
+    this.renderQuestNotificationFeed();
+  }
+
+  private openQuestJournal(): void {
+    if (this.questJournalRootElement) {
+      this.questJournalRootElement.style.display = 'flex';
+    }
+  }
+
+  private toggleQuestJournal(): void {
+    if (!this.questJournalRootElement) {
+      return;
+    }
+
+    const isOpen = this.questJournalRootElement.style.display === 'flex';
+    if (isOpen) {
+      this.closeQuestJournal();
+      return;
+    }
+
+    this.openQuestJournal();
+    if (this.questJournalState) {
+      this.renderQuestJournalPanel();
+    }
+  }
+
+  private closeQuestJournal(): void {
+    if (this.questJournalRootElement) {
+      this.questJournalRootElement.style.display = 'none';
+    }
+  }
+
+  private openQuestDialogue(): void {
+    if (this.questDialogueRootElement) {
+      this.questDialogueRootElement.style.display = 'flex';
+    }
+  }
+
+  private closeQuestDialogue(emitCloseAction = true): void {
+    this.clearQuestDialogueRequest();
+
+    if (emitCloseAction && this.questDialogueState?.npcId) {
+      this.multiplayerClient.sendQuestDialogueAction(
+        this.questDialogueState.npcId,
+        'close',
+        this.questDialogueState.questId ?? undefined,
+      );
+    }
+
+    if (this.questDialogueRootElement) {
+      this.questDialogueRootElement.style.display = 'none';
+    }
+
+  }
+
+  private renderQuestJournalPanel(): void {
+    if (!this.questJournalState) {
+      this.closeQuestJournal();
+      return;
+    }
+
+    if (this.questJournalActiveContentElement) {
+      this.questJournalActiveContentElement.textContent = this.questJournalState.active.length > 0
+        ? this.questJournalState.active.map((quest) => `${quest.title} [${quest.status}]`).join('\n')
+        : 'No active quests.';
+    }
+
+    if (this.questJournalCompletedContentElement) {
+      this.questJournalCompletedContentElement.textContent = this.questJournalState.completed.length > 0
+        ? this.questJournalState.completed.map((quest) => quest.title).join('\n')
+        : 'No completed quests.';
+    }
+
+    if (!this.questJournalDetailsContentElement) {
+      return;
+    }
+
+    const selectedQuest = this.questJournalState.active.find((entry) => entry.questId === this.selectedQuestJournalQuestId)
+      ?? this.questJournalState.completed.find((entry) => entry.questId === this.selectedQuestJournalQuestId)
+      ?? this.questJournalState.active[0]
+      ?? this.questJournalState.completed[0]
+      ?? null;
+
+    if (!selectedQuest) {
+      this.questJournalDetailsContentElement.textContent = 'Select a quest to view details.';
+      return;
+    }
+
+    const objectiveLines = selectedQuest.steps.flatMap((step) =>
+      step.objectives.map((objective) =>
+        `- ${objective.description}: ${objective.progress}/${objective.required}`,
+      ),
+    );
+
+    this.questJournalDetailsContentElement.textContent = [
+      selectedQuest.title,
+      `Status: ${selectedQuest.status}`,
+      `Current step: ${selectedQuest.currentStepIndex + 1}`,
+      'Objectives:',
+      ...(objectiveLines.length > 0 ? objectiveLines : ['- None']),
+    ].join('\n');
+
+    if (selectedQuest.questId !== this.selectedQuestJournalQuestId) {
+      this.selectedQuestJournalQuestId = selectedQuest.questId;
+      this.multiplayerClient.sendQuestJournalSelect(selectedQuest.questId);
+    }
+  }
+
+  private isTextInputFocused(): boolean {
+    const activeElement = document.activeElement;
+    if (!activeElement) {
+      return false;
+    }
+
+    const tagName = activeElement.tagName;
+    if (tagName === 'INPUT' || tagName === 'TEXTAREA') {
+      return true;
+    }
+
+    return (activeElement as HTMLElement).isContentEditable;
+  }
+
+  private formatIdentifierForUi(identifier: string, fallback: string): string {
+    const safeIdentifier = String(identifier ?? '').trim();
+    if (!safeIdentifier) {
+      return fallback;
+    }
+
+    return safeIdentifier
+      .replace(/^(npc|quest|item|resource|enemy|minion)[-_]/i, '')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (character) => character.toUpperCase());
+  }
+
+  private renderQuestDialoguePanel(): void {
+    if (!this.questDialogueState || !this.questDialogueState.open) {
+      this.closeQuestDialogue(false);
+      return;
+    }
+
+    if (this.questDialogueTextContentElement) {
+      this.questDialogueTextContentElement.textContent = `[${this.questDialogueState.npcName}] ${this.questDialogueState.text}`;
+    }
+
+    if (!this.questDialogueOptionsRowElement) {
+      return;
+    }
+
+    this.questDialogueOptionsRowElement.replaceChildren();
+    const actionableOptions = this.questDialogueState.options.filter((option) => option.action !== 'close');
+    for (const option of actionableOptions) {
+      const button = document.createElement('button');
+      button.textContent = option.label;
+      button.style.background = 'rgba(64, 58, 41, 0.95)';
+      button.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      button.style.color = '#f0e5c1';
+      button.style.fontFamily = 'monospace';
+      button.style.fontSize = '12px';
+      button.style.padding = '4px 8px';
+      button.style.cursor = 'pointer';
+      button.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        button.disabled = true;
+        this.multiplayerClient.sendQuestDialogueAction(
+          this.questDialogueState?.npcId ?? '',
+          option.action,
+          this.questDialogueState?.questId ?? undefined,
+          option.id,
+        );
+
+        if (option.action === 'close' || option.action === 'decline' || option.action === 'continue') {
+          this.closeQuestDialogue(false);
+        }
+      });
+      this.questDialogueOptionsRowElement?.append(button);
+    }
+  }
+
+  private renderQuestNotificationFeed(): void {
+    if (!this.questNotificationContentElement) {
+      return;
+    }
+
+    this.loadActiveQuestExpansionState();
+    this.questNotificationContentElement.replaceChildren();
+
+    const activeQuests = this.questJournalState?.active ?? [];
+    if (activeQuests.length === 0) {
+      this.questNotificationContentElement.textContent = 'No active quests.';
+      return;
+    }
+
+    for (const quest of activeQuests) {
+      const card = document.createElement('div');
+      card.style.border = '1px solid rgba(150, 138, 102, 0.55)';
+      card.style.background = 'rgba(0, 0, 0, 0.3)';
+      card.style.marginBottom = '6px';
+
+      const headerButton = document.createElement('button');
+      const isExpanded = this.expandedActiveQuestIds.has(quest.questId);
+      headerButton.textContent = `${isExpanded ? '▾' : '▸'} ${quest.title} [${quest.status}]`;
+      headerButton.style.width = '100%';
+      headerButton.style.textAlign = 'left';
+      headerButton.style.background = 'rgba(64, 58, 41, 0.95)';
+      headerButton.style.border = '0';
+      headerButton.style.borderBottom = isExpanded ? '1px solid rgba(150, 138, 102, 0.55)' : '0';
+      headerButton.style.color = '#f0e5c1';
+      headerButton.style.fontFamily = 'monospace';
+      headerButton.style.fontSize = '12px';
+      headerButton.style.padding = '6px';
+      headerButton.style.cursor = 'pointer';
+      headerButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.toggleActiveQuestExpanded(quest.questId);
+      });
+
+      card.append(headerButton);
+
+      if (isExpanded) {
+        const body = document.createElement('div');
+        body.style.padding = '6px';
+        body.style.whiteSpace = 'pre-line';
+
+        const objectiveLines = quest.steps.flatMap((step) =>
+          step.objectives.map((objective) => `- ${objective.description}: ${objective.progress}/${objective.required}`),
+        );
+        const requirementLines = quest.requirements.map((requirement) =>
+          `${requirement.met ? '✓' : '✗'} ${requirement.label}`,
+        );
+        const rewardLines = [
+          ...(Number.isFinite(Number(quest.rewards.gold)) ? [`- Gold: ${Math.max(0, Math.floor(Number(quest.rewards.gold)))}`] : []),
+          ...(Array.isArray(quest.rewards.items)
+            ? quest.rewards.items.map((item) => `- Item: ${this.formatIdentifierForUi(item.itemId, 'Item')} x${item.quantity}`)
+            : []),
+          ...(Array.isArray(quest.rewards.xp)
+            ? quest.rewards.xp.map((xp) => `- XP: ${this.formatIdentifierForUi(xp.skill, 'Skill')} +${xp.amount}`)
+            : []),
+        ];
+
+        body.textContent = [
+          `Current step: ${quest.currentStepIndex + 1}`,
+          'Objectives:',
+          ...(objectiveLines.length > 0 ? objectiveLines : ['- None']),
+          ...(requirementLines.length > 0 ? ['', 'Requirements:', ...requirementLines] : []),
+          ...(rewardLines.length > 0 ? ['', 'Rewards:', ...rewardLines] : []),
+        ].join('\n');
+
+        card.append(body);
+      }
+
+      this.questNotificationContentElement.append(card);
+    }
+  }
+
   private openShop(shopId: string): void {
     this.activeShopId = shopId;
     this.lastRenderedShopSignature = null;
@@ -2509,6 +2989,45 @@ export class WorldScene extends Phaser.Scene {
 
     this.craftingRootElement = panel.root;
     this.craftingContentElement = panel.content;
+  }
+
+  private initQuestJournalUi(): void {
+    const panel = createQuestJournalPanel(() => {
+      this.closeQuestJournal();
+    });
+
+    if (!panel) {
+      return;
+    }
+
+    this.questJournalRootElement = panel.root;
+    this.questJournalActiveContentElement = panel.activeContent;
+    this.questJournalCompletedContentElement = panel.completedContent;
+    this.questJournalDetailsContentElement = panel.detailsContent;
+  }
+
+  private initQuestDialogueUi(): void {
+    const panel = createQuestDialoguePanel(() => {
+      this.closeQuestDialogue();
+    });
+
+    if (!panel) {
+      return;
+    }
+
+    this.questDialogueRootElement = panel.root;
+    this.questDialogueTextContentElement = panel.textContent;
+    this.questDialogueOptionsRowElement = panel.optionsRow;
+  }
+
+  private initQuestNotificationFeedUi(): void {
+    const panel = createQuestNotificationFeed();
+    if (!panel) {
+      return;
+    }
+
+    this.questNotificationContentElement = panel.content;
+    this.renderQuestNotificationFeed();
   }
 
   private openCrafting(state: CraftingOpenState): void {
@@ -2923,17 +3442,15 @@ export class WorldScene extends Phaser.Scene {
     context.imageSmoothingEnabled = false;
     context.clearRect(0, 0, 16, 16);
 
-    if (resolvedKey === 'logs' || resolvedKey === 'birch_logs') {
+    if (resolvedKey === 'birch_logs') {
       context.fillStyle = '#6e4f2f';
       context.fillRect(3, 8, 10, 3);
       context.fillStyle = '#9a7444';
       context.fillRect(2, 5, 10, 3);
       context.fillStyle = '#c79b62';
       context.fillRect(4, 3, 8, 2);
-      if (resolvedKey === 'birch_logs') {
-        context.fillStyle = '#9bbd6f';
-        context.fillRect(2, 11, 12, 1);
-      }
+      context.fillStyle = '#9bbd6f';
+      context.fillRect(2, 11, 12, 1);
     } else if (resolvedKey === 'oak_logs') {
       context.fillStyle = '#5d3f23';
       context.fillRect(3, 8, 10, 3);
@@ -3960,6 +4477,10 @@ export class WorldScene extends Phaser.Scene {
 
     this.remotePlayers.clear();
     this.worldNodes.clear();
+    for (const marker of this.npcQuestMarkers.values()) {
+      marker.destroy();
+    }
+    this.npcQuestMarkers.clear();
     this.worldNpcs.clear();
     this.worldObjects.clear();
     this.worldEnemies.clear();

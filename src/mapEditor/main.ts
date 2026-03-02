@@ -7,7 +7,11 @@ type ToolMode = 'paint' | 'select';
 const WORLD_DATA_VERSION = 1;
 const MAX_HISTORY_STEPS = 100;
 const CANONICAL_WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
+const QUEST_INDEX_URL = `${import.meta.env.BASE_URL}data/quests/index.json`;
 const DEBUG_LOG_MAX_LINES = 160;
+const SIDEBAR_WIDTH_STORAGE_KEY = 'mapEditor.sidebarWidth';
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 720;
 
 type ResourcePlacement = {
   id: string;
@@ -44,22 +48,42 @@ type NpcPlacement = {
   tileY: number;
   examineText: string;
   talkText: string;
-  quest: NpcQuestPlacement | null;
+  questStartIds: string[];
 };
 
-type NpcQuestPlacement = {
+type QuestZoneRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type QuestZonePlacement = {
   id: string;
-  title: string;
-  missionText: string;
-  startText: string;
-  progressText: string;
-  completeText: string;
-  objectiveType: 'kill' | 'gather';
-  objectiveTargetId: string;
-  requiredCount: number;
-  rewardGold: number;
-  rewardItemId: string;
-  rewardItemQuantity: number;
+  name: string;
+  rects: QuestZoneRect[];
+};
+
+type QuestIndexObjective = {
+  type?: unknown;
+  zoneId?: unknown;
+  npcId?: unknown;
+  toNpcId?: unknown;
+  objectId?: unknown;
+  objectTypeId?: unknown;
+  targetId?: unknown;
+  tileX?: unknown;
+  tileY?: unknown;
+};
+
+type QuestIndexStep = {
+  objectives?: unknown;
+};
+
+type QuestIndexEntry = Record<string, unknown> & {
+  id?: unknown;
+  startNpcId?: unknown;
+  steps?: unknown;
 };
 
 type EditorChunkData = {
@@ -92,6 +116,17 @@ type ChunkHistory = {
 type SelectedTile = {
   worldTileX: number;
   worldTileY: number;
+};
+
+type QuestPreviewContext = {
+  questId: string | null;
+  zoneIds: Set<string>;
+  giverNpcIds: Set<string>;
+  targetNpcIds: Set<string>;
+  targetObjectIds: Set<string>;
+  targetObjectTypeIds: Set<string>;
+  targetMonsterTypeIds: Set<string>;
+  travelTiles: Array<{ tileX: number; tileY: number }>;
 };
 
 const TILE_TYPES = [
@@ -195,6 +230,7 @@ const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
   throw new Error('Map editor root not found');
 }
+const appElement = app;
 
 function requireElement<T extends Element>(selector: string, errorMessage: string): T {
   const element = document.querySelector<T>(selector);
@@ -230,6 +266,9 @@ const state: {
   isPainting: boolean;
   pendingStrokeSnapshot: ChunkSnapshot | null;
   selectedTile: SelectedTile | null;
+  questZones: QuestZonePlacement[];
+  questIndexEntries: QuestIndexEntry[];
+  questZoneIdsByQuestId: Map<string, Set<string>>;
   npcFormDirty: boolean;
   npcFormSelectionKey: string | null;
 } = {
@@ -250,6 +289,9 @@ const state: {
   isPainting: false,
   pendingStrokeSnapshot: null,
   selectedTile: null,
+  questZones: [],
+  questIndexEntries: [],
+  questZoneIdsByQuestId: new Map<string, Set<string>>(),
   npcFormDirty: false,
   npcFormSelectionKey: null,
 };
@@ -403,60 +445,39 @@ app.innerHTML = `
           <textarea id="selectionNpcTalk" rows="2" maxlength="220"></textarea>
         </div>
         <div class="row">
-          <label for="selectionNpcQuestEnabled">Quest</label>
-          <input id="selectionNpcQuestEnabled" type="checkbox" />
-        </div>
-        <div id="selectionNpcQuestFields" style="display:none;">
-          <div class="row">
-            <label for="selectionNpcQuestTitle">Quest Title</label>
-            <input id="selectionNpcQuestTitle" type="text" maxlength="80" />
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestMission">Mission</label>
-            <textarea id="selectionNpcQuestMission" rows="2" maxlength="220"></textarea>
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestStart">Quest Start</label>
-            <textarea id="selectionNpcQuestStart" rows="2" maxlength="220"></textarea>
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestProgress">Quest Progress</label>
-            <textarea id="selectionNpcQuestProgress" rows="2" maxlength="220"></textarea>
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestEnd">Quest End</label>
-            <textarea id="selectionNpcQuestEnd" rows="2" maxlength="220"></textarea>
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestObjectiveType">Objective</label>
-            <select id="selectionNpcQuestObjectiveType">
-              <option value="kill">Kill</option>
-              <option value="gather">Gather</option>
-            </select>
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestTarget">Target ID</label>
-            <input id="selectionNpcQuestTarget" type="text" maxlength="80" />
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestCount">Required</label>
-            <input id="selectionNpcQuestCount" type="number" min="1" step="1" value="1" />
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestRewardGold">Reward Gold</label>
-            <input id="selectionNpcQuestRewardGold" type="number" min="0" step="1" value="0" />
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestRewardItem">Reward Item</label>
-            <input id="selectionNpcQuestRewardItem" type="text" maxlength="80" />
-          </div>
-          <div class="row">
-            <label for="selectionNpcQuestRewardQty">Reward Qty</label>
-            <input id="selectionNpcQuestRewardQty" type="number" min="1" step="1" value="1" />
-          </div>
+          <label for="selectionNpcQuestStartIdsSelect">Quest Starts</label>
+          <select id="selectionNpcQuestStartIdsSelect" multiple size="6"></select>
         </div>
         <div class="row row-buttons"><button id="selectionNpcUpdate" class="secondary">Update NPC</button></div>
         <div class="row row-buttons"><button id="selectionNpcDelete" class="secondary">Delete NPC</button></div>
+      </div>
+      <div id="selectionZoneRow" style="display:none; margin-top:8px;">
+        <div class="row">
+          <label for="selectionZoneId">Zone ID</label>
+          <input id="selectionZoneId" type="text" maxlength="80" placeholder="zone-id" />
+        </div>
+        <div class="row">
+          <label for="selectionZoneName">Zone Name</label>
+          <input id="selectionZoneName" type="text" maxlength="120" placeholder="Zone Name" />
+        </div>
+        <div class="row">
+          <label for="selectionZoneX">X</label>
+          <input id="selectionZoneX" type="number" step="1" value="0" />
+        </div>
+        <div class="row">
+          <label for="selectionZoneY">Y</label>
+          <input id="selectionZoneY" type="number" step="1" value="0" />
+        </div>
+        <div class="row">
+          <label for="selectionZoneWidth">Width</label>
+          <input id="selectionZoneWidth" type="number" min="1" step="1" value="1" />
+        </div>
+        <div class="row">
+          <label for="selectionZoneHeight">Height</label>
+          <input id="selectionZoneHeight" type="number" min="1" step="1" value="1" />
+        </div>
+        <div class="row row-buttons"><button id="selectionZoneUpdate" class="secondary">Add/Update Zone</button></div>
+        <div class="row row-buttons"><button id="selectionZoneDelete" class="secondary">Delete Zone</button></div>
       </div>
     </div>
 
@@ -479,6 +500,184 @@ app.innerHTML = `
     </div>
 
     <div class="panel">
+      <h3>Quests</h3>
+      <div id="questEditorGui" class="quest-editor-gui">
+        <div class="row">
+          <label for="questEditorSelect">Quest List</label>
+          <select id="questEditorSelect" size="6"></select>
+        </div>
+        <div class="row">
+          <label for="questEditorId">Quest ID</label>
+          <input id="questEditorId" type="text" maxlength="120" placeholder="quest-id" />
+        </div>
+        <div class="row">
+          <label for="questEditorTitle">Title</label>
+          <input id="questEditorTitle" type="text" maxlength="120" placeholder="Quest title" />
+        </div>
+        <div class="row">
+          <label for="questEditorSummary">Summary</label>
+          <textarea id="questEditorSummary" rows="2" maxlength="320"></textarea>
+        </div>
+        <div class="row">
+          <label for="questEditorStartNpcId">Start NPC</label>
+          <input id="questEditorStartNpcId" type="text" maxlength="120" placeholder="optional npc id" />
+        </div>
+        <div class="row">
+          <label for="questEditorCooldownMs">Cooldown ms</label>
+          <input id="questEditorCooldownMs" type="number" min="0" step="1000" value="0" />
+        </div>
+        <div class="row">
+          <label for="questEditorRepeatable">Repeatable</label>
+          <input id="questEditorRepeatable" type="checkbox" />
+        </div>
+
+        <div class="note">Requirements</div>
+        <div class="row">
+          <label for="questReqQuestIds">Quest IDs</label>
+          <input id="questReqQuestIds" type="text" maxlength="280" placeholder="quest-a, quest-b" />
+        </div>
+        <div class="row">
+          <label for="questReqItems">Items</label>
+          <textarea id="questReqItems" rows="3" placeholder="itemId:quantity (one per line)"></textarea>
+        </div>
+        <div class="row">
+          <label for="questReqSkills">Skills</label>
+          <textarea id="questReqSkills" rows="3" placeholder="skill:level (one per line)"></textarea>
+        </div>
+
+        <div class="note">Rewards</div>
+        <div class="row">
+          <label for="questRewardGold">Gold</label>
+          <input id="questRewardGold" type="number" min="0" step="1" value="0" />
+        </div>
+        <div class="row">
+          <label for="questRewardUnlocks">Unlock IDs</label>
+          <input id="questRewardUnlocks" type="text" maxlength="280" placeholder="quest-x, quest-y" />
+        </div>
+        <div class="row">
+          <label for="questRewardItems">Items</label>
+          <textarea id="questRewardItems" rows="3" placeholder="itemId:quantity (one per line)"></textarea>
+        </div>
+        <div class="row">
+          <label for="questRewardXp">XP</label>
+          <textarea id="questRewardXp" rows="3" placeholder="skill:amount (one per line)"></textarea>
+        </div>
+
+        <div class="note">Chain</div>
+        <div class="row">
+          <label for="questChainNextIds">Next IDs</label>
+          <input id="questChainNextIds" type="text" maxlength="280" placeholder="quest-next-1, quest-next-2" />
+        </div>
+        <div class="row">
+          <label for="questChainAutoStart">Auto Start</label>
+          <input id="questChainAutoStart" type="checkbox" />
+        </div>
+
+        <div class="note">Steps</div>
+        <div class="row">
+          <label for="questStepSelect">Step List</label>
+          <select id="questStepSelect" size="4"></select>
+        </div>
+        <div class="row">
+          <label for="questStepId">Step ID</label>
+          <input id="questStepId" type="text" maxlength="120" />
+        </div>
+        <div class="row">
+          <label for="questStepDescription">Description</label>
+          <textarea id="questStepDescription" rows="2"></textarea>
+        </div>
+        <div class="row">
+          <label for="questStepCompletion">Completion</label>
+          <select id="questStepCompletion">
+            <option value="all">all</option>
+            <option value="any">any</option>
+          </select>
+        </div>
+        <div class="row row-buttons"><button id="questStepAdd" class="secondary">Add Step</button></div>
+        <div class="row row-buttons"><button id="questStepApply" class="secondary">Apply Step</button></div>
+        <div class="row row-buttons"><button id="questStepDelete" class="secondary">Delete Step</button></div>
+
+        <div class="note">Objectives (selected step)</div>
+        <div class="row">
+          <label for="questObjectiveSelect">Objective List</label>
+          <select id="questObjectiveSelect" size="5"></select>
+        </div>
+        <div class="row">
+          <label for="questObjectiveId">Objective ID</label>
+          <input id="questObjectiveId" type="text" maxlength="120" />
+        </div>
+        <div class="row">
+          <label for="questObjectiveType">Type</label>
+          <select id="questObjectiveType">
+            <option value="kill">kill</option>
+            <option value="gather">gather</option>
+            <option value="delivery">delivery</option>
+            <option value="travel">travel</option>
+            <option value="item_retrieval">item_retrieval</option>
+            <option value="interact_object">interact_object</option>
+            <option value="talk_to_npc">talk_to_npc</option>
+          </select>
+        </div>
+        <div class="row"><label for="questObjectiveTargetId">Target ID</label><input id="questObjectiveTargetId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveItemId">Item ID</label><input id="questObjectiveItemId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveCount">Count</label><input id="questObjectiveCount" type="number" min="0" step="1" value="1" /></div>
+        <div class="row"><label for="questObjectiveQuantity">Quantity</label><input id="questObjectiveQuantity" type="number" min="0" step="1" value="1" /></div>
+        <div class="row"><label for="questObjectiveZoneId">Zone ID</label><input id="questObjectiveZoneId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveNpcId">NPC ID</label><input id="questObjectiveNpcId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveToNpcId">To NPC ID</label><input id="questObjectiveToNpcId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveObjectTypeId">Object Type</label><input id="questObjectiveObjectTypeId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveObjectId">Object ID</label><input id="questObjectiveObjectId" type="text" maxlength="120" /></div>
+        <div class="row"><label for="questObjectiveTileX">Tile X</label><input id="questObjectiveTileX" type="number" step="1" value="0" /></div>
+        <div class="row"><label for="questObjectiveTileY">Tile Y</label><input id="questObjectiveTileY" type="number" step="1" value="0" /></div>
+        <div class="row"><label for="questObjectiveRadius">Radius</label><input id="questObjectiveRadius" type="number" min="0" step="1" value="0" /></div>
+        <div class="row row-buttons"><button id="questObjectiveAdd" class="secondary">Add Objective</button></div>
+        <div class="row row-buttons"><button id="questObjectiveApply" class="secondary">Apply Objective</button></div>
+        <div class="row row-buttons"><button id="questObjectiveDelete" class="secondary">Delete Objective</button></div>
+      </div>
+      <div class="row row-buttons"><button id="questEditorNew" class="secondary">New Quest</button></div>
+      <div class="row row-buttons"><button id="questEditorUpsert" class="secondary">Add/Update Quest</button></div>
+      <div class="row row-buttons"><button id="questEditorDelete" class="secondary">Delete Quest</button></div>
+      <div class="row row-buttons"><button id="questEditorSave">Save Quests</button></div>
+      <div class="note">GUI quest editor: update fields, steps, objectives, rewards, requirements, and chain; then click <strong>Add/Update Quest</strong>.</div>
+    </div>
+
+    <div class="panel">
+      <h3>Quest Zones</h3>
+      <div class="row">
+        <label for="zoneEditorSelect">Zone List</label>
+        <select id="zoneEditorSelect" size="8"></select>
+      </div>
+      <div class="row">
+        <label for="zoneEditorId">Zone ID</label>
+        <input id="zoneEditorId" type="text" maxlength="80" placeholder="zone-id" />
+      </div>
+      <div class="row">
+        <label for="zoneEditorName">Zone Name</label>
+        <input id="zoneEditorName" type="text" maxlength="120" placeholder="Zone Name" />
+      </div>
+      <div class="row">
+        <label for="zoneEditorX">X</label>
+        <input id="zoneEditorX" type="number" step="1" value="0" />
+      </div>
+      <div class="row">
+        <label for="zoneEditorY">Y</label>
+        <input id="zoneEditorY" type="number" step="1" value="0" />
+      </div>
+      <div class="row">
+        <label for="zoneEditorWidth">Width</label>
+        <input id="zoneEditorWidth" type="number" min="1" step="1" value="1" />
+      </div>
+      <div class="row">
+        <label for="zoneEditorHeight">Height</label>
+        <input id="zoneEditorHeight" type="number" min="1" step="1" value="1" />
+      </div>
+      <div class="row row-buttons"><button id="zoneEditorNew" class="secondary">New Zone</button></div>
+      <div class="row row-buttons"><button id="zoneEditorUpsert" class="secondary">Add/Update Zone</button></div>
+      <div class="row row-buttons"><button id="zoneEditorDelete" class="secondary">Delete Zone</button></div>
+      <div class="note">Zones save with the map via <strong>Save Map</strong>.</div>
+    </div>
+
+    <div class="panel">
       <h3>Status</h3>
       <div class="status" id="status"></div>
       <div class="note" id="hoverSummary">Hover: -</div>
@@ -491,6 +690,8 @@ app.innerHTML = `
     </div>
   </aside>
 
+  <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
+
   <main class="canvas-wrap">
     <div class="canvas-shell">
       <canvas id="editorCanvas"></canvas>
@@ -499,6 +700,8 @@ app.innerHTML = `
 `;
 
 const canvas = requireElement<HTMLCanvasElement>('#editorCanvas', 'Editor canvas not found');
+const sidebarElement = requireElement<HTMLElement>('.sidebar', 'Sidebar not found');
+const sidebarResizerElement = requireElement<HTMLDivElement>('#sidebarResizer', 'Sidebar resizer not found');
 const context = require2DContext(canvas);
 const statusElement = requireElement<HTMLDivElement>('#status', 'Status element not found');
 const chunkSummaryElement = requireElement<HTMLDivElement>('#chunkSummary', 'Chunk summary not found');
@@ -552,21 +755,73 @@ const selectionNpcTypeSelect = requireElement<HTMLSelectElement>('#selectionNpcT
 const selectionNpcNameInput = requireElement<HTMLInputElement>('#selectionNpcName', 'Selection npc name not found');
 const selectionNpcExamineInput = requireElement<HTMLTextAreaElement>('#selectionNpcExamine', 'Selection npc examine not found');
 const selectionNpcTalkInput = requireElement<HTMLTextAreaElement>('#selectionNpcTalk', 'Selection npc talk not found');
-const selectionNpcQuestEnabledInput = requireElement<HTMLInputElement>('#selectionNpcQuestEnabled', 'Selection npc quest enabled checkbox not found');
-const selectionNpcQuestFields = requireElement<HTMLDivElement>('#selectionNpcQuestFields', 'Selection npc quest fields not found');
-const selectionNpcQuestTitleInput = requireElement<HTMLInputElement>('#selectionNpcQuestTitle', 'Selection npc quest title not found');
-const selectionNpcQuestMissionInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestMission', 'Selection npc quest mission not found');
-const selectionNpcQuestStartInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestStart', 'Selection npc quest start not found');
-const selectionNpcQuestProgressInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestProgress', 'Selection npc quest progress not found');
-const selectionNpcQuestEndInput = requireElement<HTMLTextAreaElement>('#selectionNpcQuestEnd', 'Selection npc quest end not found');
-const selectionNpcQuestObjectiveTypeSelect = requireElement<HTMLSelectElement>('#selectionNpcQuestObjectiveType', 'Selection npc quest objective type not found');
-const selectionNpcQuestTargetInput = requireElement<HTMLInputElement>('#selectionNpcQuestTarget', 'Selection npc quest target not found');
-const selectionNpcQuestCountInput = requireElement<HTMLInputElement>('#selectionNpcQuestCount', 'Selection npc quest required count not found');
-const selectionNpcQuestRewardGoldInput = requireElement<HTMLInputElement>('#selectionNpcQuestRewardGold', 'Selection npc quest reward gold not found');
-const selectionNpcQuestRewardItemInput = requireElement<HTMLInputElement>('#selectionNpcQuestRewardItem', 'Selection npc quest reward item not found');
-const selectionNpcQuestRewardQtyInput = requireElement<HTMLInputElement>('#selectionNpcQuestRewardQty', 'Selection npc quest reward quantity not found');
+const selectionNpcQuestStartIdsSelect = requireElement<HTMLSelectElement>('#selectionNpcQuestStartIdsSelect', 'Selection npc quest start IDs select not found');
 const selectionNpcUpdateButton = requireElement<HTMLButtonElement>('#selectionNpcUpdate', 'Selection npc update button not found');
 const selectionNpcDeleteButton = requireElement<HTMLButtonElement>('#selectionNpcDelete', 'Selection npc delete button not found');
+const selectionZoneRow = requireElement<HTMLDivElement>('#selectionZoneRow', 'Selection zone row not found');
+const selectionZoneIdInput = requireElement<HTMLInputElement>('#selectionZoneId', 'Selection zone ID input not found');
+const selectionZoneNameInput = requireElement<HTMLInputElement>('#selectionZoneName', 'Selection zone name input not found');
+const selectionZoneXInput = requireElement<HTMLInputElement>('#selectionZoneX', 'Selection zone X input not found');
+const selectionZoneYInput = requireElement<HTMLInputElement>('#selectionZoneY', 'Selection zone Y input not found');
+const selectionZoneWidthInput = requireElement<HTMLInputElement>('#selectionZoneWidth', 'Selection zone width input not found');
+const selectionZoneHeightInput = requireElement<HTMLInputElement>('#selectionZoneHeight', 'Selection zone height input not found');
+const selectionZoneUpdateButton = requireElement<HTMLButtonElement>('#selectionZoneUpdate', 'Selection zone update button not found');
+const selectionZoneDeleteButton = requireElement<HTMLButtonElement>('#selectionZoneDelete', 'Selection zone delete button not found');
+const questEditorSelect = requireElement<HTMLSelectElement>('#questEditorSelect', 'Quest editor list not found');
+const questEditorIdInput = requireElement<HTMLInputElement>('#questEditorId', 'Quest editor ID input not found');
+const questEditorTitleInput = requireElement<HTMLInputElement>('#questEditorTitle', 'Quest editor title input not found');
+const questEditorSummaryInput = requireElement<HTMLTextAreaElement>('#questEditorSummary', 'Quest editor summary input not found');
+const questEditorStartNpcIdInput = requireElement<HTMLInputElement>('#questEditorStartNpcId', 'Quest editor start NPC input not found');
+const questEditorCooldownMsInput = requireElement<HTMLInputElement>('#questEditorCooldownMs', 'Quest editor cooldown input not found');
+const questEditorRepeatableInput = requireElement<HTMLInputElement>('#questEditorRepeatable', 'Quest editor repeatable input not found');
+const questReqQuestIdsInput = requireElement<HTMLInputElement>('#questReqQuestIds', 'Quest requirements quest IDs input not found');
+const questReqItemsInput = requireElement<HTMLTextAreaElement>('#questReqItems', 'Quest requirements items input not found');
+const questReqSkillsInput = requireElement<HTMLTextAreaElement>('#questReqSkills', 'Quest requirements skills input not found');
+const questRewardGoldInput = requireElement<HTMLInputElement>('#questRewardGold', 'Quest reward gold input not found');
+const questRewardUnlocksInput = requireElement<HTMLInputElement>('#questRewardUnlocks', 'Quest reward unlock IDs input not found');
+const questRewardItemsInput = requireElement<HTMLTextAreaElement>('#questRewardItems', 'Quest reward items input not found');
+const questRewardXpInput = requireElement<HTMLTextAreaElement>('#questRewardXp', 'Quest reward XP input not found');
+const questChainNextIdsInput = requireElement<HTMLInputElement>('#questChainNextIds', 'Quest chain next IDs input not found');
+const questChainAutoStartInput = requireElement<HTMLInputElement>('#questChainAutoStart', 'Quest chain auto start input not found');
+const questStepSelect = requireElement<HTMLSelectElement>('#questStepSelect', 'Quest step list not found');
+const questStepIdInput = requireElement<HTMLInputElement>('#questStepId', 'Quest step ID input not found');
+const questStepDescriptionInput = requireElement<HTMLTextAreaElement>('#questStepDescription', 'Quest step description input not found');
+const questStepCompletionSelect = requireElement<HTMLSelectElement>('#questStepCompletion', 'Quest step completion select not found');
+const questStepAddButton = requireElement<HTMLButtonElement>('#questStepAdd', 'Quest step add button not found');
+const questStepApplyButton = requireElement<HTMLButtonElement>('#questStepApply', 'Quest step apply button not found');
+const questStepDeleteButton = requireElement<HTMLButtonElement>('#questStepDelete', 'Quest step delete button not found');
+const questObjectiveSelect = requireElement<HTMLSelectElement>('#questObjectiveSelect', 'Quest objective list not found');
+const questObjectiveIdInput = requireElement<HTMLInputElement>('#questObjectiveId', 'Quest objective ID input not found');
+const questObjectiveTypeSelect = requireElement<HTMLSelectElement>('#questObjectiveType', 'Quest objective type select not found');
+const questObjectiveTargetIdInput = requireElement<HTMLInputElement>('#questObjectiveTargetId', 'Quest objective target ID input not found');
+const questObjectiveItemIdInput = requireElement<HTMLInputElement>('#questObjectiveItemId', 'Quest objective item ID input not found');
+const questObjectiveCountInput = requireElement<HTMLInputElement>('#questObjectiveCount', 'Quest objective count input not found');
+const questObjectiveQuantityInput = requireElement<HTMLInputElement>('#questObjectiveQuantity', 'Quest objective quantity input not found');
+const questObjectiveZoneIdInput = requireElement<HTMLInputElement>('#questObjectiveZoneId', 'Quest objective zone ID input not found');
+const questObjectiveNpcIdInput = requireElement<HTMLInputElement>('#questObjectiveNpcId', 'Quest objective NPC ID input not found');
+const questObjectiveToNpcIdInput = requireElement<HTMLInputElement>('#questObjectiveToNpcId', 'Quest objective to-NPC ID input not found');
+const questObjectiveObjectTypeIdInput = requireElement<HTMLInputElement>('#questObjectiveObjectTypeId', 'Quest objective object type input not found');
+const questObjectiveObjectIdInput = requireElement<HTMLInputElement>('#questObjectiveObjectId', 'Quest objective object ID input not found');
+const questObjectiveTileXInput = requireElement<HTMLInputElement>('#questObjectiveTileX', 'Quest objective tileX input not found');
+const questObjectiveTileYInput = requireElement<HTMLInputElement>('#questObjectiveTileY', 'Quest objective tileY input not found');
+const questObjectiveRadiusInput = requireElement<HTMLInputElement>('#questObjectiveRadius', 'Quest objective radius input not found');
+const questObjectiveAddButton = requireElement<HTMLButtonElement>('#questObjectiveAdd', 'Quest objective add button not found');
+const questObjectiveApplyButton = requireElement<HTMLButtonElement>('#questObjectiveApply', 'Quest objective apply button not found');
+const questObjectiveDeleteButton = requireElement<HTMLButtonElement>('#questObjectiveDelete', 'Quest objective delete button not found');
+const questEditorNewButton = requireElement<HTMLButtonElement>('#questEditorNew', 'Quest editor new button not found');
+const questEditorUpsertButton = requireElement<HTMLButtonElement>('#questEditorUpsert', 'Quest editor add/update button not found');
+const questEditorDeleteButton = requireElement<HTMLButtonElement>('#questEditorDelete', 'Quest editor delete button not found');
+const questEditorSaveButton = requireElement<HTMLButtonElement>('#questEditorSave', 'Quest editor save button not found');
+const zoneEditorSelect = requireElement<HTMLSelectElement>('#zoneEditorSelect', 'Zone editor list not found');
+const zoneEditorIdInput = requireElement<HTMLInputElement>('#zoneEditorId', 'Zone editor ID input not found');
+const zoneEditorNameInput = requireElement<HTMLInputElement>('#zoneEditorName', 'Zone editor name input not found');
+const zoneEditorXInput = requireElement<HTMLInputElement>('#zoneEditorX', 'Zone editor X input not found');
+const zoneEditorYInput = requireElement<HTMLInputElement>('#zoneEditorY', 'Zone editor Y input not found');
+const zoneEditorWidthInput = requireElement<HTMLInputElement>('#zoneEditorWidth', 'Zone editor width input not found');
+const zoneEditorHeightInput = requireElement<HTMLInputElement>('#zoneEditorHeight', 'Zone editor height input not found');
+const zoneEditorNewButton = requireElement<HTMLButtonElement>('#zoneEditorNew', 'Zone editor new button not found');
+const zoneEditorUpsertButton = requireElement<HTMLButtonElement>('#zoneEditorUpsert', 'Zone editor add/update button not found');
+const zoneEditorDeleteButton = requireElement<HTMLButtonElement>('#zoneEditorDelete', 'Zone editor delete button not found');
 const hoverSummaryElement = requireElement<HTMLDivElement>('#hoverSummary', 'Hover summary not found');
 const debugLogElement = requireElement<HTMLDivElement>('#debugLog', 'Debug log element not found');
 const clearDebugLogButton = requireElement<HTMLButtonElement>('#clearDebugLog', 'Clear debug log button not found');
@@ -579,10 +834,16 @@ let panStartScrollTop = 0;
 let renderOriginChunkX = 0;
 let renderOriginChunkY = 0;
 let rafChunkLoadRequest: number | null = null;
+let isSidebarResizing = false;
+let sidebarResizeStartClientX = 0;
+let sidebarResizeStartWidth = 320;
 
 // Track which chunks have been explicitly added (including the original)
 const addedChunkKeys = new Set<string>([getChunkKey(0, 0)]);
 const debugLogLines: string[] = [];
+let questEditorDraft: QuestIndexEntry = buildDefaultQuestDefinition('');
+let questEditorSelectedStepIndex = 0;
+let questEditorSelectedObjectiveIndex = 0;
 
 function appendDebugLog(label: string, details: string): void {
   const time = new Date().toISOString().slice(11, 23);
@@ -594,6 +855,42 @@ function appendDebugLog(label: string, details: string): void {
 
   debugLogElement.textContent = debugLogLines.join('\n');
   console.debug('[MapEditor]', line);
+}
+
+function clampSidebarWidth(width: number): number {
+  if (!Number.isFinite(width)) {
+    return SIDEBAR_MIN_WIDTH;
+  }
+
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
+}
+
+function applySidebarWidth(width: number): void {
+  const clamped = clampSidebarWidth(width);
+  appElement.style.setProperty('--sidebar-width', `${clamped}px`);
+}
+
+function loadSavedSidebarWidth(): void {
+  try {
+    const saved = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    if (!saved) {
+      applySidebarWidth(sidebarElement.getBoundingClientRect().width || 320);
+      return;
+    }
+
+    const parsedWidth = Number(saved);
+    applySidebarWidth(parsedWidth);
+  } catch {
+    applySidebarWidth(sidebarElement.getBoundingClientRect().width || 320);
+  }
+}
+
+function saveSidebarWidth(width: number): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(clampSidebarWidth(width)));
+  } catch {
+    return;
+  }
 }
 
 context.imageSmoothingEnabled = false;
@@ -789,13 +1086,13 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
     ];
     npcs = [
       {
-        id: 'npc-shopkeeper-1', type: 'shopkeeper', name: 'Bob', tileX: 44, tileY: 36, examineText: 'A friendly general store shopkeeper.', talkText: 'Hello there! Need supplies or want to sell your goods?', quest: null
+        id: 'npc-shopkeeper-1', type: 'shopkeeper', name: 'Bob', tileX: 44, tileY: 36, examineText: 'A friendly general store shopkeeper.', talkText: 'Hello there! Need supplies or want to sell your goods?', questStartIds: []
       },
       {
-        id: 'npc-bank_chest-1', type: 'bank_chest', name: 'Bank chest', tileX: 41, tileY: 36, examineText: 'A sturdy chest for secure item storage.', talkText: 'Your valuables are safe inside.', quest: null
+        id: 'npc-bank_chest-1', type: 'bank_chest', name: 'Bank chest', tileX: 41, tileY: 36, examineText: 'A sturdy chest for secure item storage.', talkText: 'Your valuables are safe inside.', questStartIds: []
       },
       {
-        id: 'npc-villager-1', type: 'villager', name: 'Villager', tileX: 38, tileY: 38, examineText: 'A local villager going about their day.', talkText: "Lovely weather for skilling, isn't it?", quest: null
+        id: 'npc-villager-1', type: 'villager', name: 'Villager', tileX: 38, tileY: 38, examineText: 'A local villager going about their day.', talkText: "Lovely weather for skilling, isn't it?", questStartIds: []
       },
     ];
     monsters = [
@@ -859,7 +1156,10 @@ function cloneChunkSnapshot(snapshot: ChunkSnapshot): ChunkSnapshot {
     resources: snapshot.resources.map((entry) => ({ ...entry })),
     monsters: snapshot.monsters.map((entry) => ({ ...entry })),
     objects: snapshot.objects.map((entry) => ({ ...entry })),
-    npcs: snapshot.npcs.map((entry) => ({ ...entry })),
+    npcs: snapshot.npcs.map((entry) => ({
+      ...entry,
+      questStartIds: Array.isArray(entry.questStartIds) ? [...entry.questStartIds] : [],
+    })),
   };
 }
 
@@ -869,7 +1169,10 @@ function captureChunkSnapshot(chunk: EditorChunkData): ChunkSnapshot {
     resources: chunk.resources.map((entry) => ({ ...entry })),
     monsters: chunk.monsters.map((entry) => ({ ...entry })),
     objects: chunk.objects.map((entry) => ({ ...entry })),
-    npcs: chunk.npcs.map((entry) => ({ ...entry })),
+    npcs: chunk.npcs.map((entry) => ({
+      ...entry,
+      questStartIds: Array.isArray(entry.questStartIds) ? [...entry.questStartIds] : [],
+    })),
   };
 }
 
@@ -878,7 +1181,10 @@ function applyChunkSnapshot(chunk: EditorChunkData, snapshot: ChunkSnapshot): vo
   chunk.resources = snapshot.resources.map((entry) => ({ ...entry }));
   chunk.monsters = snapshot.monsters.map((entry) => ({ ...entry }));
   chunk.objects = snapshot.objects.map((entry) => ({ ...entry }));
-  chunk.npcs = snapshot.npcs.map((entry) => ({ ...entry }));
+  chunk.npcs = snapshot.npcs.map((entry) => ({
+    ...entry,
+    questStartIds: Array.isArray(entry.questStartIds) ? [...entry.questStartIds] : [],
+  }));
 }
 
 function snapshotsEqual(first: ChunkSnapshot, second: ChunkSnapshot): boolean {
@@ -1083,21 +1389,53 @@ function normalizePositiveInt(value: number, fallback: number): number {
   return Math.max(1, Math.floor(value));
 }
 
-function normalizeNonNegativeInt(value: number, fallback: number): number {
-  if (!Number.isFinite(value)) {
-    return fallback;
-  }
-
-  return Math.max(0, Math.floor(value));
-}
-
 function normalizeText(value: string, fallback = ''): string {
   const trimmed = String(value ?? '').trim();
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
-function setNpcQuestFieldsVisible(visible: boolean): void {
-  selectionNpcQuestFields.style.display = visible ? 'block' : 'none';
+function normalizeQuestStartIds(ids: unknown): string[] {
+  if (!Array.isArray(ids)) {
+    return [];
+  }
+
+  const normalized = ids
+    .map((entry) => String(entry ?? '').trim())
+    .filter((entry) => entry.length > 0);
+
+  return Array.from(new Set(normalized));
+}
+
+function getSelectedOptionValues(selectElement: HTMLSelectElement): string[] {
+  return Array.from(selectElement.selectedOptions)
+    .map((option) => option.value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function setSelectedOptionValues(selectElement: HTMLSelectElement, selectedValues: string[]): void {
+  const selected = new Set(selectedValues.map((value) => value.trim()).filter((value) => value.length > 0));
+  for (const option of Array.from(selectElement.options)) {
+    option.selected = selected.has(option.value);
+  }
+}
+
+function isPointInsideQuestZoneRect(worldTileX: number, worldTileY: number, rect: QuestZoneRect): boolean {
+  return worldTileX >= rect.x
+    && worldTileY >= rect.y
+    && worldTileX < rect.x + rect.width
+    && worldTileY < rect.y + rect.height;
+}
+
+function findQuestZoneAtTile(worldTileX: number, worldTileY: number): { zone: QuestZonePlacement; rect: QuestZoneRect } | null {
+  for (const zone of getVisibleQuestZones()) {
+    for (const rect of zone.rects) {
+      if (isPointInsideQuestZoneRect(worldTileX, worldTileY, rect)) {
+        return { zone, rect };
+      }
+    }
+  }
+
+  return null;
 }
 
 function getSelectedNpcFormKey(): string | null {
@@ -1109,6 +1447,661 @@ function getSelectedNpcFormKey(): string | null {
   return `${mapped.chunkX},${mapped.chunkY}:${mapped.localTileX},${mapped.localTileY}`;
 }
 
+function getQuestId(entry: QuestIndexEntry): string {
+  return String(entry.id ?? '').trim();
+}
+
+function getQuestZoneIdsFromEntry(entry: QuestIndexEntry): string[] {
+  const zoneIds = new Set<string>();
+  const steps = Array.isArray(entry.steps) ? entry.steps : [];
+  for (const step of steps) {
+    const objectives = Array.isArray((step as QuestIndexStep)?.objectives)
+      ? ((step as QuestIndexStep).objectives as QuestIndexObjective[])
+      : [];
+    for (const objective of objectives) {
+      const zoneId = String(objective?.zoneId ?? '').trim();
+      if (zoneId) {
+        zoneIds.add(zoneId);
+      }
+    }
+  }
+
+  return Array.from(zoneIds);
+}
+
+function buildQuestZoneIdsByQuestId(entries: QuestIndexEntry[]): Map<string, Set<string>> {
+  const zoneIdsByQuestId = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    const questId = getQuestId(entry);
+    if (!questId) {
+      continue;
+    }
+
+    zoneIdsByQuestId.set(questId, new Set(getQuestZoneIdsFromEntry(entry)));
+  }
+
+  return zoneIdsByQuestId;
+}
+
+function normalizeQuestIndexEntries(parsedIndex: unknown): QuestIndexEntry[] {
+  if (!Array.isArray(parsedIndex)) {
+    return [];
+  }
+
+  const entries: QuestIndexEntry[] = [];
+  const seenQuestIds = new Set<string>();
+  for (const rawEntry of parsedIndex) {
+    if (!rawEntry || typeof rawEntry !== 'object') {
+      continue;
+    }
+
+    const entry = { ...(rawEntry as QuestIndexEntry) };
+    const questId = getQuestId(entry);
+    if (!questId || seenQuestIds.has(questId)) {
+      continue;
+    }
+
+    entry.id = questId;
+    seenQuestIds.add(questId);
+    entries.push(entry);
+  }
+
+  entries.sort((first, second) => getQuestId(first).localeCompare(getQuestId(second)));
+  return entries;
+}
+
+function refreshQuestIndexDerivedState(): void {
+  state.questZoneIdsByQuestId = buildQuestZoneIdsByQuestId(state.questIndexEntries);
+}
+
+function refreshQuestOptionControls(): void {
+  const previousNpcSelected = new Set(getSelectedOptionValues(selectionNpcQuestStartIdsSelect));
+  const previousQuestSelectedId = questEditorSelect.value;
+  const questIds = state.questIndexEntries.map((entry) => getQuestId(entry));
+
+  selectionNpcQuestStartIdsSelect.innerHTML = questIds
+    .map((questId) => `<option value="${questId}">${questId}</option>`)
+    .join('');
+  setSelectedOptionValues(selectionNpcQuestStartIdsSelect, Array.from(previousNpcSelected));
+
+  questEditorSelect.innerHTML = questIds
+    .map((questId) => `<option value="${questId}">${questId}</option>`)
+    .join('');
+  if (questIds.includes(previousQuestSelectedId)) {
+    questEditorSelect.value = previousQuestSelectedId;
+  }
+}
+
+function setQuestEditorFormFromEntry(entry: QuestIndexEntry | null): void {
+  questEditorDraft = entry ? JSON.parse(JSON.stringify(entry)) as QuestIndexEntry : buildDefaultQuestDefinition('');
+  questEditorSelectedStepIndex = 0;
+  questEditorSelectedObjectiveIndex = 0;
+  renderQuestEditorFromDraft();
+}
+
+function buildDefaultQuestDefinition(questId: string): QuestIndexEntry {
+  return {
+    id: questId,
+    title: '',
+    summary: '',
+    startNpcId: '',
+    repeatable: false,
+    steps: [
+      {
+        id: 'step-1',
+        description: '',
+        completion: 'all',
+        objectives: [],
+      },
+    ],
+    rewards: {
+      gold: 0,
+      items: [],
+      xp: [],
+      unlockQuestIds: [],
+    },
+    chain: {
+      nextQuestIds: [],
+      autoStartNext: false,
+    },
+  };
+}
+
+function parseCsv(value: string): string[] {
+  return Array.from(new Set(String(value ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)));
+}
+
+function getMutableQuestSteps(entry: QuestIndexEntry): Array<Record<string, unknown>> {
+  if (!Array.isArray(entry.steps)) {
+    entry.steps = [];
+  }
+
+  return entry.steps as Array<Record<string, unknown>>;
+}
+
+function parseIdQuantityLines(value: string): Array<{ itemId: string; quantity: number }> {
+  return String(value ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [itemIdRaw, quantityRaw] = line.split(':');
+      return {
+        itemId: normalizeText(itemIdRaw ?? ''),
+        quantity: normalizePositiveInt(Number(quantityRaw), 1),
+      };
+    })
+    .filter((entry) => entry.itemId.length > 0);
+}
+
+function formatIdQuantityLines(items: Array<{ itemId?: unknown; quantity?: unknown }>): string {
+  return items
+    .map((entry) => {
+      const itemId = normalizeText(String(entry.itemId ?? ''));
+      if (!itemId) {
+        return '';
+      }
+      return `${itemId}:${normalizePositiveInt(Number(entry.quantity), 1)}`;
+    })
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
+function parseSkillLevelLines(value: string): Array<{ skill: string; level: number }> {
+  return String(value ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [skillRaw, levelRaw] = line.split(':');
+      return {
+        skill: normalizeText(skillRaw ?? ''),
+        level: normalizePositiveInt(Number(levelRaw), 1),
+      };
+    })
+    .filter((entry) => entry.skill.length > 0);
+}
+
+function formatSkillLevelLines(items: Array<{ skill?: unknown; level?: unknown }>): string {
+  return items
+    .map((entry) => {
+      const skill = normalizeText(String(entry.skill ?? ''));
+      if (!skill) {
+        return '';
+      }
+      return `${skill}:${normalizePositiveInt(Number(entry.level), 1)}`;
+    })
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
+function parseSkillAmountLines(value: string): Array<{ skill: string; amount: number }> {
+  return String(value ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [skillRaw, amountRaw] = line.split(':');
+      return {
+        skill: normalizeText(skillRaw ?? ''),
+        amount: normalizePositiveInt(Number(amountRaw), 1),
+      };
+    })
+    .filter((entry) => entry.skill.length > 0);
+}
+
+function formatSkillAmountLines(items: Array<{ skill?: unknown; amount?: unknown }>): string {
+  return items
+    .map((entry) => {
+      const skill = normalizeText(String(entry.skill ?? ''));
+      if (!skill) {
+        return '';
+      }
+      return `${skill}:${normalizePositiveInt(Number(entry.amount), 1)}`;
+    })
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
+function getSelectedStep(): Record<string, unknown> | null {
+  const steps = getMutableQuestSteps(questEditorDraft);
+  if (steps.length === 0) {
+    return null;
+  }
+
+  questEditorSelectedStepIndex = Math.max(0, Math.min(steps.length - 1, questEditorSelectedStepIndex));
+  return steps[questEditorSelectedStepIndex] ?? null;
+}
+
+function getMutableObjectives(step: Record<string, unknown>): Array<Record<string, unknown>> {
+  if (!Array.isArray(step.objectives)) {
+    step.objectives = [];
+  }
+
+  return step.objectives as Array<Record<string, unknown>>;
+}
+
+function renderStepList(): void {
+  const steps = getMutableQuestSteps(questEditorDraft);
+  questStepSelect.innerHTML = steps
+    .map((step, index) => {
+      const stepId = normalizeText(String(step.id ?? ''), `step-${index + 1}`);
+      return `<option value="${index}">${index + 1}. ${stepId}</option>`;
+    })
+    .join('');
+
+  if (steps.length === 0) {
+    questStepSelect.innerHTML = '<option value="0">1. step-1</option>';
+  }
+
+  questStepSelect.value = String(Math.max(0, Math.min(Math.max(0, steps.length - 1), questEditorSelectedStepIndex)));
+}
+
+function renderObjectiveList(): void {
+  const step = getSelectedStep();
+  if (!step) {
+    questObjectiveSelect.innerHTML = '';
+    return;
+  }
+
+  const objectives = getMutableObjectives(step);
+  questObjectiveSelect.innerHTML = objectives
+    .map((objective, index) => {
+      const objectiveId = normalizeText(String(objective.id ?? ''), `obj-${index + 1}`);
+      const objectiveType = normalizeText(String(objective.type ?? ''), 'objective');
+      return `<option value="${index}">${index + 1}. ${objectiveType} (${objectiveId})</option>`;
+    })
+    .join('');
+
+  if (objectives.length > 0) {
+    questEditorSelectedObjectiveIndex = Math.max(0, Math.min(objectives.length - 1, questEditorSelectedObjectiveIndex));
+    questObjectiveSelect.value = String(questEditorSelectedObjectiveIndex);
+  }
+}
+
+function renderStepFields(): void {
+  const step = getSelectedStep();
+  if (!step) {
+    questStepIdInput.value = '';
+    questStepDescriptionInput.value = '';
+    questStepCompletionSelect.value = 'all';
+    return;
+  }
+
+  questStepIdInput.value = normalizeText(String(step.id ?? ''), `step-${questEditorSelectedStepIndex + 1}`);
+  questStepDescriptionInput.value = String(step.description ?? '');
+  questStepCompletionSelect.value = normalizeText(String(step.completion ?? ''), 'all') === 'any' ? 'any' : 'all';
+}
+
+function renderObjectiveFields(): void {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+
+  const objectives = getMutableObjectives(step);
+  if (objectives.length === 0) {
+    questObjectiveIdInput.value = '';
+    questObjectiveTypeSelect.value = 'kill';
+    questObjectiveTargetIdInput.value = '';
+    questObjectiveItemIdInput.value = '';
+    questObjectiveCountInput.value = '1';
+    questObjectiveQuantityInput.value = '1';
+    questObjectiveZoneIdInput.value = '';
+    questObjectiveNpcIdInput.value = '';
+    questObjectiveToNpcIdInput.value = '';
+    questObjectiveObjectTypeIdInput.value = '';
+    questObjectiveObjectIdInput.value = '';
+    questObjectiveTileXInput.value = '0';
+    questObjectiveTileYInput.value = '0';
+    questObjectiveRadiusInput.value = '0';
+    return;
+  }
+
+  questEditorSelectedObjectiveIndex = Math.max(0, Math.min(objectives.length - 1, questEditorSelectedObjectiveIndex));
+  const objective = objectives[questEditorSelectedObjectiveIndex];
+  questObjectiveIdInput.value = normalizeText(String(objective.id ?? ''), `obj-${questEditorSelectedObjectiveIndex + 1}`);
+  questObjectiveTypeSelect.value = normalizeText(String(objective.type ?? ''), 'kill');
+  questObjectiveTargetIdInput.value = String(objective.targetId ?? '');
+  questObjectiveItemIdInput.value = String(objective.itemId ?? '');
+  questObjectiveCountInput.value = String(Number.isFinite(Number(objective.count)) ? Math.max(0, Math.floor(Number(objective.count))) : 1);
+  questObjectiveQuantityInput.value = String(Number.isFinite(Number(objective.quantity)) ? Math.max(0, Math.floor(Number(objective.quantity))) : 1);
+  questObjectiveZoneIdInput.value = String(objective.zoneId ?? '');
+  questObjectiveNpcIdInput.value = String(objective.npcId ?? '');
+  questObjectiveToNpcIdInput.value = String(objective.toNpcId ?? '');
+  questObjectiveObjectTypeIdInput.value = String(objective.objectTypeId ?? '');
+  questObjectiveObjectIdInput.value = String(objective.objectId ?? '');
+  questObjectiveTileXInput.value = String(Number.isFinite(Number(objective.tileX)) ? Math.floor(Number(objective.tileX)) : 0);
+  questObjectiveTileYInput.value = String(Number.isFinite(Number(objective.tileY)) ? Math.floor(Number(objective.tileY)) : 0);
+  questObjectiveRadiusInput.value = String(Number.isFinite(Number(objective.radius)) ? Math.max(0, Math.floor(Number(objective.radius))) : 0);
+}
+
+function renderQuestEditorFromDraft(): void {
+  questEditorIdInput.value = getQuestId(questEditorDraft);
+  questEditorTitleInput.value = String(questEditorDraft.title ?? '');
+  questEditorSummaryInput.value = String(questEditorDraft.summary ?? '');
+  questEditorStartNpcIdInput.value = String(questEditorDraft.startNpcId ?? '');
+  questEditorCooldownMsInput.value = String(Number.isFinite(Number(questEditorDraft.cooldownMs)) ? Math.max(0, Math.floor(Number(questEditorDraft.cooldownMs))) : 0);
+  questEditorRepeatableInput.checked = Boolean(questEditorDraft.repeatable);
+
+  const requirements = questEditorDraft.requirements && typeof questEditorDraft.requirements === 'object' && !Array.isArray(questEditorDraft.requirements)
+    ? questEditorDraft.requirements as Record<string, unknown>
+    : {};
+  questReqQuestIdsInput.value = Array.isArray(requirements.requiredQuestIds) ? (requirements.requiredQuestIds as string[]).join(', ') : '';
+  questReqItemsInput.value = formatIdQuantityLines(Array.isArray(requirements.requiredItems) ? requirements.requiredItems as Array<{ itemId?: unknown; quantity?: unknown }> : []);
+  questReqSkillsInput.value = formatSkillLevelLines(Array.isArray(requirements.requiredSkillLevels) ? requirements.requiredSkillLevels as Array<{ skill?: unknown; level?: unknown }> : []);
+
+  const rewards = questEditorDraft.rewards && typeof questEditorDraft.rewards === 'object' && !Array.isArray(questEditorDraft.rewards)
+    ? questEditorDraft.rewards as Record<string, unknown>
+    : {};
+  questRewardGoldInput.value = String(Number.isFinite(Number(rewards.gold)) ? Math.max(0, Math.floor(Number(rewards.gold))) : 0);
+  questRewardUnlocksInput.value = Array.isArray(rewards.unlockQuestIds) ? (rewards.unlockQuestIds as string[]).join(', ') : '';
+  questRewardItemsInput.value = formatIdQuantityLines(Array.isArray(rewards.items) ? rewards.items as Array<{ itemId?: unknown; quantity?: unknown }> : []);
+  questRewardXpInput.value = formatSkillAmountLines(Array.isArray(rewards.xp) ? rewards.xp as Array<{ skill?: unknown; amount?: unknown }> : []);
+
+  const chain = questEditorDraft.chain && typeof questEditorDraft.chain === 'object' && !Array.isArray(questEditorDraft.chain)
+    ? questEditorDraft.chain as Record<string, unknown>
+    : {};
+  questChainNextIdsInput.value = Array.isArray(chain.nextQuestIds) ? (chain.nextQuestIds as string[]).join(', ') : '';
+  questChainAutoStartInput.checked = Boolean(chain.autoStartNext);
+
+  renderStepList();
+  renderStepFields();
+  renderObjectiveList();
+  renderObjectiveFields();
+}
+
+function syncDraftTopLevelFromInputs(): void {
+  const questId = normalizeText(questEditorIdInput.value);
+  questEditorDraft.id = questId;
+  questEditorDraft.title = normalizeText(questEditorTitleInput.value);
+  questEditorDraft.summary = normalizeText(questEditorSummaryInput.value);
+
+  const startNpcId = normalizeText(questEditorStartNpcIdInput.value);
+  if (startNpcId) {
+    questEditorDraft.startNpcId = startNpcId;
+  } else {
+    delete questEditorDraft.startNpcId;
+  }
+
+  const cooldownMs = Number(questEditorCooldownMsInput.value);
+  if (Number.isFinite(cooldownMs) && cooldownMs > 0) {
+    questEditorDraft.cooldownMs = Math.floor(cooldownMs);
+  } else {
+    delete questEditorDraft.cooldownMs;
+  }
+  questEditorDraft.repeatable = Boolean(questEditorRepeatableInput.checked);
+
+  const requirements: Record<string, unknown> = {};
+  const requiredQuestIds = parseCsv(questReqQuestIdsInput.value);
+  if (requiredQuestIds.length > 0) {
+    requirements.requiredQuestIds = requiredQuestIds;
+  }
+  const requiredItems = parseIdQuantityLines(questReqItemsInput.value);
+  if (requiredItems.length > 0) {
+    requirements.requiredItems = requiredItems;
+  }
+  const requiredSkillLevels = parseSkillLevelLines(questReqSkillsInput.value);
+  if (requiredSkillLevels.length > 0) {
+    requirements.requiredSkillLevels = requiredSkillLevels;
+  }
+  if (Object.keys(requirements).length > 0) {
+    questEditorDraft.requirements = requirements;
+  } else {
+    delete questEditorDraft.requirements;
+  }
+
+  const rewards: Record<string, unknown> = {};
+  const gold = Number(questRewardGoldInput.value);
+  if (Number.isFinite(gold) && gold > 0) {
+    rewards.gold = Math.floor(gold);
+  }
+  const rewardItems = parseIdQuantityLines(questRewardItemsInput.value);
+  if (rewardItems.length > 0) {
+    rewards.items = rewardItems;
+  }
+  const rewardXp = parseSkillAmountLines(questRewardXpInput.value);
+  if (rewardXp.length > 0) {
+    rewards.xp = rewardXp;
+  }
+  const unlockQuestIds = parseCsv(questRewardUnlocksInput.value);
+  if (unlockQuestIds.length > 0) {
+    rewards.unlockQuestIds = unlockQuestIds;
+  }
+  questEditorDraft.rewards = rewards;
+
+  const chain: Record<string, unknown> = {};
+  const nextQuestIds = parseCsv(questChainNextIdsInput.value);
+  if (nextQuestIds.length > 0) {
+    chain.nextQuestIds = nextQuestIds;
+  }
+  if (questChainAutoStartInput.checked) {
+    chain.autoStartNext = true;
+  }
+  if (Object.keys(chain).length > 0) {
+    questEditorDraft.chain = chain;
+  } else {
+    delete questEditorDraft.chain;
+  }
+}
+
+function buildObjectiveTemplate(type: string, sequenceNumber: number): Record<string, unknown> {
+  if (type === 'kill') {
+    return { id: `obj-${sequenceNumber}`, type: 'kill', targetId: 'goblin', count: 1 };
+  }
+  if (type === 'gather') {
+    return { id: `obj-${sequenceNumber}`, type: 'gather', itemId: 'copper_ore', count: 1 };
+  }
+  if (type === 'delivery') {
+    return { id: `obj-${sequenceNumber}`, type: 'delivery', itemId: 'copper_ore', quantity: 1, toNpcId: '' };
+  }
+  if (type === 'travel') {
+    return { id: `obj-${sequenceNumber}`, type: 'travel', zoneId: '' };
+  }
+  if (type === 'item_retrieval') {
+    return { id: `obj-${sequenceNumber}`, type: 'item_retrieval', itemId: 'copper_ore', quantity: 1 };
+  }
+  if (type === 'interact_object') {
+    return { id: `obj-${sequenceNumber}`, type: 'interact_object', objectTypeId: '', count: 1 };
+  }
+
+  return { id: `obj-${sequenceNumber}`, type: 'talk_to_npc', npcId: '' };
+}
+
+function refreshZoneEditorOptions(): void {
+  const previousSelection = String(zoneEditorSelect.value ?? '').trim();
+  const sortedZones = [...state.questZones].sort((first, second) => first.id.localeCompare(second.id));
+  zoneEditorSelect.innerHTML = sortedZones
+    .map((zone) => `<option value="${zone.id}">${zone.id}</option>`)
+    .join('');
+
+  if (previousSelection && sortedZones.some((zone) => zone.id === previousSelection)) {
+    zoneEditorSelect.value = previousSelection;
+  }
+}
+
+function setZoneEditorFormFromZone(zone: QuestZonePlacement | null): void {
+  if (!zone) {
+    zoneEditorIdInput.value = '';
+    zoneEditorNameInput.value = '';
+    zoneEditorXInput.value = state.selectedTile ? String(state.selectedTile.worldTileX) : '0';
+    zoneEditorYInput.value = state.selectedTile ? String(state.selectedTile.worldTileY) : '0';
+    zoneEditorWidthInput.value = '1';
+    zoneEditorHeightInput.value = '1';
+    return;
+  }
+
+  const rect = zone.rects[0] ?? { x: 0, y: 0, width: 1, height: 1 };
+  zoneEditorIdInput.value = zone.id;
+  zoneEditorNameInput.value = zone.name;
+  zoneEditorXInput.value = String(rect.x);
+  zoneEditorYInput.value = String(rect.y);
+  zoneEditorWidthInput.value = String(rect.width);
+  zoneEditorHeightInput.value = String(rect.height);
+}
+
+function getQuestZoneIdsForSelectedNpc(): Set<string> {
+  if (!state.selectedTile) {
+    return new Set<string>();
+  }
+
+  const mapped = worldToChunkCoords(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
+  const chunk = state.chunks.get(getChunkKey(mapped.chunkX, mapped.chunkY));
+  if (!chunk) {
+    return new Set<string>();
+  }
+
+  const selectedNpc = getNpcAt(mapped.localTileX, mapped.localTileY, chunk);
+  if (!selectedNpc || !Array.isArray(selectedNpc.questStartIds) || selectedNpc.questStartIds.length === 0) {
+    return new Set<string>();
+  }
+
+  const visibleZoneIds = new Set<string>();
+  for (const questId of selectedNpc.questStartIds) {
+    const zoneIds = state.questZoneIdsByQuestId.get(questId);
+    if (!zoneIds) {
+      continue;
+    }
+
+    for (const zoneId of zoneIds) {
+      visibleZoneIds.add(zoneId);
+    }
+  }
+
+  return visibleZoneIds;
+}
+
+function getSelectedQuestIdForPreview(): string | null {
+  const selectedQuestId = normalizeText(String(questEditorSelect.value ?? ''));
+  return selectedQuestId || null;
+}
+
+function getSelectedZoneIdForPreview(): string | null {
+  const selectedZoneId = normalizeText(String(zoneEditorSelect.value ?? ''));
+  return selectedZoneId || null;
+}
+
+function getQuestPreviewContext(): QuestPreviewContext {
+  const questId = getSelectedQuestIdForPreview();
+  const emptyContext: QuestPreviewContext = {
+    questId,
+    zoneIds: new Set<string>(),
+    giverNpcIds: new Set<string>(),
+    targetNpcIds: new Set<string>(),
+    targetObjectIds: new Set<string>(),
+    targetObjectTypeIds: new Set<string>(),
+    targetMonsterTypeIds: new Set<string>(),
+    travelTiles: [],
+  };
+
+  if (!questId) {
+    return emptyContext;
+  }
+
+  for (const chunk of state.chunks.values()) {
+    for (const npc of chunk.npcs) {
+      if (Array.isArray(npc.questStartIds) && npc.questStartIds.includes(questId)) {
+        emptyContext.giverNpcIds.add(npc.id);
+      }
+    }
+  }
+
+  const entry = state.questIndexEntries.find((candidate) => getQuestId(candidate) === questId);
+  if (!entry) {
+    return emptyContext;
+  }
+
+  const startNpcId = normalizeText(String(entry.startNpcId ?? ''));
+  if (startNpcId) {
+    emptyContext.giverNpcIds.add(startNpcId);
+  }
+
+  const steps = Array.isArray(entry.steps) ? (entry.steps as QuestIndexStep[]) : [];
+  for (const step of steps) {
+    const objectives = Array.isArray(step?.objectives) ? (step.objectives as QuestIndexObjective[]) : [];
+    for (const objective of objectives) {
+      const zoneId = normalizeText(String(objective.zoneId ?? ''));
+      if (zoneId) {
+        emptyContext.zoneIds.add(zoneId);
+      }
+
+      const npcId = normalizeText(String(objective.npcId ?? ''));
+      if (npcId) {
+        emptyContext.targetNpcIds.add(npcId);
+      }
+
+      const toNpcId = normalizeText(String(objective.toNpcId ?? ''));
+      if (toNpcId) {
+        emptyContext.targetNpcIds.add(toNpcId);
+      }
+
+      const objectId = normalizeText(String(objective.objectId ?? ''));
+      if (objectId) {
+        emptyContext.targetObjectIds.add(objectId);
+      }
+
+      const objectTypeId = normalizeText(String(objective.objectTypeId ?? ''));
+      if (objectTypeId) {
+        emptyContext.targetObjectTypeIds.add(objectTypeId);
+      }
+
+      const objectiveType = normalizeText(String(objective.type ?? ''));
+      if (objectiveType === 'kill') {
+        const targetId = normalizeText(String(objective.targetId ?? ''));
+        if (targetId) {
+          emptyContext.targetMonsterTypeIds.add(targetId);
+        }
+      }
+
+      if (objectiveType === 'travel') {
+        const travelTileX = Number(objective.tileX);
+        const travelTileY = Number(objective.tileY);
+        if (Number.isFinite(travelTileX) && Number.isFinite(travelTileY)) {
+          emptyContext.travelTiles.push({
+            tileX: Math.floor(travelTileX),
+            tileY: Math.floor(travelTileY),
+          });
+        }
+      }
+    }
+  }
+
+  return emptyContext;
+}
+
+function getVisibleQuestZones(): QuestZonePlacement[] {
+  const visibleZoneIds = getQuestZoneIdsForSelectedNpc();
+  const selectedZoneId = getSelectedZoneIdForPreview();
+  const questPreview = getQuestPreviewContext();
+
+  for (const zoneId of questPreview.zoneIds) {
+    visibleZoneIds.add(zoneId);
+  }
+  if (selectedZoneId) {
+    visibleZoneIds.add(selectedZoneId);
+  }
+
+  if (visibleZoneIds.size === 0) {
+    return [];
+  }
+
+  return state.questZones.filter((zone) => visibleZoneIds.has(zone.id));
+}
+
+function getReferencedQuestZoneIds(): Set<string> {
+  const referencedZoneIds = new Set<string>();
+  for (const zoneIds of state.questZoneIdsByQuestId.values()) {
+    for (const zoneId of zoneIds) {
+      referencedZoneIds.add(zoneId);
+    }
+  }
+
+  return referencedZoneIds;
+}
+
 function markNpcFormDirty(): void {
   if (!state.selectedTile) {
     return;
@@ -1116,52 +2109,6 @@ function markNpcFormDirty(): void {
 
   state.npcFormDirty = true;
   state.npcFormSelectionKey = getSelectedNpcFormKey();
-}
-
-function populateNpcQuestInputs(quest: NpcQuestPlacement | null): void {
-  const hasQuest = Boolean(quest);
-  selectionNpcQuestEnabledInput.checked = hasQuest;
-  setNpcQuestFieldsVisible(hasQuest);
-
-  selectionNpcQuestTitleInput.value = quest?.title ?? '';
-  selectionNpcQuestMissionInput.value = quest?.missionText ?? '';
-  selectionNpcQuestStartInput.value = quest?.startText ?? '';
-  selectionNpcQuestProgressInput.value = quest?.progressText ?? '';
-  selectionNpcQuestEndInput.value = quest?.completeText ?? '';
-  selectionNpcQuestObjectiveTypeSelect.value = quest?.objectiveType ?? 'kill';
-  selectionNpcQuestTargetInput.value = quest?.objectiveTargetId ?? '';
-  selectionNpcQuestCountInput.value = String(quest?.requiredCount ?? 1);
-  selectionNpcQuestRewardGoldInput.value = String(quest?.rewardGold ?? 0);
-  selectionNpcQuestRewardItemInput.value = quest?.rewardItemId ?? '';
-  selectionNpcQuestRewardQtyInput.value = String(quest?.rewardItemQuantity ?? 1);
-}
-
-function buildQuestFromSelectionInputs(fallbackQuestId: string): NpcQuestPlacement | null {
-  if (!selectionNpcQuestEnabledInput.checked) {
-    return null;
-  }
-
-  const title = normalizeText(selectionNpcQuestTitleInput.value);
-  const objectiveTargetId = normalizeText(selectionNpcQuestTargetInput.value);
-  if (!title || !objectiveTargetId) {
-    return null;
-  }
-
-  const rewardItemId = normalizeText(selectionNpcQuestRewardItemInput.value);
-  return {
-    id: normalizeText(fallbackQuestId, `quest-${Date.now()}`),
-    title,
-    missionText: normalizeText(selectionNpcQuestMissionInput.value, title),
-    startText: normalizeText(selectionNpcQuestStartInput.value, `Can you help with ${title}?`),
-    progressText: normalizeText(selectionNpcQuestProgressInput.value, 'Keep going, you are making progress.'),
-    completeText: normalizeText(selectionNpcQuestEndInput.value, 'Excellent work. Here is your reward.'),
-    objectiveType: selectionNpcQuestObjectiveTypeSelect.value === 'gather' ? 'gather' : 'kill',
-    objectiveTargetId,
-    requiredCount: normalizePositiveInt(Number(selectionNpcQuestCountInput.value), 1),
-    rewardGold: normalizeNonNegativeInt(Number(selectionNpcQuestRewardGoldInput.value), 0),
-    rewardItemId,
-    rewardItemQuantity: normalizePositiveInt(Number(selectionNpcQuestRewardQtyInput.value), 1),
-  };
 }
 
 function applyImportedChunkData(chunk: EditorChunkData): void {
@@ -1213,9 +2160,52 @@ function normalizeChunkFromParsed(
       ? (parsed as Partial<EditorChunkData>).objects as ObjectPlacement[]
       : [],
     npcs: Array.isArray((parsed as Partial<EditorChunkData>).npcs)
-      ? (parsed as Partial<EditorChunkData>).npcs as NpcPlacement[]
+      ? ((parsed as Partial<EditorChunkData>).npcs as NpcPlacement[]).map((npc, index) => ({
+        id: normalizeText(npc?.id, `npc-${targetChunkX}-${targetChunkY}-${index + 1}`),
+        type: normalizeText(npc?.type, 'villager'),
+        name: normalizeText(npc?.name, `NPC ${index + 1}`),
+        tileX: Math.max(0, Math.min(MAP_WIDTH_TILES - 1, Math.floor(Number(npc?.tileX ?? 0)))),
+        tileY: Math.max(0, Math.min(MAP_HEIGHT_TILES - 1, Math.floor(Number(npc?.tileY ?? 0)))),
+        examineText: normalizeText(npc?.examineText, 'A local villager.'),
+        talkText: normalizeText(npc?.talkText, 'Hello there.'),
+        questStartIds: normalizeQuestStartIds(npc?.questStartIds),
+      }))
       : [],
   };
+}
+
+function normalizeQuestZonesFromParsed(parsedZones: unknown): QuestZonePlacement[] {
+  if (!Array.isArray(parsedZones)) {
+    return [];
+  }
+
+  return parsedZones
+    .map((zone, index) => {
+      const zoneId = normalizeText(String((zone as { id?: string })?.id ?? ''), `zone-${index + 1}`);
+      const zoneName = normalizeText(String((zone as { name?: string })?.name ?? ''), zoneId);
+      const rectsSource = (zone as { rects?: unknown[] })?.rects;
+      const rects = Array.isArray(rectsSource)
+        ? rectsSource
+          .map((rect) => ({
+            x: Math.floor(Number((rect as { x?: number })?.x ?? 0)),
+            y: Math.floor(Number((rect as { y?: number })?.y ?? 0)),
+            width: normalizePositiveInt(Number((rect as { width?: number })?.width ?? 1), 1),
+            height: normalizePositiveInt(Number((rect as { height?: number })?.height ?? 1), 1),
+          }))
+          .filter((rect) => Number.isFinite(rect.x) && Number.isFinite(rect.y) && rect.width > 0 && rect.height > 0)
+        : [];
+
+      if (!zoneId || rects.length === 0) {
+        return null;
+      }
+
+      return {
+        id: zoneId,
+        name: zoneName,
+        rects,
+      };
+    })
+    .filter((zone): zone is QuestZonePlacement => zone !== null);
 }
 
 async function loadCanonicalWorldMapIfAvailable(): Promise<void> {
@@ -1227,6 +2217,9 @@ async function loadCanonicalWorldMapIfAvailable(): Promise<void> {
     }
 
     const parsed = await response.json();
+    state.questZones = normalizeQuestZonesFromParsed(parsed?.questZones);
+    refreshZoneEditorOptions();
+    setZoneEditorFormFromZone(null);
     // If it's a bundle (has .chunks), load all chunks
     if (parsed && Array.isArray(parsed.chunks)) {
       state.chunks.clear();
@@ -1262,12 +2255,46 @@ async function loadCanonicalWorldMapIfAvailable(): Promise<void> {
   }
 }
 
+async function loadQuestIndexIfAvailable(): Promise<void> {
+  try {
+    const response = await fetch(QUEST_INDEX_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      appendDebugLog('quest-index', 'Failed to fetch quests/index.json');
+      state.questIndexEntries = [];
+      state.questZoneIdsByQuestId = new Map<string, Set<string>>();
+      refreshQuestOptionControls();
+      setQuestEditorFormFromEntry(null);
+      drawGrid();
+      updateStatus();
+      return;
+    }
+
+    const parsed = await response.json();
+    state.questIndexEntries = normalizeQuestIndexEntries(parsed);
+    refreshQuestIndexDerivedState();
+    refreshQuestOptionControls();
+    setQuestEditorFormFromEntry(null);
+    appendDebugLog('quest-index', `Loaded quest index entries: ${state.questZoneIdsByQuestId.size}`);
+    drawGrid();
+    updateStatus();
+  } catch (err) {
+    appendDebugLog('quest-index', 'Exception: ' + (err instanceof Error ? err.message : String(err)));
+    state.questIndexEntries = [];
+    state.questZoneIdsByQuestId = new Map<string, Set<string>>();
+    refreshQuestOptionControls();
+    setQuestEditorFormFromEntry(null);
+    drawGrid();
+    updateStatus();
+  }
+}
+
 function updateSelectionPanel(): void {
   selectionTerrainRow.style.display = 'none';
   selectionResourceRow.style.display = 'none';
   selectionMonsterRow.style.display = 'none';
   selectionObjectRow.style.display = 'none';
   selectionNpcRow.style.display = 'none';
+  selectionZoneRow.style.display = 'none';
 
   if (!state.selectedTile) {
     selectionSummaryElement.textContent = 'No tile selected.';
@@ -1282,6 +2309,7 @@ function updateSelectionPanel(): void {
   const monster = getMonsterAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const object = getObjectAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const npc = getNpcAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
+  const activeZone = findQuestZoneAtTile(worldTileX, worldTileY);
 
   selectionSummaryElement.textContent = [
     `Chunk: (${mapped.chunkX}, ${mapped.chunkY})`,
@@ -1292,7 +2320,8 @@ function updateSelectionPanel(): void {
     `Monster: ${monster ? `${monster.minionTypeId} (T${monster.tier})` : 'None'}`,
     `Object: ${object ? object.objectTypeId : 'None'}`,
     `NPC: ${npc ? `${npc.type} (${npc.name})` : 'None'}`,
-    `Quest: ${npc?.quest ? npc.quest.title : 'None'}`,
+    `Quest Starts: ${npc?.questStartIds?.length ? npc.questStartIds.join(', ') : 'None'}`,
+    `Quest Zone: ${activeZone ? activeZone.zone.id : 'None'}`,
   ].join('\n');
 
   if (state.layer === 'terrain') {
@@ -1335,10 +2364,33 @@ function updateSelectionPanel(): void {
       selectionNpcNameInput.value = npc?.name ?? '';
       selectionNpcExamineInput.value = npc?.examineText ?? '';
       selectionNpcTalkInput.value = npc?.talkText ?? '';
-      populateNpcQuestInputs(npc?.quest ?? null);
+      setSelectedOptionValues(selectionNpcQuestStartIdsSelect, npc?.questStartIds ?? []);
       state.npcFormSelectionKey = selectionKey;
       state.npcFormDirty = false;
     }
+  }
+
+  const selectedNpcZoneIds = getQuestZoneIdsForSelectedNpc();
+  const shouldShowZoneRow = state.layer === 'npcs' && !!npc && selectedNpcZoneIds.size > 0;
+  selectionZoneRow.style.display = shouldShowZoneRow ? 'block' : 'none';
+  if (!shouldShowZoneRow) {
+    return;
+  }
+
+  if (activeZone) {
+    selectionZoneIdInput.value = activeZone.zone.id;
+    selectionZoneNameInput.value = activeZone.zone.name;
+    selectionZoneXInput.value = String(activeZone.rect.x);
+    selectionZoneYInput.value = String(activeZone.rect.y);
+    selectionZoneWidthInput.value = String(activeZone.rect.width);
+    selectionZoneHeightInput.value = String(activeZone.rect.height);
+  } else {
+    selectionZoneIdInput.value = '';
+    selectionZoneNameInput.value = '';
+    selectionZoneXInput.value = String(worldTileX);
+    selectionZoneYInput.value = String(worldTileY);
+    selectionZoneWidthInput.value = '1';
+    selectionZoneHeightInput.value = '1';
   }
 }
 
@@ -1360,7 +2412,7 @@ function getHoverDetails(worldTileX: number, worldTileY: number): string {
     parts.push(`Object: ${object.objectTypeId}${object.blocksMovement ? ' [blocks]' : ''}`);
   }
   if (npc) {
-    parts.push(`NPC: ${npc.name} (${npc.type})${npc.quest ? ` [Quest: ${npc.quest.title}]` : ''}`);
+    parts.push(`NPC: ${npc.name} (${npc.type})`);
   }
 
   if (parts.length === 0) {
@@ -1400,6 +2452,7 @@ function updateStatus(
     `Monsters: ${state.data.monsters.length}`,
     `Objects: ${state.data.objects.length}`,
     `NPCs: ${state.data.npcs.length}`,
+    `Quest Zones: ${state.questZones.length}`,
   ].join('\n');
 
   hoverSummaryElement.textContent =
@@ -1418,8 +2471,29 @@ function getTileColor(tileId: number): string {
   return entry?.color ?? '#222833';
 }
 
+function drawTileHighlight(
+  drawingContext: CanvasRenderingContext2D,
+  pixelX: number,
+  pixelY: number,
+  tileSize: number,
+  strokeStyle: string,
+): void {
+  drawingContext.save();
+  drawingContext.strokeStyle = strokeStyle;
+  drawingContext.lineWidth = Math.max(1, Math.floor(tileSize * 0.14));
+  drawingContext.strokeRect(
+    pixelX + 1,
+    pixelY + 1,
+    Math.max(1, tileSize - 2),
+    Math.max(1, tileSize - 2),
+  );
+  drawingContext.restore();
+}
+
 function drawGrid(): void {
   const tileSize = state.tilePixelSize;
+  const questPreview = getQuestPreviewContext();
+  const selectedZoneId = getSelectedZoneIdForPreview();
   // Only render chunks that have been added
   const keysToRender = Array.from(addedChunkKeys);
   const chunkEntries = keysToRender.map((key) => {
@@ -1529,22 +2603,96 @@ function drawGrid(): void {
     }
 
     for (const monster of entry.chunk.monsters) {
+      const pixelX = (chunkOffsetTileX + monster.tileX) * tileSize;
+      const pixelY = (chunkOffsetTileY + monster.tileY) * tileSize;
       const centerX = (chunkOffsetTileX + monster.tileX) * tileSize + tileSize * 0.5;
       const centerY = (chunkOffsetTileY + monster.tileY) * tileSize + tileSize * 0.5;
       drawEditorEntityIcon(context, getMonsterIcon(), centerX, centerY, tileSize);
+      if (questPreview.targetMonsterTypeIds.has(monster.minionTypeId)) {
+        drawTileHighlight(context, pixelX, pixelY, tileSize, 'rgba(255, 130, 130, 0.95)');
+      }
     }
 
     for (const object of entry.chunk.objects) {
+      const pixelX = (chunkOffsetTileX + object.tileX) * tileSize;
+      const pixelY = (chunkOffsetTileY + object.tileY) * tileSize;
       const centerX = (chunkOffsetTileX + object.tileX) * tileSize + tileSize * 0.5;
       const centerY = (chunkOffsetTileY + object.tileY) * tileSize + tileSize * 0.5;
       drawEditorEntityIcon(context, getObjectIcon(object.objectTypeId), centerX, centerY, tileSize);
+      if (questPreview.targetObjectIds.has(object.id) || questPreview.targetObjectTypeIds.has(object.objectTypeId)) {
+        drawTileHighlight(context, pixelX, pixelY, tileSize, 'rgba(255, 176, 90, 0.95)');
+      }
     }
 
     for (const npc of entry.chunk.npcs) {
+      const pixelX = (chunkOffsetTileX + npc.tileX) * tileSize;
+      const pixelY = (chunkOffsetTileY + npc.tileY) * tileSize;
       const centerX = (chunkOffsetTileX + npc.tileX) * tileSize + tileSize * 0.5;
       const centerY = (chunkOffsetTileY + npc.tileY) * tileSize + tileSize * 0.5;
       drawEditorEntityIcon(context, getNpcIcon(npc.type), centerX, centerY, tileSize);
+
+      const isQuestGiver = questPreview.giverNpcIds.has(npc.id);
+      const isQuestTarget = questPreview.targetNpcIds.has(npc.id);
+      if (isQuestGiver && isQuestTarget) {
+        drawTileHighlight(context, pixelX, pixelY, tileSize, 'rgba(177, 120, 255, 0.95)');
+      } else if (isQuestGiver) {
+        drawTileHighlight(context, pixelX, pixelY, tileSize, 'rgba(95, 187, 255, 0.95)');
+      } else if (isQuestTarget) {
+        drawTileHighlight(context, pixelX, pixelY, tileSize, 'rgba(255, 166, 105, 0.95)');
+      }
     }
+  }
+
+  for (const zone of getVisibleQuestZones()) {
+    for (const rect of zone.rects) {
+      const localTileX = rect.x - (minChunkX * MAP_WIDTH_TILES);
+      const localTileY = rect.y - (minChunkY * MAP_HEIGHT_TILES);
+      const pixelX = localTileX * tileSize;
+      const pixelY = localTileY * tileSize;
+      const pixelWidth = rect.width * tileSize;
+      const pixelHeight = rect.height * tileSize;
+
+      context.save();
+      const isSelectedZone = selectedZoneId === zone.id;
+      const isQuestZone = questPreview.zoneIds.has(zone.id);
+      if (isSelectedZone) {
+        context.fillStyle = 'rgba(97, 208, 255, 0.20)';
+        context.strokeStyle = 'rgba(97, 208, 255, 0.98)';
+      } else if (isQuestZone) {
+        context.fillStyle = 'rgba(177, 120, 255, 0.16)';
+        context.strokeStyle = 'rgba(177, 120, 255, 0.95)';
+      } else {
+        context.fillStyle = 'rgba(255, 197, 71, 0.16)';
+        context.strokeStyle = 'rgba(255, 197, 71, 0.95)';
+      }
+      context.fillRect(pixelX, pixelY, pixelWidth, pixelHeight);
+      context.lineWidth = Math.max(1, Math.floor(tileSize * 0.12));
+      context.strokeRect(pixelX + 0.5, pixelY + 0.5, Math.max(0, pixelWidth - 1), Math.max(0, pixelHeight - 1));
+      context.restore();
+    }
+  }
+
+  for (const travelTile of questPreview.travelTiles) {
+    const localTileX = travelTile.tileX - (minChunkX * MAP_WIDTH_TILES);
+    const localTileY = travelTile.tileY - (minChunkY * MAP_HEIGHT_TILES);
+    if (localTileX < 0 || localTileY < 0 || localTileX >= width || localTileY >= height) {
+      continue;
+    }
+
+    const centerX = localTileX * tileSize + tileSize * 0.5;
+    const centerY = localTileY * tileSize + tileSize * 0.5;
+    context.save();
+    context.strokeStyle = 'rgba(255, 240, 140, 0.95)';
+    context.lineWidth = Math.max(1, Math.floor(tileSize * 0.14));
+    context.beginPath();
+    context.moveTo(centerX - tileSize * 0.35, centerY);
+    context.lineTo(centerX + tileSize * 0.35, centerY);
+    context.stroke();
+    context.beginPath();
+    context.moveTo(centerX, centerY - tileSize * 0.35);
+    context.lineTo(centerX, centerY + tileSize * 0.35);
+    context.stroke();
+    context.restore();
   }
 
   context.strokeStyle = 'rgba(220, 55, 55, 0.9)';
@@ -1755,7 +2903,7 @@ function placeAt(tileX: number, tileY: number, erase: boolean): void {
           tileY: localTileY,
           examineText: npcType.examineText,
           talkText: npcType.talkText,
-          quest: null,
+          questStartIds: [],
         });
       }
     }
@@ -2019,6 +3167,35 @@ clearDebugLogButton.addEventListener('click', () => {
   debugLogElement.textContent = 'Debug log cleared.';
 });
 
+sidebarResizerElement.addEventListener('mousedown', (event) => {
+  event.preventDefault();
+  isSidebarResizing = true;
+  sidebarResizeStartClientX = event.clientX;
+  sidebarResizeStartWidth = sidebarElement.getBoundingClientRect().width;
+  document.body.classList.add('sidebar-resizing');
+});
+
+window.addEventListener('mousemove', (event) => {
+  if (!isSidebarResizing) {
+    return;
+  }
+
+  event.preventDefault();
+  const deltaX = event.clientX - sidebarResizeStartClientX;
+  const targetWidth = sidebarResizeStartWidth + deltaX;
+  applySidebarWidth(targetWidth);
+});
+
+window.addEventListener('mouseup', () => {
+  if (!isSidebarResizing) {
+    return;
+  }
+
+  isSidebarResizing = false;
+  document.body.classList.remove('sidebar-resizing');
+  saveSidebarWidth(sidebarElement.getBoundingClientRect().width);
+});
+
 toolModeSelect.addEventListener('change', () => {
   state.toolMode = toolModeSelect.value as ToolMode;
   updateStatus();
@@ -2050,26 +3227,11 @@ npcTypeSelect.addEventListener('change', () => {
   state.selectedNpcTypeId = npcTypeSelect.value;
 });
 
-selectionNpcQuestEnabledInput.addEventListener('change', () => {
-  markNpcFormDirty();
-  setNpcQuestFieldsVisible(selectionNpcQuestEnabledInput.checked);
-});
-
 selectionNpcTypeSelect.addEventListener('change', markNpcFormDirty);
 selectionNpcNameInput.addEventListener('input', markNpcFormDirty);
 selectionNpcExamineInput.addEventListener('input', markNpcFormDirty);
 selectionNpcTalkInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestTitleInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestMissionInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestStartInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestProgressInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestEndInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestObjectiveTypeSelect.addEventListener('change', markNpcFormDirty);
-selectionNpcQuestTargetInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestCountInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestRewardGoldInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestRewardItemInput.addEventListener('input', markNpcFormDirty);
-selectionNpcQuestRewardQtyInput.addEventListener('input', markNpcFormDirty);
+selectionNpcQuestStartIdsSelect.addEventListener('change', markNpcFormDirty);
 
 monsterTierInput.addEventListener('change', () => {
   const value = Number(monsterTierInput.value);
@@ -2244,8 +3406,7 @@ selectionNpcUpdateButton.addEventListener('click', () => {
   const existing = getNpcAt(mapped.localTileX, mapped.localTileY);
   const npcType = NPC_TYPES.find((entry) => entry.id === selectionNpcTypeSelect.value) ?? NPC_TYPES[0];
   const existingNpcId = existing?.id ?? nextNpcId(npcType.id);
-  const existingQuestId = existing?.quest?.id ?? `quest-${existingNpcId}`;
-  const quest = buildQuestFromSelectionInputs(existingQuestId);
+  const questStartIds = Array.from(new Set(getSelectedOptionValues(selectionNpcQuestStartIdsSelect)));
   const npcName = normalizeText(selectionNpcNameInput.value, npcType.defaultName);
   const npcExamineText = normalizeText(selectionNpcExamineInput.value, npcType.examineText);
   const npcTalkText = normalizeText(selectionNpcTalkInput.value, npcType.talkText);
@@ -2260,7 +3421,7 @@ selectionNpcUpdateButton.addEventListener('click', () => {
       tileY: mapped.localTileY,
       examineText: npcExamineText,
       talkText: npcTalkText,
-      quest,
+      questStartIds,
     });
     drawGrid();
   });
@@ -2284,6 +3445,63 @@ selectionNpcDeleteButton.addEventListener('click', () => {
   state.npcFormSelectionKey = getSelectedNpcFormKey();
 });
 
+selectionZoneUpdateButton.addEventListener('click', () => {
+  const zoneId = normalizeText(selectionZoneIdInput.value);
+  if (!zoneId) {
+    return;
+  }
+
+  const zoneName = normalizeText(selectionZoneNameInput.value, zoneId);
+  const parsedX = Number(selectionZoneXInput.value);
+  const parsedY = Number(selectionZoneYInput.value);
+  const rect: QuestZoneRect = {
+    x: Number.isFinite(parsedX) ? Math.floor(parsedX) : (state.selectedTile?.worldTileX ?? 0),
+    y: Number.isFinite(parsedY) ? Math.floor(parsedY) : (state.selectedTile?.worldTileY ?? 0),
+    width: normalizePositiveInt(Number(selectionZoneWidthInput.value), 1),
+    height: normalizePositiveInt(Number(selectionZoneHeightInput.value), 1),
+  };
+
+  const existingIndex = state.questZones.findIndex((zone) => zone.id === zoneId);
+  if (existingIndex >= 0) {
+    state.questZones[existingIndex] = {
+      id: zoneId,
+      name: zoneName,
+      rects: [rect],
+    };
+  } else {
+    state.questZones.push({
+      id: zoneId,
+      name: zoneName,
+      rects: [rect],
+    });
+  }
+
+  refreshZoneEditorOptions();
+
+  drawGrid();
+  if (state.selectedTile) {
+    updateStatus(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
+    return;
+  }
+  updateStatus();
+});
+
+selectionZoneDeleteButton.addEventListener('click', () => {
+  const zoneId = normalizeText(selectionZoneIdInput.value);
+  if (!zoneId) {
+    return;
+  }
+
+  state.questZones = state.questZones.filter((zone) => zone.id !== zoneId);
+  refreshZoneEditorOptions();
+  drawGrid();
+  if (state.selectedTile) {
+    updateStatus(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
+    return;
+  }
+  updateStatus();
+});
+
 async function didServerPersistMap(expectedMap: unknown): Promise<boolean> {
   try {
     const response = await fetch(CANONICAL_WORLD_MAP_URL, { cache: 'no-store' });
@@ -2296,6 +3514,335 @@ async function didServerPersistMap(expectedMap: unknown): Promise<boolean> {
     return false;
   }
 }
+
+async function didServerPersistQuestIndex(expectedIndex: unknown): Promise<boolean> {
+  try {
+    const response = await fetch(QUEST_INDEX_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      return false;
+    }
+
+    const persistedIndex = await response.json();
+    return JSON.stringify(persistedIndex) === JSON.stringify(expectedIndex);
+  } catch {
+    return false;
+  }
+}
+
+questEditorSelect.addEventListener('change', () => {
+  const selectedQuestId = String(questEditorSelect.value ?? '').trim();
+  const entry = state.questIndexEntries.find((candidate) => getQuestId(candidate) === selectedQuestId) ?? null;
+  setQuestEditorFormFromEntry(entry);
+  drawGrid();
+  updateStatus();
+});
+
+questStepSelect.addEventListener('change', () => {
+  questEditorSelectedStepIndex = Math.max(0, Math.floor(Number(questStepSelect.value) || 0));
+  questEditorSelectedObjectiveIndex = 0;
+  renderStepFields();
+  renderObjectiveList();
+  renderObjectiveFields();
+});
+
+questObjectiveSelect.addEventListener('change', () => {
+  questEditorSelectedObjectiveIndex = Math.max(0, Math.floor(Number(questObjectiveSelect.value) || 0));
+  renderObjectiveFields();
+});
+
+questStepAddButton.addEventListener('click', () => {
+  const steps = getMutableQuestSteps(questEditorDraft);
+  const nextIndex = steps.length + 1;
+  steps.push({ id: `step-${nextIndex}`, description: '', completion: 'all', objectives: [] });
+  questEditorSelectedStepIndex = steps.length - 1;
+  questEditorSelectedObjectiveIndex = 0;
+  renderStepList();
+  renderStepFields();
+  renderObjectiveList();
+  renderObjectiveFields();
+});
+
+questStepApplyButton.addEventListener('click', () => {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+
+  step.id = normalizeText(questStepIdInput.value, `step-${questEditorSelectedStepIndex + 1}`);
+  step.description = normalizeText(questStepDescriptionInput.value);
+  step.completion = questStepCompletionSelect.value === 'any' ? 'any' : 'all';
+  renderStepList();
+  renderStepFields();
+});
+
+questStepDeleteButton.addEventListener('click', () => {
+  const steps = getMutableQuestSteps(questEditorDraft);
+  if (steps.length === 0) {
+    return;
+  }
+
+  steps.splice(questEditorSelectedStepIndex, 1);
+  questEditorSelectedStepIndex = Math.max(0, Math.min(steps.length - 1, questEditorSelectedStepIndex));
+  questEditorSelectedObjectiveIndex = 0;
+  renderStepList();
+  renderStepFields();
+  renderObjectiveList();
+  renderObjectiveFields();
+});
+
+questObjectiveAddButton.addEventListener('click', () => {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+
+  const objectives = getMutableObjectives(step);
+  const nextObjective = buildObjectiveTemplate(questObjectiveTypeSelect.value, objectives.length + 1);
+  objectives.push(nextObjective);
+  questEditorSelectedObjectiveIndex = objectives.length - 1;
+  renderObjectiveList();
+  renderObjectiveFields();
+});
+
+questObjectiveApplyButton.addEventListener('click', () => {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+
+  const objectives = getMutableObjectives(step);
+  if (objectives.length === 0) {
+    return;
+  }
+
+  questEditorSelectedObjectiveIndex = Math.max(0, Math.min(objectives.length - 1, questEditorSelectedObjectiveIndex));
+  const objective = objectives[questEditorSelectedObjectiveIndex];
+  objective.id = normalizeText(questObjectiveIdInput.value, `obj-${questEditorSelectedObjectiveIndex + 1}`);
+  objective.type = questObjectiveTypeSelect.value;
+  objective.targetId = normalizeText(questObjectiveTargetIdInput.value);
+  objective.itemId = normalizeText(questObjectiveItemIdInput.value);
+  objective.count = normalizePositiveInt(Number(questObjectiveCountInput.value), 1);
+  objective.quantity = normalizePositiveInt(Number(questObjectiveQuantityInput.value), 1);
+  objective.zoneId = normalizeText(questObjectiveZoneIdInput.value);
+  objective.npcId = normalizeText(questObjectiveNpcIdInput.value);
+  objective.toNpcId = normalizeText(questObjectiveToNpcIdInput.value);
+  objective.objectTypeId = normalizeText(questObjectiveObjectTypeIdInput.value);
+  objective.objectId = normalizeText(questObjectiveObjectIdInput.value);
+  objective.tileX = Number.isFinite(Number(questObjectiveTileXInput.value)) ? Math.floor(Number(questObjectiveTileXInput.value)) : undefined;
+  objective.tileY = Number.isFinite(Number(questObjectiveTileYInput.value)) ? Math.floor(Number(questObjectiveTileYInput.value)) : undefined;
+  objective.radius = Number.isFinite(Number(questObjectiveRadiusInput.value)) ? Math.max(0, Math.floor(Number(questObjectiveRadiusInput.value))) : undefined;
+  renderObjectiveList();
+  renderObjectiveFields();
+});
+
+questObjectiveDeleteButton.addEventListener('click', () => {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+
+  const objectives = getMutableObjectives(step);
+  if (objectives.length === 0) {
+    return;
+  }
+
+  objectives.splice(questEditorSelectedObjectiveIndex, 1);
+  questEditorSelectedObjectiveIndex = Math.max(0, Math.min(objectives.length - 1, questEditorSelectedObjectiveIndex));
+  renderObjectiveList();
+  renderObjectiveFields();
+});
+
+questEditorNewButton.addEventListener('click', () => {
+  questEditorSelect.value = '';
+  setQuestEditorFormFromEntry(null);
+  questEditorIdInput.focus();
+  drawGrid();
+  updateStatus();
+});
+
+questEditorUpsertButton.addEventListener('click', () => {
+  syncDraftTopLevelFromInputs();
+
+  const activeStep = getSelectedStep();
+  if (activeStep) {
+    activeStep.id = normalizeText(questStepIdInput.value, `step-${questEditorSelectedStepIndex + 1}`);
+    activeStep.description = normalizeText(questStepDescriptionInput.value);
+    activeStep.completion = questStepCompletionSelect.value === 'any' ? 'any' : 'all';
+
+    const objectives = getMutableObjectives(activeStep);
+    if (objectives.length > 0) {
+      questEditorSelectedObjectiveIndex = Math.max(0, Math.min(objectives.length - 1, questEditorSelectedObjectiveIndex));
+      const activeObjective = objectives[questEditorSelectedObjectiveIndex];
+      activeObjective.id = normalizeText(questObjectiveIdInput.value, `obj-${questEditorSelectedObjectiveIndex + 1}`);
+      activeObjective.type = questObjectiveTypeSelect.value;
+      activeObjective.targetId = normalizeText(questObjectiveTargetIdInput.value);
+      activeObjective.itemId = normalizeText(questObjectiveItemIdInput.value);
+      activeObjective.count = normalizePositiveInt(Number(questObjectiveCountInput.value), 1);
+      activeObjective.quantity = normalizePositiveInt(Number(questObjectiveQuantityInput.value), 1);
+      activeObjective.zoneId = normalizeText(questObjectiveZoneIdInput.value);
+      activeObjective.npcId = normalizeText(questObjectiveNpcIdInput.value);
+      activeObjective.toNpcId = normalizeText(questObjectiveToNpcIdInput.value);
+      activeObjective.objectTypeId = normalizeText(questObjectiveObjectTypeIdInput.value);
+      activeObjective.objectId = normalizeText(questObjectiveObjectIdInput.value);
+      activeObjective.tileX = Number.isFinite(Number(questObjectiveTileXInput.value)) ? Math.floor(Number(questObjectiveTileXInput.value)) : undefined;
+      activeObjective.tileY = Number.isFinite(Number(questObjectiveTileYInput.value)) ? Math.floor(Number(questObjectiveTileYInput.value)) : undefined;
+      activeObjective.radius = Number.isFinite(Number(questObjectiveRadiusInput.value)) ? Math.max(0, Math.floor(Number(questObjectiveRadiusInput.value))) : undefined;
+    }
+  }
+
+  const questId = normalizeText(String(questEditorDraft.id ?? ''));
+  if (!questId) {
+    window.alert('Quest ID is required.');
+    return;
+  }
+
+  questEditorDraft.id = questId;
+  const existingIndex = state.questIndexEntries.findIndex((entry) => getQuestId(entry) === questId);
+
+  const nextEntry = JSON.parse(JSON.stringify(questEditorDraft)) as QuestIndexEntry;
+  if (existingIndex >= 0) {
+    state.questIndexEntries[existingIndex] = nextEntry;
+  } else {
+    state.questIndexEntries.push(nextEntry);
+    state.questIndexEntries.sort((first, second) => getQuestId(first).localeCompare(getQuestId(second)));
+  }
+
+  refreshQuestIndexDerivedState();
+  refreshQuestOptionControls();
+  questEditorSelect.value = questId;
+  questEditorIdInput.value = questId;
+  setQuestEditorFormFromEntry(nextEntry);
+  drawGrid();
+  updateStatus();
+});
+
+questEditorDeleteButton.addEventListener('click', () => {
+  const questId = normalizeText(questEditorIdInput.value || questEditorSelect.value);
+  if (!questId) {
+    return;
+  }
+
+  state.questIndexEntries = state.questIndexEntries.filter((entry) => getQuestId(entry) !== questId);
+  refreshQuestIndexDerivedState();
+  refreshQuestOptionControls();
+  setQuestEditorFormFromEntry(null);
+
+  for (const chunk of state.chunks.values()) {
+    for (const npc of chunk.npcs) {
+      npc.questStartIds = npc.questStartIds.filter((entryId) => entryId !== questId);
+    }
+  }
+
+  drawGrid();
+  updateStatus();
+});
+
+questEditorSaveButton.addEventListener('click', async () => {
+  const payloadIndex = state.questIndexEntries.map((entry) => ({ ...entry }));
+  const payload = JSON.stringify(payloadIndex, null, 2);
+
+  try {
+    const response = await fetch(QUEST_INDEX_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    if (response.ok && await didServerPersistQuestIndex(payloadIndex)) {
+      window.alert('Quests saved to quests/index.json!');
+      return;
+    }
+
+    const postResponse = await fetch(QUEST_INDEX_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    if (postResponse.ok && await didServerPersistQuestIndex(payloadIndex)) {
+      window.alert('Quests saved to quests/index.json!');
+      return;
+    }
+
+    throw new Error('Server did not accept PUT/POST');
+  } catch {
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'quest-index.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    window.alert(`Could not save directly to server. Downloaded quest-index.json instead. Upload it manually to ${QUEST_INDEX_URL}.`);
+  }
+});
+
+zoneEditorSelect.addEventListener('change', () => {
+  const selectedZoneId = normalizeText(zoneEditorSelect.value);
+  const selectedZone = state.questZones.find((zone) => zone.id === selectedZoneId) ?? null;
+  setZoneEditorFormFromZone(selectedZone);
+  drawGrid();
+  updateStatus();
+});
+
+zoneEditorNewButton.addEventListener('click', () => {
+  zoneEditorSelect.value = '';
+  setZoneEditorFormFromZone(null);
+  zoneEditorIdInput.focus();
+  drawGrid();
+  updateStatus();
+});
+
+zoneEditorUpsertButton.addEventListener('click', () => {
+  const zoneId = normalizeText(zoneEditorIdInput.value);
+  if (!zoneId) {
+    return;
+  }
+
+  const zoneName = normalizeText(zoneEditorNameInput.value, zoneId);
+  const parsedX = Number(zoneEditorXInput.value);
+  const parsedY = Number(zoneEditorYInput.value);
+  const rect: QuestZoneRect = {
+    x: Number.isFinite(parsedX) ? Math.floor(parsedX) : (state.selectedTile?.worldTileX ?? 0),
+    y: Number.isFinite(parsedY) ? Math.floor(parsedY) : (state.selectedTile?.worldTileY ?? 0),
+    width: normalizePositiveInt(Number(zoneEditorWidthInput.value), 1),
+    height: normalizePositiveInt(Number(zoneEditorHeightInput.value), 1),
+  };
+
+  const existingIndex = state.questZones.findIndex((zone) => zone.id === zoneId);
+  const nextZone: QuestZonePlacement = {
+    id: zoneId,
+    name: zoneName,
+    rects: [rect],
+  };
+
+  if (existingIndex >= 0) {
+    state.questZones[existingIndex] = nextZone;
+  } else {
+    state.questZones.push(nextZone);
+  }
+
+  refreshZoneEditorOptions();
+  zoneEditorSelect.value = zoneId;
+  setZoneEditorFormFromZone(nextZone);
+  drawGrid();
+  updateStatus();
+});
+
+zoneEditorDeleteButton.addEventListener('click', () => {
+  const zoneId = normalizeText(zoneEditorIdInput.value || zoneEditorSelect.value);
+  if (!zoneId) {
+    return;
+  }
+
+  state.questZones = state.questZones.filter((zone) => zone.id !== zoneId);
+  refreshZoneEditorOptions();
+  setZoneEditorFormFromZone(null);
+  drawGrid();
+  updateStatus();
+});
 
 exportButton.addEventListener('click', async () => {
   const chunkKeysToSave = Array.from(addedChunkKeys)
@@ -2311,10 +3858,24 @@ exportButton.addEventListener('click', async () => {
       return firstChunk.chunkX - secondChunk.chunkX;
     });
 
+  const referencedQuestZoneIds = getReferencedQuestZoneIds();
+
   const payloadMap = {
     version: WORLD_DATA_VERSION,
     chunkWidth: MAP_WIDTH_TILES,
     chunkHeight: MAP_HEIGHT_TILES,
+    questZones: state.questZones
+      .filter((zone) => referencedQuestZoneIds.has(zone.id))
+      .map((zone) => ({
+      id: zone.id,
+      name: zone.name,
+      rects: zone.rects.map((rect) => ({
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      })),
+      })),
     chunks: chunkKeysToSave.map((key) => {
       const chunk = state.chunks.get(key);
       if (!chunk) return null;
@@ -2324,7 +3885,10 @@ exportButton.addEventListener('click', async () => {
         resources: [...chunk.resources],
         monsters: [...chunk.monsters],
         objects: [...chunk.objects],
-        npcs: [...chunk.npcs],
+        npcs: chunk.npcs.map((npc) => ({
+          ...npc,
+          questStartIds: Array.isArray(npc.questStartIds) ? [...npc.questStartIds] : [],
+        })),
       };
     }).filter(Boolean),
   };
@@ -2424,7 +3988,11 @@ window.addEventListener('keydown', (event) => {
 });
 
 refreshLayerRows();
+loadSavedSidebarWidth();
 drawGrid();
 scheduleVisibleChunkLoading();
 updateStatus();
+refreshZoneEditorOptions();
+setZoneEditorFormFromZone(null);
 void loadCanonicalWorldMapIfAvailable();
+void loadQuestIndexIfAvailable();

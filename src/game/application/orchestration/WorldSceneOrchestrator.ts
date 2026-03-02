@@ -3,6 +3,9 @@ import {
   type CraftingOpenState,
   type InventoryState,
   MultiplayerClient,
+  type QuestDialogueState,
+  type QuestJournalState,
+  type QuestNotificationState,
   type RemotePlayerState,
   type WorldSnapshot,
 } from '../../net/MultiplayerClient';
@@ -25,6 +28,9 @@ export interface WorldSceneOrchestratorDeps {
   upsertRemotePlayer: (player: RemotePlayerState) => void;
   removeRemotePlayer: (id: string) => void;
   handleChatMessage: (message: ChatMessageState) => void;
+  handleQuestJournal: (journal: QuestJournalState) => void;
+  handleQuestDialogue: (dialogue: QuestDialogueState) => void;
+  handleQuestNotification: (notification: QuestNotificationState) => void;
   openShop: (shopId: string) => void;
   openBank: (inventory: InventoryState, bank: InventoryState) => void;
   openCrafting: (state: CraftingOpenState) => void;
@@ -70,6 +76,15 @@ export class WorldSceneOrchestrator {
       },
       (message) => {
         this.deps.handleChatMessage(message);
+      },
+      (journal) => {
+        this.deps.handleQuestJournal(journal);
+      },
+      (dialogue) => {
+        this.deps.handleQuestDialogue(dialogue);
+      },
+      (notification) => {
+        this.deps.handleQuestNotification(notification);
       },
       (shopId) => {
         this.deps.openShop(shopId);

@@ -168,6 +168,7 @@ export interface NpcState {
   tileX: number;
   tileY: number;
   examineText: string;
+  questAvailable?: boolean;
 }
 
 export interface ShopListingState {
@@ -211,6 +212,76 @@ export interface CraftingOpenState {
 
 export interface ChatMessageState {
   id: string;
+  text: string;
+  timestamp: number;
+}
+
+export interface QuestObjectiveViewState {
+  id: string;
+  description: string;
+  progress: number;
+  required: number;
+}
+
+export interface QuestStepViewState {
+  id: string;
+  description: string;
+  completed: boolean;
+  objectives: QuestObjectiveViewState[];
+}
+
+export interface QuestRequirementViewState {
+  label: string;
+  met: boolean;
+}
+
+export interface QuestRewardViewState {
+  gold?: number;
+  items?: Array<{ itemId: string; quantity: number }>;
+  xp?: Array<{ skill: string; amount: number }>;
+}
+
+export interface QuestChainViewState {
+  nextQuestIds?: string[];
+}
+
+export interface QuestJournalEntryState {
+  questId: string;
+  title: string;
+  status: 'active' | 'completable' | 'completed' | 'locked';
+  currentStepIndex: number;
+  steps: QuestStepViewState[];
+  requirements: QuestRequirementViewState[];
+  rewards: QuestRewardViewState;
+  chain: QuestChainViewState;
+}
+
+export interface QuestJournalState {
+  active: QuestJournalEntryState[];
+  completed: QuestJournalEntryState[];
+  selectedQuestId: string | null;
+}
+
+export interface QuestDialogueOptionState {
+  id: string;
+  label: string;
+  action: 'accept' | 'decline' | 'turnin' | 'continue' | 'close';
+}
+
+export interface QuestDialogueState {
+  open: boolean;
+  npcId: string;
+  npcName: string;
+  questId: string | null;
+  mode: 'ambient' | 'offer' | 'progress' | 'turnin' | 'completed' | 'locked';
+  text: string;
+  options: QuestDialogueOptionState[];
+}
+
+export interface QuestNotificationState {
+  id: string;
+  type: 'progress' | 'step_complete' | 'quest_complete' | 'quest_unlocked' | 'failed';
+  questId: string;
   text: string;
   timestamp: number;
 }
@@ -259,6 +330,9 @@ export class MultiplayerClient {
     private readonly onPlayerJoined: (player: RemotePlayerState) => void,
     private readonly onPlayerLeft: (id: string) => void,
     private readonly onChatMessage: (message: ChatMessageState) => void,
+    private readonly onQuestJournal: (journal: QuestJournalState) => void,
+    private readonly onQuestDialogue: (dialogue: QuestDialogueState) => void,
+    private readonly onQuestNotification: (notification: QuestNotificationState) => void,
     private readonly onShopOpen: (shopId: string) => void,
     private readonly onBankOpen: (inventory: InventoryState, bank: InventoryState) => void,
     private readonly onCraftingOpen: (state: CraftingOpenState) => void,
@@ -386,6 +460,21 @@ export class MultiplayerClient {
         return;
       }
 
+      if (message.type === 'questJournal') {
+        this.onQuestJournal(message.journal);
+        return;
+      }
+
+      if (message.type === 'questDialogue') {
+        this.onQuestDialogue(message.dialogue);
+        return;
+      }
+
+      if (message.type === 'questNotification') {
+        this.onQuestNotification(message.notification);
+        return;
+      }
+
       if (message.type === 'shopOpen') {
         this.onShopOpen(message.shopId);
         return;
@@ -493,6 +582,42 @@ export class MultiplayerClient {
       JSON.stringify({
         type: 'npcTalk',
         npcId,
+      }),
+    );
+  }
+
+  sendQuestDialogueAction(
+    npcId: string,
+    action: 'accept' | 'decline' | 'turnin' | 'continue' | 'close',
+    questId?: string,
+    optionId?: string,
+  ): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'questDialogueAction',
+        npcId,
+        action,
+        questId,
+        optionId,
+      }),
+    );
+  }
+
+  sendQuestJournalSelect(questId: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'questJournalSelect',
+        questId,
       }),
     );
   }
