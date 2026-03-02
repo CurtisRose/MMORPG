@@ -57,8 +57,13 @@ How to deploy the multiplayer server:
     sudo apt update && sudo apt install nodejs npm
 4. On the VPS, in your project folder, run:
     npm install
+    npm run build
 5. Start the multiplayer server:
+    npm run dev:server
+    or:
     node server/multiplayerServer.mjs
+    optional debug logging:
+    npm run dev:server:debug
     (You may want to use a process manager like pm2 or screen for production.)
 6. Make sure port 2567 (or your chosen port) is open in your VPS firewall.
 7. In your website code, update the WebSocket URL to point to your VPS public IP or domain, e.g.:
