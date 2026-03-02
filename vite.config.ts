@@ -8,6 +8,7 @@ export default defineConfig(({ command }) => ({
       input: {
         main: path.resolve(__dirname, 'index.html'),
         mapEditor: path.resolve(__dirname, 'map-editor.html'),
+        dataEditor: path.resolve(__dirname, 'data-editor.html'),
       },
     },
   },

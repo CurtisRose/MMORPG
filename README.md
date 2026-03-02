@@ -56,6 +56,11 @@ npm run build
 npm run preview
 ```
 
+## Editor Pages
+- Game: `/index.html`
+- Map editor: `/map-editor.html`
+- Data editor (items, NPCs, minions): `/data-editor.html`
+
 ## Persistence Notes
 - Character state (position, HP, skills, inventory, gold, display name) is saved server-side.
 - The browser keeps a stable profile ID in localStorage (`game-profile-id`) and sends it on connect.
