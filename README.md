@@ -34,6 +34,14 @@ npm run dev:server:debug
 ```bash
 npm run smoke:multiplayer
 ```
+- Automated crafting smoke test:
+```bash
+npm run smoke:crafting
+```
+- Regression suite for extracted server systems:
+```bash
+npm run test:regression
+```
 
 ## Optional Client Debug Flags
 Copy `.env.example` to `.env.local` and adjust values.

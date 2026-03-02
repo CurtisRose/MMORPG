@@ -1,3 +1,6 @@
+import { type PlayerSkillsState } from '../domain/player/skillTypes';
+import { type ServerMessage } from './protocol/serverMessages';
+
 export interface InventorySlotState {
   itemId: string;
   quantity: number;
@@ -89,36 +92,7 @@ export interface RemotePlayerState {
   nextCombatAt: number;
   activeInteractionNodeId: string | null;
   gold: number;
-  skills: {
-    woodcutting: {
-      xp: number;
-      level: number;
-    };
-    mining: {
-      xp: number;
-      level: number;
-    };
-    smithing: {
-      xp: number;
-      level: number;
-    };
-    fletching: {
-      xp: number;
-      level: number;
-    };
-    strength: {
-      xp: number;
-      level: number;
-    };
-    defense: {
-      xp: number;
-      level: number;
-    };
-    constitution: {
-      xp: number;
-      level: number;
-    };
-  };
+  skills: PlayerSkillsState;
   inventory: InventoryState;
   equipment: EquipmentState;
   lastActionText: string | null;
@@ -248,64 +222,6 @@ export interface MultiplayerClientStats {
   lastMessageAt: number | null;
 }
 
-interface WelcomeMessage {
-  type: 'welcome';
-  id: string;
-  players: Record<string, RemotePlayerState>;
-  nodes: Record<string, WorldNodeState>;
-  npcs: Record<string, NpcState>;
-  objects: Record<string, WorldObjectState>;
-  shops: Record<string, ShopState>;
-  enemies: Record<string, EnemyState>;
-  groundItems: Record<string, GroundItemState>;
-}
-
-interface StateMessage {
-  type: 'state';
-  players: Record<string, RemotePlayerState>;
-  nodes: Record<string, WorldNodeState>;
-  npcs: Record<string, NpcState>;
-  objects: Record<string, WorldObjectState>;
-  shops: Record<string, ShopState>;
-  enemies: Record<string, EnemyState>;
-  groundItems: Record<string, GroundItemState>;
-}
-
-interface ShopOpenMessage {
-  type: 'shopOpen';
-  shopId: string;
-}
-
-interface BankOpenMessage {
-  type: 'bankOpen';
-  inventory: InventoryState;
-  bank: InventoryState;
-}
-
-interface CraftingOpenMessage {
-  type: 'craftingOpen';
-  stationType: string;
-  title: string;
-  objectId: string;
-  inventory: InventoryState;
-  recipes: CraftingRecipeState[];
-}
-
-interface PlayerJoinedMessage {
-  type: 'playerJoined';
-  player: RemotePlayerState;
-}
-
-interface PlayerLeftMessage {
-  type: 'playerLeft';
-  id: string;
-}
-
-interface ChatMessage {
-  type: 'chat';
-  message: ChatMessageState;
-}
-
 interface PendingAuthPayload {
   mode: 'login' | 'register';
   username: string;
@@ -315,30 +231,6 @@ interface PendingAuthPayload {
 const AUTH_PENDING_KEY = 'game-auth-pending';
 const AUTH_TOKEN_KEY = 'game-auth-token';
 const AUTH_USERNAME_KEY = 'game-auth-username';
-
-type ServerMessage =
-  | WelcomeMessage
-  | StateMessage
-  | PlayerJoinedMessage
-  | PlayerLeftMessage
-  | ChatMessage
-  | ShopOpenMessage
-  | BankOpenMessage
-  | CraftingOpenMessage
-  | {
-      type: 'authRequired';
-      usernamePattern: string;
-      passwordPolicy: string;
-    }
-  | {
-      type: 'authOk';
-      token: string;
-      username: string;
-    }
-  | {
-      type: 'authError';
-      reason: string;
-    };
 
 function resolveMultiplayerUrl(): string {
   const configuredUrl = import.meta.env.VITE_MULTIPLAYER_URL as string | undefined;

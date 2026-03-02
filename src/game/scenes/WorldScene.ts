@@ -22,6 +22,39 @@ import {
   type WorldSnapshot,
 } from '../net/MultiplayerClient';
 import { generateTerrainData } from '../world/generateTerrainData';
+import { InteractionTargetRuntime } from '../application/interaction/InteractionTargetRuntime';
+import { WorldSceneOrchestrator } from '../application/orchestration/WorldSceneOrchestrator';
+import { PendingInteractionController } from '../application/interaction/PendingInteractionController';
+import { createBankPanel } from '../ui/panels/bankPanel';
+import { createCharacterPanel } from '../ui/panels/characterPanel';
+import { createChatPanel } from '../ui/panels/chatPanel';
+import { createCraftingPanel } from '../ui/panels/craftingPanel';
+import { createShopPanel } from '../ui/panels/shopPanel';
+import {
+  type ClickFeedbackKind,
+  type InteractionTarget,
+  type InteractionTargetType,
+  type SkillLevelSnapshot,
+} from '../domain/interaction/interactionTypes';
+import {
+  styleNodeSprite as applyNodeSpriteStyling,
+  styleNpcSprite as applyNpcSpriteStyling,
+  styleObjectSprite as applyObjectSpriteStyling,
+} from '../renderers/entitySpriteStyling';
+import {
+  syncNodeVisuals,
+  syncNpcVisuals,
+  syncObjectVisuals,
+} from '../renderers/staticEntitySnapshotRenderer';
+import {
+  syncEnemyVisuals,
+  syncGroundItemVisuals,
+} from '../renderers/dynamicEntitySnapshotRenderer';
+import {
+  pruneRemotePlayerVisuals,
+  removeRemotePlayerVisual,
+  upsertRemotePlayerVisual,
+} from '../renderers/remotePlayerSnapshotRenderer';
 
 const TERRAIN_TEXTURE_KEY = 'terrain-tiles';
 const PLAYER_TEXTURE_KEY = 'player';
@@ -41,6 +74,8 @@ const HEALTH_BAR_WIDTH = 26;
 const HEALTH_BAR_HEIGHT = 4;
 const DEBUG_HUD_VISIBLE_BY_DEFAULT =
   String(import.meta.env.VITE_DEBUG_HUD ?? 'false').toLowerCase() === 'true';
+const DEBUG_INTERACTION_TRACE =
+  String(import.meta.env.VITE_DEBUG_INTERACTION ?? 'true').toLowerCase() === 'true';
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
 
 function isValidTerrainGrid(value: unknown): value is number[][] {
@@ -215,39 +250,6 @@ interface ContextMenuOption {
   onSelect?: () => void;
 }
 
-type ClickFeedbackKind = 'walk' | 'interact' | 'npc-interact';
-
-type InteractionTargetType =
-  | 'node-harvest'
-  | 'npc-talk'
-  | 'npc-trade'
-  | 'npc-bank'
-  | 'enemy-attack'
-  | 'ground-pickup'
-  | 'object-crafting'
-  | 'object-use';
-
-interface InteractionTarget {
-  type: InteractionTargetType;
-  id: string;
-  tileX: number;
-  tileY: number;
-  name: string;
-  range: number;
-  approachTileX?: number;
-  approachTileY?: number;
-}
-
-interface SkillLevelSnapshot {
-  woodcutting: number;
-  mining: number;
-  smithing: number;
-  fletching: number;
-  strength: number;
-  defense: number;
-  constitution: number;
-}
-
 export class WorldScene extends Phaser.Scene {
   private player!: Phaser.GameObjects.Sprite;
   private terrainData: number[][] = [];
@@ -319,8 +321,8 @@ export class WorldScene extends Phaser.Scene {
   private craftingRecipes: CraftingRecipeState[] = [];
   private craftingVisible = false;
   private lastRenderedCraftingSignature: string | null = null;
-  private pendingInteractionTarget: InteractionTarget | null = null;
-  private pendingInteractionRetryAt = 0;
+  private interactionTargetRuntime = new InteractionTargetRuntime();
+  private pendingInteractionController = new PendingInteractionController();
   private localHealthBar: Phaser.GameObjects.Graphics | null = null;
   private localHealthBarVisibleUntil = 0;
   private harvestingActionIndicator: Phaser.GameObjects.Image | null = null;
@@ -329,6 +331,68 @@ export class WorldScene extends Phaser.Scene {
   private timeSinceInputSendMs = 0;
   private lastSentDirection = new Phaser.Math.Vector2(0, 0);
   private localPathWaypoints: Phaser.Math.Vector2[] = [];
+  private sceneOrchestrator = new WorldSceneOrchestrator({
+    setLocalPlayerId: (id: string) => {
+      this.localPlayerId = id;
+    },
+    applyPlayerSnapshot: (players: WorldSnapshot['players']) => {
+      this.applyPlayerSnapshot(players);
+    },
+    applyNodeSnapshot: (nodes: WorldSnapshot['nodes']) => {
+      this.applyNodeSnapshot(nodes);
+    },
+    applyNpcSnapshot: (npcs: WorldSnapshot['npcs']) => {
+      this.applyNpcSnapshot(npcs);
+    },
+    applyObjectSnapshot: (objects: WorldSnapshot['objects']) => {
+      this.applyObjectSnapshot(objects);
+    },
+    rebuildWalkabilityIndexes: () => {
+      this.rebuildWalkabilityIndexes();
+    },
+    applyEnemySnapshot: (enemies: WorldSnapshot['enemies']) => {
+      this.applyEnemySnapshot(enemies);
+    },
+    applyGroundItemSnapshot: (groundItems: NonNullable<WorldSnapshot['groundItems']>) => {
+      this.applyGroundItemSnapshot(groundItems);
+    },
+    setShopDefinitions: (shops: WorldSnapshot['shops']) => {
+      this.shopDefinitions = shops;
+    },
+    processPendingInteractionTarget: () => {
+      this.processPendingInteractionTarget();
+    },
+    getActiveShopId: () => this.activeShopId,
+    hasShopDefinition: (shopId: string) => Boolean(this.shopDefinitions[shopId]),
+    closeShop: () => {
+      this.closeShop();
+    },
+    incrementSnapshotStats: () => {
+      this.snapshotCount += 1;
+      this.lastStateUpdateAt = Date.now();
+    },
+    upsertRemotePlayer: (player: RemotePlayerState) => {
+      this.upsertRemotePlayer(player);
+    },
+    removeRemotePlayer: (id: string) => {
+      this.removeRemotePlayer(id);
+    },
+    handleChatMessage: (message: ChatMessageState) => {
+      this.handleChatMessage(message);
+    },
+    openShop: (shopId: string) => {
+      this.openShop(shopId);
+    },
+    openBank: (inventory: InventoryState, bank: InventoryState) => {
+      this.openBank(inventory, bank);
+    },
+    openCrafting: (craftingState: CraftingOpenState) => {
+      this.openCrafting(craftingState);
+    },
+    handleAuthFailure: (reason: string) => {
+      this.scene.start('splash', { errorMessage: reason });
+    },
+  });
   private sceneReady = false;
 
   constructor() {
@@ -426,38 +490,7 @@ export class WorldScene extends Phaser.Scene {
       this.handlePointerDown(pointer);
     });
 
-    this.multiplayerClient = new MultiplayerClient(
-      (id, snapshot) => {
-        this.localPlayerId = id;
-        this.applySnapshot(snapshot);
-      },
-      (snapshot) => {
-        this.snapshotCount += 1;
-        this.lastStateUpdateAt = Date.now();
-        this.applySnapshot(snapshot);
-      },
-      (player) => {
-        this.upsertRemotePlayer(player);
-      },
-      (id) => {
-        this.removeRemotePlayer(id);
-      },
-      (message) => {
-        this.handleChatMessage(message);
-      },
-      (shopId) => {
-        this.openShop(shopId);
-      },
-      (inventory, bank) => {
-        this.openBank(inventory, bank);
-      },
-      (craftingState) => {
-        this.openCrafting(craftingState);
-      },
-      (reason) => {
-        this.scene.start('splash', { errorMessage: reason });
-      },
-    );
+    this.multiplayerClient = this.sceneOrchestrator.createMultiplayerClient();
 
     this.multiplayerClient.connect();
     this.sceneReady = true;
@@ -915,7 +948,7 @@ export class WorldScene extends Phaser.Scene {
     this.lastSentDirection.set(directionX, directionY);
 
     if (directionX !== 0 || directionY !== 0) {
-      this.pendingInteractionTarget = null;
+      this.pendingInteractionController.clear();
       this.closeTransientInteractionUi();
       this.multiplayerClient.sendInteractStop();
     }
@@ -926,23 +959,6 @@ export class WorldScene extends Phaser.Scene {
     this.closeBank();
     this.closeShop();
     this.closeCrafting();
-  }
-
-  private applySnapshot(snapshot: WorldSnapshot): void {
-    this.applyPlayerSnapshot(snapshot.players);
-    this.applyNodeSnapshot(snapshot.nodes);
-    this.applyNpcSnapshot(snapshot.npcs);
-    this.applyObjectSnapshot(snapshot.objects ?? {});
-    this.rebuildWalkabilityIndexes();
-    this.applyEnemySnapshot(snapshot.enemies);
-    this.applyGroundItemSnapshot(snapshot.groundItems ?? {});
-    this.shopDefinitions = snapshot.shops;
-
-    this.processPendingInteractionTarget();
-
-    if (this.activeShopId && !this.shopDefinitions[this.activeShopId]) {
-      this.closeShop();
-    }
   }
 
   private applyPlayerSnapshot(players: Record<string, RemotePlayerState>): void {
@@ -1061,310 +1077,96 @@ export class WorldScene extends Phaser.Scene {
     }
 
     const visibleIds = new Set(Object.keys(players));
-    for (const [id, remotePlayer] of this.remotePlayers.entries()) {
-      if (visibleIds.has(id)) {
-        continue;
-      }
-
-      remotePlayer.sprite.destroy();
-      remotePlayer.healthBar.destroy();
-      remotePlayer.harvestingIndicator.destroy();
-      this.remotePlayers.delete(id);
-    }
+    pruneRemotePlayerVisuals(this.remotePlayers, visibleIds);
   }
 
   private applyNodeSnapshot(nodes: Record<string, WorldNodeState>): void {
-    for (const nodeState of Object.values(nodes)) {
-      const position = this.getWorldPositionFromTile(nodeState.tileX, nodeState.tileY);
-      const textureKey = nodeState.type === 'tree' ? TREE_TEXTURE_KEY : ROCK_TEXTURE_KEY;
-
-      const existingNode = this.worldNodes.get(nodeState.id);
-      if (existingNode) {
-        existingNode.state = nodeState;
-        existingNode.sprite.setPosition(position.x, position.y);
-        this.styleNodeSprite(existingNode.sprite, nodeState);
-        continue;
-      }
-
-      const nodeSprite = this.add
-        .sprite(position.x, position.y, textureKey)
-        .setDepth(2);
-
-      this.styleNodeSprite(nodeSprite, nodeState);
-      this.worldNodes.set(nodeState.id, {
-        state: nodeState,
-        sprite: nodeSprite,
-      });
-    }
-
-    const visibleNodeIds = new Set(Object.keys(nodes));
-    for (const [nodeId, nodeVisual] of this.worldNodes.entries()) {
-      if (visibleNodeIds.has(nodeId)) {
-        continue;
-      }
-
-      nodeVisual.sprite.destroy();
-      this.worldNodes.delete(nodeId);
-    }
+    syncNodeVisuals({
+      nodes,
+      worldNodes: this.worldNodes,
+      getWorldPositionFromTile: (tileX: number, tileY: number) => this.getWorldPositionFromTile(tileX, tileY),
+      createNodeSprite: (worldX: number, worldY: number, textureKey: string) =>
+        this.add.sprite(worldX, worldY, textureKey).setDepth(2),
+      styleNodeSprite: (sprite: Phaser.GameObjects.Sprite, nodeState: WorldNodeState) => {
+        applyNodeSpriteStyling(sprite, nodeState);
+      },
+      treeTextureKey: TREE_TEXTURE_KEY,
+      rockTextureKey: ROCK_TEXTURE_KEY,
+    });
   }
 
   private applyNpcSnapshot(npcs: Record<string, NpcState>): void {
-    for (const npcState of Object.values(npcs)) {
-      const position = this.getWorldPositionFromTile(npcState.tileX, npcState.tileY);
-
-      const existingNpc = this.worldNpcs.get(npcState.id);
-      if (existingNpc) {
-        existingNpc.state = npcState;
-        existingNpc.sprite.setPosition(position.x, position.y);
-        if (npcState.type === 'bank_chest') {
-          existingNpc.sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0xb08b4f);
-        } else {
-          existingNpc.sprite.setTexture(PLAYER_TEXTURE_KEY).setTint(0xc9a4ff);
-        }
-        continue;
-      }
-
-      const npcSprite = this.add
-        .sprite(
-          position.x,
-          position.y,
-          npcState.type === 'bank_chest' ? ROCK_TEXTURE_KEY : PLAYER_TEXTURE_KEY,
-        )
-        .setTint(npcState.type === 'bank_chest' ? 0xb08b4f : 0xc9a4ff)
-        .setDepth(2);
-
-      this.worldNpcs.set(npcState.id, {
-        state: npcState,
-        sprite: npcSprite,
-      });
-    }
-
-    const visibleNpcIds = new Set(Object.keys(npcs));
-    for (const [npcId, npcVisual] of this.worldNpcs.entries()) {
-      if (visibleNpcIds.has(npcId)) {
-        continue;
-      }
-
-      npcVisual.sprite.destroy();
-      this.worldNpcs.delete(npcId);
-    }
+    syncNpcVisuals({
+      npcs,
+      worldNpcs: this.worldNpcs,
+      getWorldPositionFromTile: (tileX: number, tileY: number) => this.getWorldPositionFromTile(tileX, tileY),
+      createNpcSprite: (worldX: number, worldY: number, textureKey: string) =>
+        this.add.sprite(worldX, worldY, textureKey).setDepth(2),
+      styleNpcSprite: (sprite: Phaser.GameObjects.Sprite, npcState: NpcState) => {
+        applyNpcSpriteStyling(sprite, npcState, {
+          player: PLAYER_TEXTURE_KEY,
+          tree: TREE_TEXTURE_KEY,
+          rock: ROCK_TEXTURE_KEY,
+        });
+      },
+      defaultTextureKey: PLAYER_TEXTURE_KEY,
+    });
   }
 
   private applyObjectSnapshot(objects: Record<string, WorldObjectState>): void {
-    for (const objectState of Object.values(objects)) {
-      const position = this.getWorldPositionFromTile(objectState.tileX, objectState.tileY);
-
-      const existingObject = this.worldObjects.get(objectState.id);
-      if (existingObject) {
-        existingObject.state = objectState;
-        existingObject.sprite.setPosition(position.x, position.y);
-        this.styleObjectSprite(existingObject.sprite, objectState);
-        continue;
-      }
-
-      const objectSprite = this.add
-        .sprite(position.x, position.y, ROCK_TEXTURE_KEY)
-        .setDepth(1.8);
-
-      this.styleObjectSprite(objectSprite, objectState);
-      this.worldObjects.set(objectState.id, {
-        state: objectState,
-        sprite: objectSprite,
-      });
-    }
-
-    const visibleObjectIds = new Set(Object.keys(objects));
-    for (const [objectId, objectVisual] of this.worldObjects.entries()) {
-      if (visibleObjectIds.has(objectId)) {
-        continue;
-      }
-
-      objectVisual.sprite.destroy();
-      this.worldObjects.delete(objectId);
-    }
-  }
-
-  private styleObjectSprite(sprite: Phaser.GameObjects.Sprite, objectState: WorldObjectState): void {
-    sprite.clearTint();
-
-    if (objectState.objectTypeId === 'signpost') {
-      sprite.setTexture(TREE_TEXTURE_KEY).setTint(0xc9a45d);
-      return;
-    }
-
-    if (objectState.objectTypeId === 'fence') {
-      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x8e6b45);
-      return;
-    }
-
-    if (objectState.objectTypeId === 'bank_building') {
-      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x8a8f95);
-      return;
-    }
-
-    if (objectState.objectTypeId === 'general_store_building') {
-      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x7e6b52);
-      return;
-    }
-
-    if (objectState.objectTypeId === 'smelting_station') {
-      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0xd07f3f);
-      return;
-    }
-
-    if (objectState.objectTypeId === 'smithing_station') {
-      sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x9a9ea8);
-      return;
-    }
-
-    if (objectState.objectTypeId === 'fletching_station') {
-      sprite.setTexture(TREE_TEXTURE_KEY).setTint(0x8d6f47);
-      return;
-    }
-
-    sprite.setTexture(ROCK_TEXTURE_KEY).setTint(0x9b9b9b);
+    syncObjectVisuals({
+      objects,
+      worldObjects: this.worldObjects,
+      getWorldPositionFromTile: (tileX: number, tileY: number) => this.getWorldPositionFromTile(tileX, tileY),
+      createObjectSprite: (worldX: number, worldY: number, textureKey: string) =>
+        this.add.sprite(worldX, worldY, textureKey).setDepth(1.8),
+      styleObjectSprite: (sprite: Phaser.GameObjects.Sprite, objectState: WorldObjectState) => {
+        applyObjectSpriteStyling(sprite, objectState, {
+          player: PLAYER_TEXTURE_KEY,
+          tree: TREE_TEXTURE_KEY,
+          rock: ROCK_TEXTURE_KEY,
+        });
+      },
+      defaultTextureKey: ROCK_TEXTURE_KEY,
+    });
   }
 
   private applyEnemySnapshot(enemies: Record<string, EnemyState>): void {
-    for (const enemyState of Object.values(enemies)) {
-      const position = this.getWorldPositionFromTile(enemyState.tileX, enemyState.tileY);
-      const existingEnemy = this.worldEnemies.get(enemyState.id);
-      const targetTilePosition = new Phaser.Math.Vector2(enemyState.tileX, enemyState.tileY);
-      const waypoints = this.buildEnemyPathWaypoints(enemyState);
-
-      if (existingEnemy) {
-        const hpChanged = existingEnemy.state.hp !== enemyState.hp;
-        const previousHp = existingEnemy.state.hp;
-        existingEnemy.state = enemyState;
-        existingEnemy.targetTilePosition.copy(targetTilePosition);
-        existingEnemy.pathWaypoints = waypoints;
-
-        if (
-          Phaser.Math.Distance.Between(
-            existingEnemy.renderedTilePosition.x,
-            existingEnemy.renderedTilePosition.y,
-            existingEnemy.targetTilePosition.x,
-            existingEnemy.targetTilePosition.y,
-          ) > 4
-        ) {
-          existingEnemy.renderedTilePosition.copy(existingEnemy.targetTilePosition);
-        }
-
-        existingEnemy.sprite.setPosition(position.x, position.y);
-        existingEnemy.sprite.setVisible(!enemyState.isDead);
-        existingEnemy.sprite.setAlpha(enemyState.isDead ? 0.35 : 1);
-
-        if (hpChanged) {
-          existingEnemy.healthBarVisibleUntil = Date.now() + HEALTH_BAR_VISIBLE_MS;
-
-          if (previousHp > enemyState.hp) {
-            this.showFloatingText(
-              existingEnemy.sprite.x,
-              existingEnemy.sprite.y - TILE_SIZE * 0.7,
-              `-${Math.round(previousHp - enemyState.hp)}`,
-              '#ffe08a',
-            );
-          }
-        }
-        continue;
-      }
-
-      const enemySprite = this.add
-        .sprite(position.x, position.y, ENEMY_TEXTURE_KEY)
-        .setTint(0xff8a8a)
-        .setDepth(2)
-        .setVisible(!enemyState.isDead)
-        .setAlpha(enemyState.isDead ? 0.35 : 1);
-      const healthBar = this.add.graphics().setDepth(60);
-      healthBar.setVisible(false);
-
-      this.worldEnemies.set(enemyState.id, {
-        state: enemyState,
-        sprite: enemySprite,
-        targetTilePosition: targetTilePosition.clone(),
-        renderedTilePosition: targetTilePosition.clone(),
-        pathWaypoints: waypoints,
-        healthBar,
-        healthBarVisibleUntil: 0,
-      });
-    }
-
-    const visibleEnemyIds = new Set(Object.keys(enemies));
-    for (const [enemyId, enemyVisual] of this.worldEnemies.entries()) {
-      if (visibleEnemyIds.has(enemyId)) {
-        continue;
-      }
-
-      enemyVisual.sprite.destroy();
-      enemyVisual.healthBar.destroy();
-      this.worldEnemies.delete(enemyId);
-    }
+    syncEnemyVisuals({
+      enemies,
+      worldEnemies: this.worldEnemies,
+      getWorldPositionFromTile: (tileX: number, tileY: number) => this.getWorldPositionFromTile(tileX, tileY),
+      buildEnemyPathWaypoints: (enemyState: EnemyState) => this.buildEnemyPathWaypoints(enemyState),
+      createEnemySprite: (x: number, y: number, textureKey: string) => this.add.sprite(x, y, textureKey),
+      createEnemyHealthBar: () => this.add.graphics(),
+      showFloatingText: (worldX: number, worldY: number, text: string, color: string) => {
+        this.showFloatingText(worldX, worldY, text, color);
+      },
+      enemyTextureKey: ENEMY_TEXTURE_KEY,
+      healthBarVisibleMs: HEALTH_BAR_VISIBLE_MS,
+      tileSize: TILE_SIZE,
+    });
   }
 
   private applyGroundItemSnapshot(groundItems: Record<string, GroundItemState>): void {
-    const visibleGroundStackByTile = new Set<string>();
-
-    for (const groundItemState of Object.values(groundItems)) {
-      const position = this.getWorldPositionFromTile(groundItemState.tileX, groundItemState.tileY);
-      const existingGroundItem = this.worldGroundItems.get(groundItemState.id);
-      const textureKey = `ground-item-${groundItemState.itemId}`;
-      const textureReady = this.ensureGroundItemTextureLoaded(textureKey, groundItemState.image);
-      const tileKey = `${groundItemState.tileX},${groundItemState.tileY}`;
-      const showStackVisual = !visibleGroundStackByTile.has(tileKey);
-      if (showStackVisual) {
-        visibleGroundStackByTile.add(tileKey);
-      }
-
-      if (existingGroundItem) {
-        existingGroundItem.state = groundItemState;
-        existingGroundItem.sprite.setPosition(position.x, position.y);
-        existingGroundItem.sprite.setDisplaySize(18, 18);
-        if (textureReady) {
-          existingGroundItem.sprite.setTexture(textureKey);
-          existingGroundItem.sprite.setVisible(showStackVisual);
-        }
-        existingGroundItem.quantityText
-          .setPosition(position.x + 10, position.y - 11)
-          .setText(groundItemState.quantity > 1 ? `x${groundItemState.quantity}` : '')
-          .setVisible(showStackVisual);
-        continue;
-      }
-
-      const sprite = this.add
-        .image(position.x, position.y, textureReady ? textureKey : PLAYER_TEXTURE_KEY)
-        .setDisplaySize(18, 18)
-        .setDepth(3.2)
-        .setVisible(textureReady && showStackVisual);
-
-      const quantityText = this.add
-        .text(position.x + 10, position.y - 11, groundItemState.quantity > 1 ? `x${groundItemState.quantity}` : '', {
+    syncGroundItemVisuals({
+      groundItems,
+      worldGroundItems: this.worldGroundItems,
+      getWorldPositionFromTile: (tileX: number, tileY: number) => this.getWorldPositionFromTile(tileX, tileY),
+      ensureGroundItemTextureLoaded: (textureKey: string, imagePath: string) =>
+        this.ensureGroundItemTextureLoaded(textureKey, imagePath),
+      createGroundItemSprite: (x: number, y: number, textureKey: string) =>
+        this.add.image(x, y, textureKey),
+      createGroundItemQuantityText: (x: number, y: number, text: string) =>
+        this.add.text(x, y, text, {
           fontFamily: 'monospace',
           fontSize: '11px',
           color: '#fff1bd',
           stroke: '#000000',
           strokeThickness: 2,
-        })
-        .setOrigin(0, 0.5)
-        .setDepth(4)
-        .setVisible(showStackVisual);
-
-      this.worldGroundItems.set(groundItemState.id, {
-        state: groundItemState,
-        sprite,
-        quantityText,
-      });
-    }
-
-    const visibleGroundItemIds = new Set(Object.keys(groundItems));
-    for (const [groundItemId, groundItemVisual] of this.worldGroundItems.entries()) {
-      if (visibleGroundItemIds.has(groundItemId)) {
-        continue;
-      }
-
-      groundItemVisual.sprite.destroy();
-      groundItemVisual.quantityText.destroy();
-      this.worldGroundItems.delete(groundItemId);
-    }
+        }),
+      fallbackTextureKey: PLAYER_TEXTURE_KEY,
+    });
   }
 
   private ensureGroundItemTextureLoaded(textureKey: string, imagePath: string): boolean {
@@ -1389,92 +1191,28 @@ export class WorldScene extends Phaser.Scene {
     return false;
   }
 
-  private styleNodeSprite(sprite: Phaser.GameObjects.Sprite, nodeState: WorldNodeState): void {
-    sprite.setAlpha(nodeState.isDepleted ? 0.35 : 1);
-    sprite.clearTint();
-
-    const resourceTintById: Record<string, number> = {
-      birch_tree: 0x9ed37c,
-      oak_tree: 0x4a8f3a,
-      copper_rock: 0xc9834f,
-      tin_rock: 0xa8b7c7,
-      iron_rock: 0x7f8c98,
-    };
-
-    const resourceTint = resourceTintById[nodeState.resourceId];
-    if (resourceTint !== undefined) {
-      sprite.setTint(resourceTint);
-    }
-
-    if (nodeState.isDepleted) {
-      sprite.setTint(0x7a7a7a);
-    }
-  }
-
   private upsertRemotePlayer(playerState: RemotePlayerState): void {
     if (playerState.id === this.localPlayerId) {
       return;
     }
 
-    const tilePosition = this.resolveTilePosition(playerState);
-    const worldPosition = this.getWorldPositionFromTile(tilePosition.x, tilePosition.y);
-
-    const existingPlayer = this.remotePlayers.get(playerState.id);
-    if (existingPlayer) {
-      const hpChanged = existingPlayer.state.hp !== playerState.hp;
-      const previousHp = existingPlayer.state.hp;
-      existingPlayer.state = playerState;
-      existingPlayer.targetTilePosition.copy(tilePosition);
-      existingPlayer.pathWaypoints = this.buildPathWaypoints(playerState);
-
-      if (hpChanged) {
-        existingPlayer.healthBarVisibleUntil = Date.now() + HEALTH_BAR_VISIBLE_MS;
-
-        if (previousHp > playerState.hp) {
-          this.showFloatingText(
-            existingPlayer.sprite.x,
-            existingPlayer.sprite.y - TILE_SIZE * 0.7,
-            `-${Math.round(previousHp - playerState.hp)}`,
-            '#ffb1b1',
-          );
-        }
-      }
-
-      if (
-        Phaser.Math.Distance.Between(
-          existingPlayer.renderedTilePosition.x,
-          existingPlayer.renderedTilePosition.y,
-          existingPlayer.targetTilePosition.x,
-          existingPlayer.targetTilePosition.y,
-        ) > 4
-      ) {
-        existingPlayer.renderedTilePosition.copy(existingPlayer.targetTilePosition);
-      }
-      return;
-    }
-
-    const remotePlayer = this.add
-      .sprite(worldPosition.x, worldPosition.y, PLAYER_TEXTURE_KEY)
-      .setTint(0xffd38f);
-    const healthBar = this.add.graphics().setDepth(60);
-    healthBar.setVisible(false);
-    const harvestingIndicator = this.add
-      .image(worldPosition.x, worldPosition.y - TILE_SIZE * 0.95, HARVEST_AXE_TEXTURE_KEY)
-      .setDepth(68)
-      .setOrigin(0.5, 1)
-      .setDisplaySize(11, 11)
-      .setVisible(false);
-
-    this.remotePlayers.set(playerState.id, {
-      state: playerState,
-      sprite: remotePlayer,
-      targetTilePosition: tilePosition.clone(),
-      renderedTilePosition: tilePosition.clone(),
-      pathWaypoints: this.buildPathWaypoints(playerState),
-      healthBar,
-      healthBarVisibleUntil: 0,
-      harvestingIndicator,
-      harvestingIndicatorPhase: 0,
+    upsertRemotePlayerVisual({
+      remotePlayers: this.remotePlayers,
+      playerState,
+      resolveTilePosition: (state: RemotePlayerState) => this.resolveTilePosition(state),
+      getWorldPositionFromTile: (tileX: number, tileY: number) => this.getWorldPositionFromTile(tileX, tileY),
+      buildPathWaypoints: (state: RemotePlayerState) => this.buildPathWaypoints(state),
+      createPlayerSprite: (x: number, y: number, textureKey: string) => this.add.sprite(x, y, textureKey),
+      createHealthBar: () => this.add.graphics(),
+      createHarvestingIndicator: (x: number, y: number, textureKey: string) =>
+        this.add.image(x, y, textureKey),
+      playerTextureKey: PLAYER_TEXTURE_KEY,
+      harvestIndicatorTextureKey: HARVEST_AXE_TEXTURE_KEY,
+      healthBarVisibleMs: HEALTH_BAR_VISIBLE_MS,
+      tileSize: TILE_SIZE,
+      showFloatingText: (worldX: number, worldY: number, text: string, color: string) => {
+        this.showFloatingText(worldX, worldY, text, color);
+      },
     });
   }
 
@@ -1510,15 +1248,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private removeRemotePlayer(id: string): void {
-    const remotePlayer = this.remotePlayers.get(id);
-    if (!remotePlayer) {
-      return;
-    }
-
-    remotePlayer.sprite.destroy();
-    remotePlayer.healthBar.destroy();
-    remotePlayer.harvestingIndicator.destroy();
-    this.remotePlayers.delete(id);
+    removeRemotePlayerVisual(this.remotePlayers, id);
   }
 
   private handlePointerDown(pointer: Phaser.Input.Pointer): void {
@@ -1535,9 +1265,19 @@ export class WorldScene extends Phaser.Scene {
     const tileX = Phaser.Math.Clamp(Math.floor(worldPoint.x / TILE_SIZE), 0, this.worldWidthTiles - 1);
     const tileY = Phaser.Math.Clamp(Math.floor(worldPoint.y / TILE_SIZE), 0, this.worldHeightTiles - 1);
 
+    this.logInteractionTrace('pointer.down', {
+      pointer: { x: pointer.x, y: pointer.y },
+      worldPoint: { x: worldPoint.x, y: worldPoint.y },
+      tile: { x: tileX, y: tileY },
+    });
+
     const clickedNode = this.findNodeAtTile(tileX, tileY);
 
     if (clickedNode) {
+      this.logInteractionTrace('pointer.target.node', {
+        nodeId: clickedNode.state.id,
+        tile: { x: tileX, y: tileY },
+      });
       this.showTileClickFeedback(tileX, tileY, 'interact');
       this.startNodeInteraction(clickedNode.state.id);
       return;
@@ -1545,6 +1285,11 @@ export class WorldScene extends Phaser.Scene {
 
     const clickedNpc = this.findNpcAtTile(tileX, tileY);
     if (clickedNpc) {
+      this.logInteractionTrace('pointer.target.npc', {
+        npcId: clickedNpc.state.id,
+        npcType: clickedNpc.state.type,
+        tile: { x: tileX, y: tileY },
+      });
       this.showTileClickFeedback(tileX, tileY, 'npc-interact');
       if (clickedNpc.state.type === 'bank_chest') {
         this.useBankChest(clickedNpc.state.id);
@@ -1556,6 +1301,10 @@ export class WorldScene extends Phaser.Scene {
 
     const clickedEnemy = this.findEnemyAtTile(tileX, tileY);
     if (clickedEnemy && !clickedEnemy.state.isDead) {
+      this.logInteractionTrace('pointer.target.enemy', {
+        enemyId: clickedEnemy.state.id,
+        tile: { x: tileX, y: tileY },
+      });
       this.showTileClickFeedback(tileX, tileY, 'interact');
       this.attackEnemy(clickedEnemy.state.id);
       return;
@@ -1563,6 +1312,12 @@ export class WorldScene extends Phaser.Scene {
 
     const clickedObject = this.findObjectAtTile(tileX, tileY);
     if (clickedObject) {
+      this.logInteractionTrace('pointer.target.object', {
+        objectId: clickedObject.state.id,
+        objectTypeId: clickedObject.state.objectTypeId,
+        blocksMovement: clickedObject.state.blocksMovement,
+        tile: { x: tileX, y: tileY },
+      });
       this.showTileClickFeedback(tileX, tileY, 'interact');
 
       this.useWorldObject(clickedObject.state.id);
@@ -1572,11 +1327,18 @@ export class WorldScene extends Phaser.Scene {
 
     const clickedGroundItems = this.findGroundItemsAtTile(tileX, tileY);
     if (clickedGroundItems.length > 0) {
+      this.logInteractionTrace('pointer.target.groundItem', {
+        groundItemId: clickedGroundItems[0].state.id,
+        tile: { x: tileX, y: tileY },
+      });
       this.showTileClickFeedback(tileX, tileY, 'interact');
       this.pickupGroundItem(clickedGroundItems[0].state.id);
       return;
     }
 
+    this.logInteractionTrace('pointer.target.walkOnly', {
+      tile: { x: tileX, y: tileY },
+    });
     this.performWalkTo(tileX, tileY);
   }
 
@@ -2016,6 +1778,17 @@ export class WorldScene extends Phaser.Scene {
     };
   }
 
+  private logInteractionTrace(event: string, details: Record<string, unknown>): void {
+    if (!DEBUG_INTERACTION_TRACE) {
+      return;
+    }
+
+    console.log(`[interaction-trace] ${event}`, {
+      ...details,
+      at: Date.now(),
+    });
+  }
+
   private performWalkTo(
     tileX: number,
     tileY: number,
@@ -2024,8 +1797,21 @@ export class WorldScene extends Phaser.Scene {
   ): void {
     const destination = this.resolveWalkDestination(tileX, tileY);
 
+    this.logInteractionTrace('walk.perform', {
+      requested: { tileX, tileY },
+      destination: { x: destination.x, y: destination.y },
+      clearPendingActions,
+      showClickFeedback,
+      localTile: this.localTilePosition
+        ? { x: Math.round(this.localTilePosition.x), y: Math.round(this.localTilePosition.y) }
+        : null,
+      localStateTarget: this.localPlayerState
+        ? { x: this.localPlayerState.targetTileX, y: this.localPlayerState.targetTileY }
+        : null,
+    });
+
     if (clearPendingActions) {
-      this.pendingInteractionTarget = null;
+      this.pendingInteractionController.clear();
     }
 
     this.closeTransientInteractionUi();
@@ -2045,6 +1831,9 @@ export class WorldScene extends Phaser.Scene {
     const objectAtTarget = this.findObjectAtTile(tileX, tileY);
     const objectBlocksMovement = Boolean(objectAtTarget?.state.blocksMovement);
     if (!nodeAtTarget && !npcAtTarget && !enemyAtTarget && !objectBlocksMovement) {
+      this.logInteractionTrace('walk.resolve.direct', {
+        target: { tileX, tileY },
+      });
       return new Phaser.Math.Vector2(tileX, tileY);
     }
 
@@ -2056,6 +1845,9 @@ export class WorldScene extends Phaser.Scene {
     ].filter((candidate) => this.isTileWalkable(candidate.x, candidate.y));
 
     if (candidateTiles.length === 0) {
+      this.logInteractionTrace('walk.resolve.noCandidates', {
+        target: { tileX, tileY },
+      });
       return new Phaser.Math.Vector2(tileX, tileY);
     }
 
@@ -2066,22 +1858,25 @@ export class WorldScene extends Phaser.Scene {
           Math.floor(this.player.y / TILE_SIZE),
         );
 
+    const originTileX = Math.round(origin.x);
+    const originTileY = Math.round(origin.y);
+    const pathLengths = this.getPathLengthsToTargets(originTileX, originTileY, candidateTiles);
+
     const reachableCandidates = candidateTiles
       .map((candidate) => ({
         candidate,
-        pathLength: this.getPathLength(
-          Math.round(origin.x),
-          Math.round(origin.y),
-          candidate.x,
-          candidate.y,
-        ),
+        pathLength: pathLengths.get(this.getTileKey(candidate.x, candidate.y)),
       }))
       .filter(
         (entry): entry is { candidate: Phaser.Math.Vector2; pathLength: number } =>
-          entry.pathLength !== null,
+          typeof entry.pathLength === 'number',
       );
 
     if (reachableCandidates.length === 0) {
+      this.logInteractionTrace('walk.resolve.noReachableCandidates', {
+        target: { tileX, tileY },
+        candidateTiles: candidateTiles.map((candidate) => ({ x: candidate.x, y: candidate.y })),
+      });
       return new Phaser.Math.Vector2(tileX, tileY);
     }
 
@@ -2097,21 +1892,45 @@ export class WorldScene extends Phaser.Scene {
       return leftDistance - rightDistance;
     });
 
-    return reachableCandidates[0].candidate;
+    const resolved = reachableCandidates[0].candidate;
+    this.logInteractionTrace('walk.resolve.reachable', {
+      target: { tileX, tileY },
+      resolved: { x: resolved.x, y: resolved.y },
+      origin: { x: originTileX, y: originTileY },
+      candidates: reachableCandidates.map((entry) => ({
+        x: entry.candidate.x,
+        y: entry.candidate.y,
+        pathLength: entry.pathLength,
+      })),
+    });
+
+    return resolved;
   }
 
-  private getPathLength(
+  private getPathLengthsToTargets(
     startTileX: number,
     startTileY: number,
-    targetTileX: number,
-    targetTileY: number,
-  ): number | null {
-    if (startTileX === targetTileX && startTileY === targetTileY) {
-      return 0;
+    targets: Phaser.Math.Vector2[],
+  ): Map<string, number> {
+    const distances = new Map<string, number>();
+    const remainingTargetKeys = new Set<string>();
+
+    for (const target of targets) {
+      if (!this.isTileWalkable(target.x, target.y)) {
+        continue;
+      }
+
+      const targetKey = this.getTileKey(target.x, target.y);
+      if (target.x === startTileX && target.y === startTileY) {
+        distances.set(targetKey, 0);
+        continue;
+      }
+
+      remainingTargetKeys.add(targetKey);
     }
 
-    if (!this.isTileWalkable(targetTileX, targetTileY)) {
-      return null;
+    if (remainingTargetKeys.size === 0) {
+      return distances;
     }
 
     const queue: Array<{ x: number; y: number; distance: number }> = [
@@ -2146,16 +1965,21 @@ export class WorldScene extends Phaser.Scene {
         }
 
         const nextDistance = current.distance + 1;
-        if (neighbor.x === targetTileX && neighbor.y === targetTileY) {
-          return nextDistance;
-        }
 
         visited.add(key);
+        if (remainingTargetKeys.has(key)) {
+          distances.set(key, nextDistance);
+          remainingTargetKeys.delete(key);
+          if (remainingTargetKeys.size === 0) {
+            return distances;
+          }
+        }
+
         queue.push({ x: neighbor.x, y: neighbor.y, distance: nextDistance });
       }
     }
 
-    return null;
+    return distances;
   }
 
   private canTraverseBetweenTiles(
@@ -2285,15 +2109,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private resolveObjectInteractionType(objectState: WorldObjectState): InteractionTargetType {
-    if (
-      objectState.objectTypeId === 'smelting_station'
-      || objectState.objectTypeId === 'smithing_station'
-      || objectState.objectTypeId === 'fletching_station'
-    ) {
-      return 'object-crafting';
-    }
-
-    return 'object-use';
+    return this.interactionTargetRuntime.resolveObjectInteractionType(objectState.objectTypeId);
   }
 
   private startObjectAction(objectId: string): void {
@@ -2303,7 +2119,13 @@ export class WorldScene extends Phaser.Scene {
     }
 
     const type = this.resolveObjectInteractionType(objectVisual.state);
-    const approach = this.resolveWalkDestination(objectVisual.state.tileX, objectVisual.state.tileY);
+    this.logInteractionTrace('object.action.start', {
+      objectId: objectVisual.state.id,
+      objectTypeId: objectVisual.state.objectTypeId,
+      interactionType: type,
+      tile: { x: objectVisual.state.tileX, y: objectVisual.state.tileY },
+    });
+
     this.queueInteractionTarget(
       {
         type,
@@ -2312,8 +2134,6 @@ export class WorldScene extends Phaser.Scene {
         tileY: objectVisual.state.tileY,
         name: objectVisual.state.name,
         range: 1,
-        approachTileX: approach.x,
-        approachTileY: approach.y,
       },
       'interact',
     );
@@ -2323,147 +2143,72 @@ export class WorldScene extends Phaser.Scene {
     target: InteractionTarget,
     clickFeedbackKind: ClickFeedbackKind,
   ): void {
-    this.hideContextMenu();
-    this.pendingInteractionTarget = null;
-    this.pendingInteractionRetryAt = 0;
-    this.pendingInteractionTarget = target;
+    this.logInteractionTrace('interaction.queue', {
+      target,
+      clickFeedbackKind,
+    });
 
-    this.showTileClickFeedback(target.tileX, target.tileY, clickFeedbackKind);
-
-    if (this.isWithinInteractionRange(target)) {
-      this.pendingInteractionTarget = null;
-      this.executeInteractionTarget(target);
-      return;
-    }
-
-    const destination = this.resolveWalkDestination(target.tileX, target.tileY);
-    if (destination.x === target.tileX && destination.y === target.tileY) {
-      this.pendingInteractionTarget = null;
-      this.appendSystemChatMessage(`You can't reach ${target.name} from here.`);
-      return;
-    }
-
-    this.performWalkTo(target.tileX, target.tileY, false, false);
+    this.pendingInteractionController.queue(target, clickFeedbackKind, this.getPendingInteractionDeps());
   }
 
   private resolveCurrentInteractionTarget(target: InteractionTarget): InteractionTarget | null {
-    if (target.type === 'node-harvest') {
-      const node = this.worldNodes.get(target.id)?.state;
-      if (!node) {
-        return null;
-      }
-
-      return {
-        ...target,
-        tileX: node.tileX,
-        tileY: node.tileY,
-        name: node.resourceName,
-      };
-    }
-
-    if (target.type === 'npc-talk' || target.type === 'npc-trade' || target.type === 'npc-bank') {
-      const npc = this.worldNpcs.get(target.id)?.state;
-      if (!npc) {
-        return null;
-      }
-
-      return {
-        ...target,
-        tileX: npc.tileX,
-        tileY: npc.tileY,
-        name: npc.name,
-      };
-    }
-
-    if (target.type === 'enemy-attack') {
-      const enemy = this.worldEnemies.get(target.id)?.state;
-      if (!enemy || enemy.isDead) {
-        return null;
-      }
-
-      return {
-        ...target,
-        tileX: enemy.tileX,
-        tileY: enemy.tileY,
-        name: enemy.name,
-      };
-    }
-
-    if (target.type === 'ground-pickup') {
-      const groundItem = this.worldGroundItems.get(target.id)?.state;
-      if (!groundItem) {
-        return null;
-      }
-
-      return {
-        ...target,
-        tileX: groundItem.tileX,
-        tileY: groundItem.tileY,
-        name: groundItem.name,
-      };
-    }
-
-    const objectState = this.worldObjects.get(target.id)?.state;
-    if (!objectState) {
-      return null;
-    }
-
-    return {
-      ...target,
-      tileX: objectState.tileX,
-      tileY: objectState.tileY,
-      name: objectState.name,
-    };
+    return this.interactionTargetRuntime.resolveCurrentTarget(target, {
+      getNodeById: (id: string) => this.worldNodes.get(id)?.state ?? null,
+      getNpcById: (id: string) => this.worldNpcs.get(id)?.state ?? null,
+      getEnemyById: (id: string) => this.worldEnemies.get(id)?.state ?? null,
+      getGroundItemById: (id: string) => this.worldGroundItems.get(id)?.state ?? null,
+      getObjectById: (id: string) => this.worldObjects.get(id)?.state ?? null,
+    });
   }
 
   private processPendingInteractionTarget(): void {
-    if (!this.pendingInteractionTarget) {
-      return;
-    }
+    this.logInteractionTrace('interaction.pending.process', {
+      localTile: this.localTilePosition
+        ? { x: Math.round(this.localTilePosition.x), y: Math.round(this.localTilePosition.y) }
+        : null,
+      localStateTarget: this.localPlayerState
+        ? { x: this.localPlayerState.targetTileX, y: this.localPlayerState.targetTileY }
+        : null,
+    });
 
-    const resolved = this.resolveCurrentInteractionTarget(this.pendingInteractionTarget);
-    if (!resolved) {
-      this.pendingInteractionTarget = null;
-      return;
-    }
+    this.pendingInteractionController.process(this.getPendingInteractionDeps());
+  }
 
-    this.pendingInteractionTarget = resolved;
-
-    if (this.isWithinInteractionRange(resolved)) {
-      this.pendingInteractionTarget = null;
-      this.executeInteractionTarget(resolved);
-      return;
-    }
-
-    if (
-      this.localPlayerState &&
-      this.localPlayerState.targetTileX === null &&
-      this.localPlayerState.targetTileY === null
-    ) {
-      const now = Date.now();
-      if (now < this.pendingInteractionRetryAt) {
-        return;
-      }
-
-      const destination = this.resolveWalkDestination(resolved.tileX, resolved.tileY);
-      if (destination.x === resolved.tileX && destination.y === resolved.tileY) {
-        this.pendingInteractionTarget = null;
-        this.pendingInteractionRetryAt = 0;
-        this.appendSystemChatMessage(`You can't reach ${resolved.name} from here.`);
-        return;
-      }
-
-      const localTileX = this.localTilePosition ? Math.round(this.localTilePosition.x) : null;
-      const localTileY = this.localTilePosition ? Math.round(this.localTilePosition.y) : null;
-      if (localTileX === destination.x && localTileY === destination.y) {
-        this.pendingInteractionTarget = null;
-        this.pendingInteractionRetryAt = 0;
-        return;
-      }
-
-      this.pendingInteractionRetryAt = now + 250;
-      this.performWalkTo(resolved.tileX, resolved.tileY, false, false);
-    }
+  private getPendingInteractionDeps() {
+    return {
+      hideContextMenu: () => this.hideContextMenu(),
+      showTileClickFeedback: (tileX: number, tileY: number, kind: ClickFeedbackKind) => {
+        this.showTileClickFeedback(tileX, tileY, kind);
+      },
+      isWithinInteractionRange: (target: InteractionTarget) => this.isWithinInteractionRange(target),
+      executeInteractionTarget: (target: InteractionTarget) => this.executeInteractionTarget(target),
+      resolveWalkDestination: (tileX: number, tileY: number) => this.resolveWalkDestination(tileX, tileY),
+      performWalkTo: (
+        tileX: number,
+        tileY: number,
+        clearPendingActions: boolean,
+        showClickFeedback: boolean,
+      ) => {
+        this.performWalkTo(tileX, tileY, clearPendingActions, showClickFeedback);
+      },
+      appendSystemChatMessage: (text: string) => this.appendSystemChatMessage(text),
+      resolveCurrentInteractionTarget: (target: InteractionTarget) =>
+        this.resolveCurrentInteractionTarget(target),
+      hasActiveMoveTarget: () =>
+        Boolean(
+          this.localPlayerState
+          && this.localPlayerState.targetTileX !== null
+          && this.localPlayerState.targetTileY !== null,
+        ),
+      getLocalTilePosition: () =>
+        this.localTilePosition
+          ? { x: Math.round(this.localTilePosition.x), y: Math.round(this.localTilePosition.y) }
+          : null,
+      now: () => Date.now(),
+      trace: (event: string, details: Record<string, unknown>) => {
+        this.logInteractionTrace(event, details);
+      },
+    };
   }
 
   private isWithinInteractionRange(target: InteractionTarget): boolean {
@@ -2471,7 +2216,9 @@ export class WorldScene extends Phaser.Scene {
       Number.isFinite(target.approachTileX)
       && Number.isFinite(target.approachTileY)
     ) {
-      return this.isAtApproachTile(this.localTilePosition, target);
+      return this.isAtApproachTile(this.localTilePosition, target)
+        || this.isWithinInteractionRangeFromPosition(this.localTilePosition, target)
+        || this.isWithinInteractionRangeFromPosition(this.localRenderedTilePosition, target);
     }
 
     return this.isWithinInteractionRangeFromPosition(this.localTilePosition, target)
@@ -2509,49 +2256,35 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private executeInteractionTarget(target: InteractionTarget): void {
-    if (target.type === 'node-harvest') {
-      this.multiplayerClient.sendInput(0, 0);
-      this.lastSentDirection.set(0, 0);
-      this.multiplayerClient.sendInteractStart(target.id);
-      return;
-    }
+    this.logInteractionTrace('interaction.execute', {
+      target,
+      localTile: this.localTilePosition
+        ? { x: Math.round(this.localTilePosition.x), y: Math.round(this.localTilePosition.y) }
+        : null,
+      renderedTile: this.localRenderedTilePosition
+        ? { x: Math.round(this.localRenderedTilePosition.x), y: Math.round(this.localRenderedTilePosition.y) }
+        : null,
+    });
 
-    if (target.type === 'npc-talk') {
-      this.multiplayerClient.sendNpcTalk(target.id);
-      return;
-    }
-
-    if (target.type === 'npc-trade') {
-      this.multiplayerClient.sendShopOpen(target.id);
-      return;
-    }
-
-    if (target.type === 'npc-bank') {
-      this.multiplayerClient.sendBankOpen(target.id);
-      return;
-    }
-
-    if (target.type === 'enemy-attack') {
-      this.multiplayerClient.sendCombatAttack(target.id);
-      return;
-    }
-
-    if (target.type === 'ground-pickup') {
-      this.multiplayerClient.sendGroundItemPickup(target.id);
-      return;
-    }
-
-    if (target.type === 'object-crafting') {
-      this.multiplayerClient.sendCraftingOpen(target.id);
-      return;
-    }
-
-    if (target.type === 'object-use') {
-      const objectState = this.worldObjects.get(target.id)?.state;
-      if (objectState) {
-        this.appendSystemChatMessage(objectState.examineText);
-      }
-    }
+    this.interactionTargetRuntime.executeTarget(target, {
+      executeNodeHarvest: (targetId: string) => {
+        this.multiplayerClient.sendInput(0, 0);
+        this.lastSentDirection.set(0, 0);
+        this.multiplayerClient.sendInteractStart(targetId);
+      },
+      executeNpcTalk: (targetId: string) => this.multiplayerClient.sendNpcTalk(targetId),
+      executeNpcTrade: (targetId: string) => this.multiplayerClient.sendShopOpen(targetId),
+      executeNpcBank: (targetId: string) => this.multiplayerClient.sendBankOpen(targetId),
+      executeEnemyAttack: (targetId: string) => this.multiplayerClient.sendCombatAttack(targetId),
+      executeGroundPickup: (targetId: string) => this.multiplayerClient.sendGroundItemPickup(targetId),
+      executeObjectCrafting: (targetId: string) => this.multiplayerClient.sendCraftingOpen(targetId),
+      executeObjectUse: (targetId: string) => {
+        const objectState = this.worldObjects.get(targetId)?.state;
+        if (objectState) {
+          this.appendSystemChatMessage(objectState.examineText);
+        }
+      },
+    });
   }
 
   private startEnemyAttack(enemyId: string): void {
@@ -2593,215 +2326,39 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private initChatUi(): void {
-    const appElement = document.querySelector<HTMLDivElement>('#app');
-    if (!appElement) {
-      return;
-    }
-
-    const root = document.createElement('div');
-    root.style.position = 'fixed';
-    root.style.left = '12px';
-    root.style.bottom = '12px';
-    root.style.width = '360px';
-    root.style.height = '170px';
-    root.style.background = 'rgba(0, 0, 0, 0.72)';
-    root.style.border = '1px solid rgba(183, 170, 129, 0.85)';
-    root.style.display = 'flex';
-    root.style.flexDirection = 'column';
-    root.style.padding = '6px';
-    root.style.gap = '6px';
-    root.style.zIndex = '2500';
-    root.style.pointerEvents = 'auto';
-    root.style.color = '#f0e5c1';
-    root.style.fontFamily = 'monospace';
-    root.style.fontSize = '12px';
-
-    const log = document.createElement('div');
-    log.style.flex = '1';
-    log.style.overflowY = 'auto';
-    log.style.whiteSpace = 'pre-wrap';
-    log.style.wordBreak = 'break-word';
-    log.style.paddingRight = '4px';
-
-    const form = document.createElement('form');
-    form.style.display = 'flex';
-    form.style.gap = '6px';
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.maxLength = 120;
-    input.placeholder = 'Type message...';
-    input.style.flex = '1';
-    input.style.background = 'rgba(23, 23, 23, 0.95)';
-    input.style.border = '1px solid rgba(150, 138, 102, 0.9)';
-    input.style.color = '#f0e5c1';
-    input.style.fontFamily = 'monospace';
-    input.style.fontSize = '12px';
-    input.style.padding = '4px 6px';
-    input.addEventListener('keydown', (event) => {
-      event.stopPropagation();
-    });
-
-    const button = document.createElement('button');
-    button.type = 'submit';
-    button.textContent = 'Send';
-    button.style.background = 'rgba(64, 58, 41, 0.95)';
-    button.style.border = '1px solid rgba(150, 138, 102, 0.9)';
-    button.style.color = '#f0e5c1';
-    button.style.fontFamily = 'monospace';
-    button.style.fontSize = '12px';
-    button.style.padding = '4px 10px';
-    button.style.cursor = 'pointer';
-
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
+    const panel = createChatPanel(() => {
       this.sendChatFromInput();
     });
 
-    form.append(input, button);
-    root.append(log, form);
-    appElement.append(root);
-
-    this.chatRootElement = root;
-    this.chatLogElement = log;
-    this.chatInputElement = input;
-  }
-
-  private initCharacterUi(): void {
-    const appElement = document.querySelector<HTMLDivElement>('#app');
-    if (!appElement) {
+    if (!panel) {
       return;
     }
 
-    const root = document.createElement('div');
-    root.style.position = 'fixed';
-    root.style.right = '12px';
-    root.style.top = '12px';
-    root.style.width = '280px';
-    root.style.height = '545px';
-    root.style.background = 'rgba(0, 0, 0, 0.72)';
-    root.style.border = '1px solid rgba(183, 170, 129, 0.85)';
-    root.style.display = 'flex';
-    root.style.flexDirection = 'column';
-    root.style.padding = '6px';
-    root.style.gap = '6px';
-    root.style.zIndex = '2500';
-    root.style.pointerEvents = 'auto';
-    root.style.color = '#f0e5c1';
-    root.style.fontFamily = 'monospace';
-    root.style.fontSize = '12px';
+    this.chatRootElement = panel.root;
+    this.chatLogElement = panel.log;
+    this.chatInputElement = panel.input;
+  }
 
-    const tabBar = document.createElement('div');
-    tabBar.style.display = 'flex';
-    tabBar.style.gap = '4px';
+  private initCharacterUi(): void {
+    const panel = createCharacterPanel((tab) => {
+      this.activeCharacterTab = tab;
+      this.updateCharacterTabState();
+    });
 
-    const createTabButton = (
-      label: string,
-      tab: 'skills' | 'inventory' | 'gear',
-    ): HTMLButtonElement => {
-      const button = document.createElement('button');
-      button.textContent = label;
-      button.style.flex = '1';
-      button.style.background = 'rgba(64, 58, 41, 0.95)';
-      button.style.border = '1px solid rgba(150, 138, 102, 0.9)';
-      button.style.color = '#f0e5c1';
-      button.style.fontFamily = 'monospace';
-      button.style.fontSize = '12px';
-      button.style.padding = '4px 6px';
-      button.style.cursor = 'pointer';
-      button.addEventListener('pointerdown', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.activeCharacterTab = tab;
-        this.updateCharacterTabState();
-      });
-      return button;
-    };
+    if (!panel) {
+      return;
+    }
 
-    const skillsTabButton = createTabButton('Skills', 'skills');
-    const inventoryTabButton = createTabButton('Inventory', 'inventory');
-    const gearTabButton = createTabButton('Gear', 'gear');
-    tabBar.append(skillsTabButton, inventoryTabButton, gearTabButton);
-
-    const skillsContent = document.createElement('div');
-    skillsContent.style.whiteSpace = 'pre-line';
-    skillsContent.textContent = 'Woodcutting Lv 1\nMining Lv 1\nSmithing Lv 1\nFletching Lv 1';
-
-    const inventoryContent = document.createElement('div');
-    inventoryContent.style.display = 'flex';
-    inventoryContent.style.flexDirection = 'column';
-    inventoryContent.style.gap = '6px';
-    inventoryContent.style.height = '100%';
-    inventoryContent.style.overflow = 'hidden';
-
-    const inventoryHeader = document.createElement('div');
-    inventoryHeader.textContent = 'HP: 0/0  Gold: 0  Slots: 0/0';
-    inventoryHeader.style.color = '#fff4c7';
-
-    const inventoryGrid = document.createElement('div');
-    inventoryGrid.style.display = 'grid';
-    inventoryGrid.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
-    inventoryGrid.style.gap = '4px';
-    inventoryGrid.style.padding = '0';
-    inventoryGrid.style.boxSizing = 'border-box';
-
-    inventoryContent.append(inventoryHeader, inventoryGrid);
-
-    const gearContent = document.createElement('div');
-    gearContent.style.display = 'none';
-    gearContent.style.flexDirection = 'column';
-    gearContent.style.flex = '1';
-    gearContent.style.minHeight = '0';
-    gearContent.style.gap = '6px';
-    gearContent.style.overflow = 'hidden';
-
-    const gearHeader = document.createElement('div');
-    gearHeader.textContent = 'Equipped gear';
-    gearHeader.style.color = '#fff4c7';
-
-    const gearGrid = document.createElement('div');
-    gearGrid.style.display = 'block';
-    gearGrid.style.flex = '0 0 auto';
-    gearGrid.style.overflow = 'visible';
-    gearGrid.style.minHeight = '0';
-
-    const gearSummary = document.createElement('div');
-    gearSummary.style.flex = '1 1 auto';
-    gearSummary.style.minHeight = '0';
-    gearSummary.style.borderTop = '1px solid rgba(150, 138, 102, 0.9)';
-    gearSummary.style.paddingTop = '4px';
-    gearSummary.style.color = '#fff4c7';
-    gearSummary.style.fontSize = '11px';
-    gearSummary.style.whiteSpace = 'pre-line';
-    gearSummary.style.overflowY = 'auto';
-    gearSummary.style.overflowX = 'hidden';
-    gearSummary.textContent = [
-      'Totals',
-      'STR +0',
-      'CON +0',
-      'Armor 0',
-      'Damage Reduction (DR) 0%',
-      'Accuracy Melee 0',
-      'Accuracy Ranged 0',
-      'Accuracy Magic 0',
-      'Regen +1 HP / 10s',
-    ].join('\n');
-
-    gearContent.append(gearHeader, gearGrid, gearSummary);
-
-    root.append(tabBar, skillsContent, inventoryContent, gearContent);
-    appElement.append(root);
-
-    this.characterRootElement = root;
-    this.characterTabBarElement = tabBar;
-    this.skillsRootElement = root;
-    this.skillsContentElement = skillsContent;
-    this.inventoryContentElement = inventoryContent;
-    this.inventoryHeaderElement = inventoryHeader;
-    this.inventoryGridElement = inventoryGrid;
-    this.gearContentElement = gearContent;
-    this.gearGridElement = gearGrid;
-    this.gearSummaryElement = gearSummary;
+    this.characterRootElement = panel.root;
+    this.characterTabBarElement = panel.tabBar;
+    this.skillsRootElement = panel.root;
+    this.skillsContentElement = panel.skillsContent;
+    this.inventoryContentElement = panel.inventoryContent;
+    this.inventoryHeaderElement = panel.inventoryHeader;
+    this.inventoryGridElement = panel.inventoryGrid;
+    this.gearContentElement = panel.gearContent;
+    this.gearGridElement = panel.gearGrid;
+    this.gearSummaryElement = panel.gearSummary;
     this.updateCharacterTabState();
   }
 
@@ -2849,26 +2406,16 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private initShopUi(): void {
-    const appElement = document.querySelector<HTMLDivElement>('#app');
-    if (!appElement) {
-      return;
-    }
-
-    const { root, body } = this.createStandardPanel('Trade', 560, 420, 2700, () => {
+    const panel = createShopPanel(() => {
       this.closeShop();
     });
 
-    const content = document.createElement('div');
-    content.style.flex = '1';
-    content.style.minHeight = '0';
-    content.style.overflowY = 'auto';
-    content.style.whiteSpace = 'pre-line';
+    if (!panel) {
+      return;
+    }
 
-    body.append(content);
-    appElement.append(root);
-
-    this.shopRootElement = root;
-    this.shopContentElement = content;
+    this.shopRootElement = panel.root;
+    this.shopContentElement = panel.content;
   }
 
   private sendChatFromInput(): void {
@@ -2909,71 +2456,19 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private initBankUi(): void {
-    const appElement = document.querySelector<HTMLDivElement>('#app');
-    if (!appElement) {
-      return;
-    }
-
-    const { root, body } = this.createStandardPanel('Bank', 700, 470, 2800, () => {
+    const panel = createBankPanel(() => {
       this.closeBank();
     });
 
-    const columns = document.createElement('div');
-    columns.style.display = 'grid';
-    columns.style.gridTemplateColumns = '1fr 1fr';
-    columns.style.gap = '10px';
-    columns.style.flex = '1';
-    columns.style.minHeight = '0';
+    if (!panel) {
+      return;
+    }
 
-    const inventoryPanel = document.createElement('div');
-    inventoryPanel.style.display = 'flex';
-    inventoryPanel.style.flexDirection = 'column';
-    inventoryPanel.style.gap = '6px';
-    inventoryPanel.style.minHeight = '0';
-
-    const inventoryHeader = document.createElement('div');
-    inventoryHeader.textContent = 'Inventory';
-    inventoryHeader.style.color = '#fff4c7';
-
-    const inventoryGrid = document.createElement('div');
-    inventoryGrid.style.display = 'grid';
-    inventoryGrid.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
-    inventoryGrid.style.gap = '4px';
-    inventoryGrid.style.alignContent = 'start';
-    inventoryGrid.style.overflowY = 'auto';
-    inventoryGrid.style.paddingRight = '2px';
-
-    inventoryPanel.append(inventoryHeader, inventoryGrid);
-
-    const bankPanel = document.createElement('div');
-    bankPanel.style.display = 'flex';
-    bankPanel.style.flexDirection = 'column';
-    bankPanel.style.gap = '6px';
-    bankPanel.style.minHeight = '0';
-
-    const bankHeader = document.createElement('div');
-    bankHeader.textContent = 'Bank storage';
-    bankHeader.style.color = '#fff4c7';
-
-    const bankGrid = document.createElement('div');
-    bankGrid.style.display = 'grid';
-    bankGrid.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
-    bankGrid.style.gap = '4px';
-    bankGrid.style.alignContent = 'start';
-    bankGrid.style.overflowY = 'auto';
-    bankGrid.style.paddingRight = '2px';
-
-    bankPanel.append(bankHeader, bankGrid);
-
-    columns.append(inventoryPanel, bankPanel);
-    body.append(columns);
-    appElement.append(root);
-
-    this.bankRootElement = root;
-    this.bankInventoryHeaderElement = inventoryHeader;
-    this.bankStorageHeaderElement = bankHeader;
-    this.bankInventoryGridElement = inventoryGrid;
-    this.bankStorageGridElement = bankGrid;
+    this.bankRootElement = panel.root;
+    this.bankInventoryHeaderElement = panel.inventoryHeader;
+    this.bankStorageHeaderElement = panel.storageHeader;
+    this.bankInventoryGridElement = panel.inventoryGrid;
+    this.bankStorageGridElement = panel.storageGrid;
   }
 
   private openBank(inventory: InventoryState, bank: InventoryState): void {
@@ -3004,26 +2499,16 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private initCraftingUi(): void {
-    const appElement = document.querySelector<HTMLDivElement>('#app');
-    if (!appElement) {
-      return;
-    }
-
-    const { root, body } = this.createStandardPanel('Crafting', 560, 420, 2850, () => {
+    const panel = createCraftingPanel(() => {
       this.closeCrafting();
     });
 
-    const content = document.createElement('div');
-    content.style.flex = '1';
-    content.style.minHeight = '0';
-    content.style.overflowY = 'auto';
-    content.style.whiteSpace = 'pre-line';
+    if (!panel) {
+      return;
+    }
 
-    body.append(content);
-    appElement.append(root);
-
-    this.craftingRootElement = root;
-    this.craftingContentElement = content;
+    this.craftingRootElement = panel.root;
+    this.craftingContentElement = panel.content;
   }
 
   private openCrafting(state: CraftingOpenState): void {
@@ -3148,79 +2633,6 @@ export class WorldScene extends Phaser.Scene {
 
     this.bankQuantityPromptElement.remove();
     this.bankQuantityPromptElement = null;
-  }
-
-  private createStandardPanel(
-    titleText: string,
-    widthPx: number,
-    heightPx: number,
-    zIndex: number,
-    onClose: () => void,
-  ): { root: HTMLDivElement; body: HTMLDivElement } {
-    const root = document.createElement('div');
-    this.applyStandardPanelShell(root, widthPx, heightPx, zIndex);
-
-    const header = this.createStandardPanelHeader(titleText, onClose);
-
-    const body = document.createElement('div');
-    body.style.display = 'flex';
-    body.style.flexDirection = 'column';
-    body.style.flex = '1';
-    body.style.minHeight = '0';
-
-    root.append(header, body);
-    return { root, body };
-  }
-
-  private createStandardPanelHeader(titleText: string, onClose: () => void): HTMLDivElement {
-    const row = document.createElement('div');
-    row.style.display = 'flex';
-    row.style.justifyContent = 'space-between';
-    row.style.alignItems = 'center';
-
-    const title = document.createElement('div');
-    title.textContent = titleText;
-    title.style.color = '#fff4c7';
-    title.style.fontWeight = 'bold';
-
-    const closeButton = document.createElement('button');
-    closeButton.textContent = 'Close';
-    closeButton.style.fontFamily = 'monospace';
-    closeButton.style.fontSize = '11px';
-    closeButton.style.cursor = 'pointer';
-    closeButton.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    });
-
-    row.append(title, closeButton);
-    return row;
-  }
-
-  private applyStandardPanelShell(
-    root: HTMLDivElement,
-    widthPx: number,
-    heightPx: number,
-    zIndex: number,
-  ): void {
-    root.style.position = 'fixed';
-    root.style.left = '50%';
-    root.style.top = '50%';
-    root.style.transform = 'translate(-50%, -50%)';
-    root.style.width = `${widthPx}px`;
-    root.style.height = `${heightPx}px`;
-    root.style.background = 'rgba(0, 0, 0, 0.86)';
-    root.style.border = '1px solid rgba(183, 170, 129, 0.92)';
-    root.style.display = 'none';
-    root.style.flexDirection = 'column';
-    root.style.padding = '8px';
-    root.style.gap = '8px';
-    root.style.zIndex = String(zIndex);
-    root.style.pointerEvents = 'auto';
-    root.style.color = '#f0e5c1';
-    root.style.fontFamily = 'monospace';
-    root.style.fontSize = '12px';
   }
 
   private appendSystemChatMessage(text: string): void {
@@ -4559,8 +3971,7 @@ export class WorldScene extends Phaser.Scene {
     this.shopDefinitions = {};
     this.activeShopId = null;
     this.lastRenderedShopSignature = null;
-    this.pendingInteractionTarget = null;
-    this.pendingInteractionRetryAt = 0;
+    this.pendingInteractionController.clear();
     this.hideContextMenu();
     this.hideItemTooltip();
     this.localPlayerState = null;
@@ -4629,3 +4040,4 @@ export class WorldScene extends Phaser.Scene {
     this.lastStateUpdateAt = null;
   }
 }
+ 
