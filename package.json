@@ -11,6 +11,7 @@
     "dev:all": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "smoke:multiplayer": "node scripts/multiplayerSmokeTest.mjs",
     "smoke:crafting": "node scripts/craftingSmokeTest.mjs",
+    "test:regression": "node scripts/runRegressionTests.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

@@ -3,6 +3,40 @@ import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  addSkillXp as addSkillXpFromSystem,
+  getLevelForXp,
+} from './systems/skillProgressionSystem.mjs';
+import {
+  addItemToContainer as addItemToContainerFromSystem,
+  canAddItemToContainer as canAddItemToContainerFromSystem,
+  transferContainerSlot as transferContainerSlotFromSystem,
+} from './systems/inventorySystem.mjs';
+import {
+  createGroundItem,
+  isGroundItemVisibleToPlayer as isGroundItemVisibleToPlayerFromSystem,
+  processGroundItemLifecycle as processGroundItemLifecycleFromSystem,
+  tryPickupGroundItem as tryPickupGroundItemFromSystem,
+} from './systems/groundItemSystem.mjs';
+import {
+  applyMinionDropsToPlayer as applyMinionDropsToPlayerFromSystem,
+} from './systems/minionDropSystem.mjs';
+import { createServerSystems } from './systems/createServerSystems.mjs';
+import { processEnemyAi as processEnemyAiFromSystem } from './systems/enemyAiSystem.mjs';
+import { processInteraction as processInteractionFromSystem } from './systems/harvestingSystem.mjs';
+import {
+  performCraftingAtStation as performCraftingAtStationFromSystem,
+  sendCraftingOpenToSocket as sendCraftingOpenToSocketFromSystem,
+} from './systems/craftingSystem.mjs';
+import {
+  buyFromShop,
+  getShopOpenPayload,
+  openBankForPlayer,
+  sellToShop,
+  transferBankItem,
+} from './systems/commerceSystem.mjs';
+import { handleNpcTalk } from './systems/npcInteractionSystem.mjs';
+import { processPlayerCombat as processPlayerCombatFromSystem } from './systems/playerCombatSystem.mjs';
 
 const SERVER_PORT = Number(process.env.MULTIPLAYER_PORT ?? 2567);
 const TILE_SIZE = 32;
@@ -20,6 +54,8 @@ const INTERACTION_RANGE_TILES = 1;
 const MOVE_FALLBACK_SEARCH_RADIUS = 12;
 const DEBUG_MULTIPLAYER =
   String(process.env.DEBUG_MULTIPLAYER ?? '').toLowerCase() === 'true';
+const DEBUG_INTERACTION_TRACE =
+  String(process.env.DEBUG_INTERACTION_TRACE ?? 'true').toLowerCase() === 'true';
 const STATE_LOG_INTERVAL_MS = 2000;
 const MAX_CHAT_MESSAGE_LENGTH = 120;
 const WOODCUTTING_XP_PER_GATHER_DEFAULT = 22;
@@ -2231,97 +2267,47 @@ function dropItemToGround({
   ownerPlayerId = null,
   nowMs = Date.now(),
 }) {
-  const itemDefinition = getItemDefinition(itemId);
-  if (!itemDefinition) {
+  const groundItem = createGroundItem(
+    {
+      itemId,
+      quantity,
+      tileX,
+      tileY,
+      ownerPlayerId,
+      nowMs,
+    },
+    {
+      getItemDefinition,
+      clamp,
+      randomUUID,
+      worldWidthTiles: WORLD_WIDTH_TILES,
+      worldHeightTiles: WORLD_HEIGHT_TILES,
+      groundItemOwnerPriorityMs: GROUND_ITEM_OWNER_PRIORITY_MS,
+      groundItemLifetimeMs: GROUND_ITEM_LIFETIME_MS,
+    },
+  );
+  if (!groundItem) {
     return null;
   }
-
-  const safeQuantity = Math.max(1, Math.floor(Number(quantity ?? 1)));
-  const safeTileX = clamp(Math.floor(Number(tileX ?? 0)), 0, WORLD_WIDTH_TILES - 1);
-  const safeTileY = clamp(Math.floor(Number(tileY ?? 0)), 0, WORLD_HEIGHT_TILES - 1);
-  const hasOwner = typeof ownerPlayerId === 'string' && ownerPlayerId.length > 0;
-
-  const groundItem = {
-    id: `ground-${randomUUID()}`,
-    itemId: itemDefinition.id,
-    name: itemDefinition.name,
-    image: itemDefinition.image,
-    examineText: itemDefinition.examineText,
-    quantity: safeQuantity,
-    tileX: safeTileX,
-    tileY: safeTileY,
-    ownerPlayerId: hasOwner ? ownerPlayerId : null,
-    ownerOnlyUntil: hasOwner ? nowMs + GROUND_ITEM_OWNER_PRIORITY_MS : nowMs,
-    despawnAt: nowMs + GROUND_ITEM_LIFETIME_MS,
-    createdAt: nowMs,
-  };
 
   worldGroundItems.set(groundItem.id, groundItem);
   return groundItem;
 }
 
 function isGroundItemVisibleToPlayer(groundItem, viewerPlayerId, nowMs) {
-  if (!groundItem || groundItem.despawnAt <= nowMs) {
-    return false;
-  }
-
-  if (!groundItem.ownerPlayerId) {
-    return true;
-  }
-
-  if (viewerPlayerId && groundItem.ownerPlayerId === viewerPlayerId) {
-    return true;
-  }
-
-  return nowMs >= groundItem.ownerOnlyUntil;
+  return isGroundItemVisibleToPlayerFromSystem(groundItem, viewerPlayerId, nowMs);
 }
 
 function processGroundItemLifecycle(nowMs) {
-  for (const [groundItemId, groundItem] of worldGroundItems.entries()) {
-    if (groundItem.despawnAt > nowMs) {
-      continue;
-    }
-
-    worldGroundItems.delete(groundItemId);
-  }
+  processGroundItemLifecycleFromSystem(worldGroundItems, nowMs);
 }
 
 function tryPickupGroundItem(player, groundItemId, nowMs) {
-  const id = String(groundItemId ?? '').trim();
-  if (!id) {
-    return { ok: false, reason: 'Invalid ground item.' };
-  }
-
-  const groundItem = worldGroundItems.get(id);
-  if (!groundItem) {
-    return { ok: false, reason: 'That item is no longer there.' };
-  }
-
-  if (groundItem.despawnAt <= nowMs) {
-    worldGroundItems.delete(id);
-    return { ok: false, reason: 'That item has already despawned.' };
-  }
-
-  if (!isGroundItemVisibleToPlayer(groundItem, player.id, nowMs)) {
-    return { ok: false, reason: 'That item is not visible to you yet.' };
-  }
-
-  const distance = Math.abs(player.tileX - groundItem.tileX) + Math.abs(player.tileY - groundItem.tileY);
-  if (distance > GROUND_ITEM_PICKUP_RANGE_TILES) {
-    return { ok: false, reason: 'Move closer to pick that up.' };
-  }
-
-  const added = addItemToInventory(player, groundItem.itemId, groundItem.quantity);
-  if (!added) {
-    return { ok: false, reason: 'Not enough inventory space.' };
-  }
-
-  worldGroundItems.delete(id);
-  return {
-    ok: true,
-    itemName: groundItem.name,
-    quantity: groundItem.quantity,
-  };
+  return tryPickupGroundItemFromSystem(player, groundItemId, nowMs, {
+    worldGroundItems,
+    addItemToInventory,
+    groundItemPickupRangeTiles: GROUND_ITEM_PICKUP_RANGE_TILES,
+  });
 }
 
 function getPlayerGoldAmount(player) {
@@ -2351,145 +2337,14 @@ function addPlayerGold(player, amount) {
   return addItemToInventory(player, 'gold_coins', quantity);
 }
 
-function rollMinionDrops(minionDefinition) {
-  const rolledDrops = [];
-  const lootMultiplier = Math.max(1, Number(minionDefinition?.lootMultiplier ?? 1));
-
-  const rollDropEntries = (
-    entries,
-    shouldRollChance,
-    quantityMultiplier = 1,
-    nestedLootTablePath = new Set(),
-  ) => {
-    for (const lootDrop of entries ?? []) {
-      if (shouldRollChance) {
-        const roll = Math.random() * 100;
-        if (roll > lootDrop.chancePct) {
-          continue;
-        }
-      }
-
-      if (lootDrop.dropType === 'lootTable' || lootDrop.lootTableId) {
-        const nestedLootTableId = String(lootDrop.lootTableId ?? '').trim();
-        if (!nestedLootTableId) {
-          continue;
-        }
-
-        if (nestedLootTablePath.has(nestedLootTableId)) {
-          continue;
-        }
-
-        const nestedLootTableDefinition = getLootTableDefinition(nestedLootTableId);
-        if (!nestedLootTableDefinition) {
-          continue;
-        }
-
-        const nestedQuantityMultiplier = quantityMultiplier === 1 ? lootMultiplier : quantityMultiplier;
-        const nextLootTablePath = new Set(nestedLootTablePath);
-        nextLootTablePath.add(nestedLootTableId);
-        rollDropEntries(
-          nestedLootTableDefinition.entries.map((entry) => ({
-            ...entry,
-            sourceLootTableId: nestedLootTableDefinition.id,
-            sourceLootTableName: nestedLootTableDefinition.name,
-          })),
-          true,
-          nestedQuantityMultiplier,
-          nextLootTablePath,
-        );
-        continue;
-      }
-
-      const scaledMin = Math.max(1, Math.floor(lootDrop.quantity.min * quantityMultiplier));
-      const scaledMax = Math.max(scaledMin, Math.floor(lootDrop.quantity.max * quantityMultiplier));
-      const quantity = randomIntBetween(scaledMin, scaledMax);
-      if (quantity <= 0) {
-        continue;
-      }
-
-      rolledDrops.push({
-        itemId: lootDrop.itemId,
-        quantity,
-        sourceLootTableId: String(lootDrop.sourceLootTableId ?? ''),
-        sourceLootTableName: String(lootDrop.sourceLootTableName ?? ''),
-      });
-    }
-  };
-
-  rollDropEntries(minionDefinition?.guaranteedDrops, false, 1);
-  rollDropEntries(minionDefinition?.lootTable, true, 1, new Set());
-
-  return rolledDrops;
-}
-
 function applyMinionDropsToPlayer(player, minionDefinition) {
-  const rolledDrops = rollMinionDrops(minionDefinition);
-  if (rolledDrops.length === 0) {
-    return {
-      droppedDrops: [],
-      lootTableDrops: [],
-    };
-  }
-
-  const mergedDrops = new Map();
-  for (const drop of rolledDrops) {
-    const current = mergedDrops.get(drop.itemId) ?? 0;
-    mergedDrops.set(drop.itemId, current + drop.quantity);
-  }
-
-  const droppedDrops = [];
-  const droppedItemIds = new Set();
-  const dropTileX = Math.floor(Number(minionDefinition?.tileX ?? player.tileX));
-  const dropTileY = Math.floor(Number(minionDefinition?.tileY ?? player.tileY));
-  const nowMs = Date.now();
-  for (const [itemId, quantity] of mergedDrops.entries()) {
-    const droppedGroundItem = dropItemToGround({
-      itemId,
-      quantity,
-      tileX: dropTileX,
-      tileY: dropTileY,
-      ownerPlayerId: player.id,
-      nowMs,
-    });
-    if (!droppedGroundItem) {
-      continue;
-    }
-
-    droppedItemIds.add(itemId);
-    droppedDrops.push({
-      itemId,
-      quantity,
-      name: droppedGroundItem.name,
-    });
-  }
-
-  const mergedLootTableDrops = new Map();
-  for (const drop of rolledDrops) {
-    const sourceLootTableId = String(drop.sourceLootTableId ?? '').trim();
-    if (!sourceLootTableId || !droppedItemIds.has(drop.itemId)) {
-      continue;
-    }
-
-    const mergeKey = `${sourceLootTableId}::${drop.itemId}`;
-    const itemDefinition = getItemDefinition(drop.itemId);
-    const currentMerged = mergedLootTableDrops.get(mergeKey);
-    if (currentMerged) {
-      currentMerged.quantity += drop.quantity;
-    } else {
-      mergedLootTableDrops.set(mergeKey, {
-        sourceLootTableId,
-        sourceLootTableName: String(drop.sourceLootTableName ?? ''),
-        itemId: drop.itemId,
-        itemName: itemDefinition?.name ?? drop.itemId,
-        quantity: drop.quantity,
-      });
-    }
-  }
-
-  return {
-    droppedDrops,
-    lootTableDrops: Array.from(mergedLootTableDrops.values()),
-  };
+  return applyMinionDropsToPlayerFromSystem(player, minionDefinition, {
+    getLootTableDefinition,
+    randomIntBetween,
+    dropItemToGround,
+    getItemDefinition,
+    now: () => Date.now(),
+  });
 }
 
 function toInventorySnapshot(inventory) {
@@ -2531,82 +2386,20 @@ function toEquipmentSnapshot(equipment) {
 }
 
 function canAddItemToContainer(container, itemDefinition, quantity) {
-  if (quantity <= 0) {
-    return false;
-  }
-
-  if (itemDefinition.stackable) {
-    const existingSlot = container.slots.find((slot) => slot.itemId === itemDefinition.id);
-    if (existingSlot) {
-      return true;
-    }
-
-    return container.slots.length < container.maxSlots;
-  }
-
-  return container.slots.length + quantity <= container.maxSlots;
+  return canAddItemToContainerFromSystem(container, itemDefinition, quantity);
 }
 
 function addItemToContainer(container, itemDefinition, quantity) {
-  if (!canAddItemToContainer(container, itemDefinition, quantity)) {
-    return false;
-  }
-
-  if (itemDefinition.stackable) {
-    const existingSlot = container.slots.find((slot) => slot.itemId === itemDefinition.id);
-    if (existingSlot) {
-      existingSlot.quantity += quantity;
-      return true;
-    }
-
-    container.slots.push(createInventorySlot(itemDefinition, quantity));
-    return true;
-  }
-
-  for (let index = 0; index < quantity; index += 1) {
-    container.slots.push(createInventorySlot(itemDefinition, 1));
-  }
-
-  return true;
+  return addItemToContainerFromSystem(container, itemDefinition, quantity, {
+    createInventorySlot,
+  });
 }
 
 function transferContainerSlot(source, destination, slotIndex, quantity) {
-  const index = Math.floor(Number(slotIndex));
-  if (!Number.isFinite(index) || index < 0 || index >= source.slots.length) {
-    return null;
-  }
-
-  const sourceSlot = source.slots[index];
-  if (!sourceSlot) {
-    return null;
-  }
-
-  const itemDefinition = getItemDefinition(sourceSlot.itemId);
-  if (!itemDefinition) {
-    return null;
-  }
-
-  const requestedQuantity = Math.max(1, Math.floor(Number(quantity ?? 1)));
-  const transferQuantity = Math.min(requestedQuantity, sourceSlot.quantity);
-
-  if (!canAddItemToContainer(destination, itemDefinition, transferQuantity)) {
-    return null;
-  }
-
-  sourceSlot.quantity -= transferQuantity;
-  if (sourceSlot.quantity <= 0) {
-    source.slots.splice(index, 1);
-  }
-
-  const moved = addItemToContainer(destination, itemDefinition, transferQuantity);
-  if (!moved) {
-    return null;
-  }
-
-  return {
-    quantity: transferQuantity,
-    itemName: itemDefinition.name,
-  };
+  return transferContainerSlotFromSystem(source, destination, slotIndex, quantity, {
+    getItemDefinition,
+    createInventorySlot,
+  });
 }
 
 function equipInventoryItem(player, slotIndex) {
@@ -2743,43 +2536,10 @@ function unequipItem(player, slotName) {
   };
 }
 
-function getXpForLevel(level) {
-  if (level <= 1) {
-    return 0;
-  }
-
-  return Math.floor(80 * (level - 1) * (level - 1) + 120 * (level - 1));
-}
-
-function getLevelForXp(xp) {
-  let level = 1;
-  while (level < 99 && xp >= getXpForLevel(level + 1)) {
-    level += 1;
-  }
-
-  return level;
-}
-
 function addSkillXp(player, skillName, xpAmount) {
-  const skill = player.skills[skillName];
-  if (!skill) {
-    return null;
-  }
-
-  const previousLevel = skill.level;
-  skill.xp += xpAmount;
-  skill.level = getLevelForXp(skill.xp);
-
-  if (skillName === 'constitution') {
-    applyPlayerMaxHpFromConstitution(player, true);
-  }
-
-  const leveledUp = skill.level > previousLevel;
-  return {
-    leveledUp,
-    newLevel: skill.level,
-    gainedXp: xpAmount,
-  };
+  return addSkillXpFromSystem(player, skillName, xpAmount, {
+    applyPlayerMaxHpFromConstitution,
+  });
 }
 
 const clients = new Map();
@@ -3661,6 +3421,21 @@ function log(event, details = {}) {
   );
 }
 
+function traceInteraction(event, details = {}) {
+  if (!DEBUG_INTERACTION_TRACE) {
+    return;
+  }
+
+  console.log(
+    JSON.stringify({
+      scope: 'interaction-trace',
+      event,
+      ...details,
+      at: new Date().toISOString(),
+    }),
+  );
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -3736,6 +3511,71 @@ function isWalkableTile(tileX, tileY) {
     && !isObjectBlockingTile(tileX, tileY);
 }
 
+const {
+  pathfindingService,
+  movementService,
+  combatTargetingPolicy,
+  enemyCombatResolutionService,
+  enemyStateService,
+  enemyNavigationPolicy,
+  enemyCombatPositioningPolicy,
+  playerCombatResolutionService,
+  playerCombatPositioningPolicy,
+} = createServerSystems({
+  shared: {
+    clamp,
+    isWalkableTile,
+    getCombatHitChance,
+    randomIntBetween,
+    addSkillXp,
+  },
+  world: {
+    moveFallbackSearchRadius: MOVE_FALLBACK_SEARCH_RADIUS,
+    getWorldWidthTiles: () => WORLD_WIDTH_TILES,
+    getWorldHeightTiles: () => WORLD_HEIGHT_TILES,
+    worldWidthTiles: WORLD_WIDTH_TILES,
+    worldHeightTiles: WORLD_HEIGHT_TILES,
+  },
+  movement: {
+    tileStepIntervalMs: TILE_STEP_INTERVAL_MS,
+    diagonalStepMultiplier: DIAGONAL_STEP_MULTIPLIER,
+    findPath,
+    canTraverseBetween,
+    setPathTarget,
+    stepTowardTarget,
+    findBestAdjacentTileToTarget,
+    isWithinRange,
+  },
+  enemyCombat: {
+    getPlayerAttackCooldownMs,
+    beginPlayerCombatTarget,
+    enemyAttackAccuracy: ENEMY_ATTACK_ACCURACY,
+    combatEnemyBaseAffinityPct: COMBAT_ENEMY_BASE_AFFINITY_PCT,
+    combatEnemyHitModifierPct: COMBAT_ENEMY_HIT_MODIFIER_PCT,
+    defenseXpPerHitTaken: DEFENSE_XP_PER_HIT_TAKEN,
+    getPlayerArmorRating,
+    enemyAttackRangeTiles: ENEMY_ATTACK_RANGE_TILES,
+  },
+  playerCombat: {
+    enemyArmor: ENEMY_ARMOR,
+    combatPlayerBaseAffinityPct: COMBAT_PLAYER_BASE_AFFINITY_PCT,
+    combatPlayerHitModifierPct: COMBAT_PLAYER_HIT_MODIFIER_PCT,
+    playerAttackDamageMin: PLAYER_ATTACK_DAMAGE_MIN,
+    playerAttackDamageMax: PLAYER_ATTACK_DAMAGE_MAX,
+    strengthXpPerHit: STRENGTH_XP_PER_HIT,
+    constitutionXpPerHit: CONSTITUTION_XP_PER_HIT,
+    getPlayerMeleeAccuracyRating,
+    getPlayerCombatBonuses,
+    getPlayerWeaponBaseDamageTotal,
+    getPlayerEffectiveStrength,
+    applyQuestObjectiveProgress,
+    applyMinionDropsToPlayer,
+    sendChatToSocket,
+    playerAttackRangeTiles: PLAYER_ATTACK_RANGE_TILES,
+    clients,
+  },
+});
+
 function findSpawnTile() {
   const centerX = NEW_PLAYER_SPAWN_TILE_X;
   const centerY = NEW_PLAYER_SPAWN_TILE_Y;
@@ -3802,26 +3642,15 @@ function findBestAdjacentTile(player, node) {
 }
 
 function isWithinRange(fromTileX, fromTileY, toTileX, toTileY, maxDistance) {
-  const distance = Math.abs(fromTileX - toTileX) + Math.abs(fromTileY - toTileY);
-  return distance <= maxDistance;
+  return combatTargetingPolicy.isWithinRange(fromTileX, fromTileY, toTileX, toTileY, maxDistance);
 }
 
 function canAutoRetaliate(player) {
-  return (
-    player.hp > 0 &&
-    player.combatTargetEnemyId === null &&
-    player.targetTileX === null &&
-    player.targetTileY === null
-  );
+  return combatTargetingPolicy.canAutoRetaliate(player);
 }
 
 function isPlayerMoving(player) {
-  return (
-    player.targetTileX !== null ||
-    player.targetTileY !== null ||
-    player.directionX !== 0 ||
-    player.directionY !== 0
-  );
+  return combatTargetingPolicy.isPlayerMoving(player);
 }
 
 function isCorrectHarvestToolEquipped(player, skillName) {
@@ -4004,12 +3833,7 @@ function getPlayerAttackCooldownMs(player) {
 }
 
 function beginPlayerCombatTarget(player, enemyId, nowMs) {
-  const isNewTarget = player.combatTargetEnemyId !== enemyId;
-  player.combatTargetEnemyId = enemyId;
-
-  if (isNewTarget) {
-    player.nextCombatAt = nowMs + getPlayerAttackCooldownMs(player);
-  }
+  return combatTargetingPolicy.beginPlayerCombatTarget(player, enemyId, nowMs);
 }
 
 function getPlayerEffectiveStrength(player) {
@@ -4046,177 +3870,31 @@ function randomIntBetween(minValue, maxValue) {
 }
 
 function makeTileKey(tileX, tileY) {
-  return `${tileX},${tileY}`;
+  return pathfindingService.makeTileKey(tileX, tileY);
 }
 
 function canTraverseBetween(fromTileX, fromTileY, toTileX, toTileY) {
-  const deltaX = toTileX - fromTileX;
-  const deltaY = toTileY - fromTileY;
-
-  if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
-    return false;
-  }
-
-  if (!isWalkableTile(toTileX, toTileY)) {
-    return false;
-  }
-
-  if (Math.abs(deltaX) === 1 && Math.abs(deltaY) === 1) {
-    const sideATileX = fromTileX + deltaX;
-    const sideATileY = fromTileY;
-    const sideBTileX = fromTileX;
-    const sideBTileY = fromTileY + deltaY;
-    return isWalkableTile(sideATileX, sideATileY) && isWalkableTile(sideBTileX, sideBTileY);
-  }
-
-  return true;
+  return pathfindingService.canTraverseBetween(fromTileX, fromTileY, toTileX, toTileY);
 }
 
 function reconstructPath(cameFrom, startX, startY, targetX, targetY) {
-  const path = [];
-  let currentKey = makeTileKey(targetX, targetY);
-  const startKey = makeTileKey(startX, startY);
-
-  while (currentKey !== startKey) {
-    const [tileX, tileY] = currentKey.split(',').map(Number);
-    path.push({ tileX, tileY });
-
-    const previousKey = cameFrom.get(currentKey);
-    if (!previousKey) {
-      return [];
-    }
-
-    currentKey = previousKey;
-  }
-
-  path.reverse();
-  return path;
+  return pathfindingService.reconstructPath(cameFrom, startX, startY, targetX, targetY);
 }
 
 function findPath(startX, startY, targetX, targetY) {
-  if (startX === targetX && startY === targetY) {
-    return [];
-  }
-
-  const targetWalkable = isWalkableTile(targetX, targetY);
-  if (!targetWalkable) {
-    return null;
-  }
-
-  const queue = [{ tileX: startX, tileY: startY }];
-  let queueIndex = 0;
-  const visited = new Set([makeTileKey(startX, startY)]);
-  const cameFrom = new Map();
-
-  while (queueIndex < queue.length) {
-    const current = queue[queueIndex];
-    queueIndex += 1;
-
-    const neighbors = [
-      { tileX: current.tileX + 1, tileY: current.tileY },
-      { tileX: current.tileX - 1, tileY: current.tileY },
-      { tileX: current.tileX, tileY: current.tileY + 1 },
-      { tileX: current.tileX, tileY: current.tileY - 1 },
-      { tileX: current.tileX + 1, tileY: current.tileY + 1 },
-      { tileX: current.tileX + 1, tileY: current.tileY - 1 },
-      { tileX: current.tileX - 1, tileY: current.tileY + 1 },
-      { tileX: current.tileX - 1, tileY: current.tileY - 1 },
-    ];
-
-    for (const neighbor of neighbors) {
-      if (!canTraverseBetween(current.tileX, current.tileY, neighbor.tileX, neighbor.tileY)) {
-        continue;
-      }
-
-      const neighborKey = makeTileKey(neighbor.tileX, neighbor.tileY);
-      if (visited.has(neighborKey)) {
-        continue;
-      }
-
-      visited.add(neighborKey);
-      cameFrom.set(neighborKey, makeTileKey(current.tileX, current.tileY));
-
-      if (neighbor.tileX === targetX && neighbor.tileY === targetY) {
-        return reconstructPath(cameFrom, startX, startY, targetX, targetY);
-      }
-
-      queue.push(neighbor);
-    }
-  }
-
-  return null;
+  return pathfindingService.findPath(startX, startY, targetX, targetY);
 }
 
 function getPerimeterCandidates(centerX, centerY, radius) {
-  const candidates = [];
-
-  for (let dx = -radius; dx <= radius; dx += 1) {
-    candidates.push({ tileX: centerX + dx, tileY: centerY - radius });
-    candidates.push({ tileX: centerX + dx, tileY: centerY + radius });
-  }
-
-  for (let dy = -radius + 1; dy <= radius - 1; dy += 1) {
-    candidates.push({ tileX: centerX - radius, tileY: centerY + dy });
-    candidates.push({ tileX: centerX + radius, tileY: centerY + dy });
-  }
-
-  return candidates;
+  return pathfindingService.getPerimeterCandidates(centerX, centerY, radius);
 }
 
 function findNearestReachableDestination(player, targetX, targetY) {
-  for (let radius = 1; radius <= MOVE_FALLBACK_SEARCH_RADIUS; radius += 1) {
-    const perimeter = getPerimeterCandidates(targetX, targetY, radius);
-    let best = null;
-
-    for (const candidate of perimeter) {
-      if (!isWalkableTile(candidate.tileX, candidate.tileY)) {
-        continue;
-      }
-
-      const path = findPath(player.tileX, player.tileY, candidate.tileX, candidate.tileY);
-      if (!path) {
-        continue;
-      }
-
-      if (!best || path.length < best.path.length) {
-        best = {
-          tileX: candidate.tileX,
-          tileY: candidate.tileY,
-          path,
-        };
-      }
-    }
-
-    if (best) {
-      return best;
-    }
-  }
-
-  return null;
+  return pathfindingService.findNearestReachableDestination(player, targetX, targetY);
 }
 
 function setPathTarget(entity, tileX, tileY) {
-  const path = findPath(entity.tileX, entity.tileY, tileX, tileY);
-  if (path) {
-    entity.directionX = 0;
-    entity.directionY = 0;
-    entity.targetTileX = tileX;
-    entity.targetTileY = tileY;
-    entity.targetPath = path;
-    return true;
-  }
-
-  const fallback = findNearestReachableDestination(entity, tileX, tileY);
-  if (!fallback) {
-    return false;
-  }
-
-  entity.directionX = 0;
-  entity.directionY = 0;
-  entity.targetTileX = fallback.tileX;
-  entity.targetTileY = fallback.tileY;
-  entity.targetPath = fallback.path;
-  return true;
+  return pathfindingService.setPathTarget(entity, tileX, tileY);
 }
 
 function getNpcSnapshot() {
@@ -4275,198 +3953,78 @@ function sendBankSnapshotToSocket(socket, player) {
   );
 }
 
-function getCraftingRecipeDisplayName(recipe) {
-  const firstOutput = Array.isArray(recipe?.outputs) && recipe.outputs.length > 0
-    ? recipe.outputs[0]
-    : null;
-  const outputDefinition = firstOutput ? getItemDefinition(firstOutput.itemId) : null;
-  if (outputDefinition?.name) {
-    return outputDefinition.name;
-  }
-
-  return String(recipe?.id ?? 'Recipe');
+function handleBankOpen(player, npcId) {
+  return openBankForPlayer(player, npcId, {
+    getBankNpcById,
+    isWithinNpcRange,
+  });
 }
 
-function toCraftingRecipeSnapshot(recipe) {
-  return {
-    id: String(recipe.id),
-    name: getCraftingRecipeDisplayName(recipe),
-    requiredLevel: Math.max(1, Math.floor(Number(recipe.requiredLevel ?? 1))),
-    durationMs: Math.max(100, Math.floor(Number(recipe.durationMs ?? 1000))),
-    successChance: clamp01(recipe.successChance, 1),
-    xp: Math.max(0, Number(recipe.xp ?? 0)),
-    inputs: (Array.isArray(recipe.inputs) ? recipe.inputs : []).map((entry) => ({
-      itemId: String(entry.itemId),
-      name: getItemDefinition(entry.itemId)?.name ?? String(entry.itemId),
-      quantity: Math.max(1, Math.floor(Number(entry.quantity ?? 1))),
-    })),
-    outputs: (Array.isArray(recipe.outputs) ? recipe.outputs : []).map((entry) => ({
-      itemId: String(entry.itemId),
-      name: getItemDefinition(entry.itemId)?.name ?? String(entry.itemId),
-      quantity: Math.max(1, Math.floor(Number(entry.quantity ?? 1))),
-    })),
-  };
+function handleBankTransfer(player, message) {
+  return transferBankItem(player, message, {
+    getBankNpcById,
+    isWithinNpcRange,
+    transferContainerSlot,
+  });
+}
+
+function handleShopOpen(player, npcId) {
+  return getShopOpenPayload(player, npcId, {
+    getNpcById,
+    getShopByNpcId,
+    isWithinNpcRange,
+  });
+}
+
+function handleShopBuy(player, message) {
+  return buyFromShop(player, message, {
+    resolveShopById: (shopId) =>
+      SHOP_DEFINITIONS.generalStore.id === shopId ? SHOP_DEFINITIONS.generalStore : null,
+    getNpcById,
+    isWithinNpcRange,
+    canSpendPlayerGold,
+    addItemToInventory,
+    spendPlayerGold,
+  });
+}
+
+function handleShopSell(player, message) {
+  return sellToShop(player, message, {
+    resolveShopById: (shopId) =>
+      SHOP_DEFINITIONS.generalStore.id === shopId ? SHOP_DEFINITIONS.generalStore : null,
+    getNpcById,
+    isWithinNpcRange,
+    getInventoryItemCount,
+    removeItemFromInventory,
+    addPlayerGold,
+  });
 }
 
 function sendCraftingOpenToSocket(socket, player, station, objectId) {
-  const craftingConfig = CRAFTING_SKILL_CONFIGS[station.recipeSkill];
-  if (!craftingConfig || !Array.isArray(craftingConfig.recipes) || craftingConfig.recipes.length === 0) {
-    sendChatToSocket(socket, '[Crafting] No recipes are configured for this station yet.');
-    return false;
-  }
-
-  socket.send(
-    JSON.stringify({
-      type: 'craftingOpen',
-      stationType: station.stationType,
-      title: station.title,
-      objectId,
-      inventory: toInventorySnapshot(player.inventory),
-      recipes: craftingConfig.recipes.map((recipe) => toCraftingRecipeSnapshot(recipe)),
-    }),
-  );
-  return true;
-}
-
-function hasRequiredItemsForRecipe(player, recipe) {
-  for (const input of recipe.inputs) {
-    const quantity = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
-    if (getInventoryItemCount(player, input.itemId) < quantity) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function canReceiveRecipeOutputs(player, recipe) {
-  const projectedInventory = cloneInventory(player.inventory, INVENTORY_MAX_SLOTS);
-
-  for (const input of recipe.inputs) {
-    let remaining = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
-
-    for (let index = projectedInventory.slots.length - 1; index >= 0 && remaining > 0; index -= 1) {
-      const slot = projectedInventory.slots[index];
-      if (slot.itemId !== input.itemId) {
-        continue;
-      }
-
-      const available = Math.max(0, Math.floor(Number(slot.quantity ?? 0)));
-      if (available <= 0) {
-        continue;
-      }
-
-      const consumed = Math.min(available, remaining);
-      slot.quantity -= consumed;
-      remaining -= consumed;
-
-      if (slot.quantity <= 0) {
-        projectedInventory.slots.splice(index, 1);
-      }
-    }
-
-    if (remaining > 0) {
-      return false;
-    }
-  }
-
-  for (const output of recipe.outputs) {
-    const itemDefinition = getItemDefinition(output.itemId);
-    if (!itemDefinition) {
-      return false;
-    }
-
-    const quantity = Math.max(1, Math.floor(Number(output.quantity ?? 1)));
-    if (!canAddItemToContainer(projectedInventory, itemDefinition, quantity)) {
-      return false;
-    }
-
-    addItemToContainer(projectedInventory, itemDefinition, quantity);
-  }
-
-  return true;
+  return sendCraftingOpenToSocketFromSystem(socket, player, station, objectId, {
+    craftingSkillConfigs: CRAFTING_SKILL_CONFIGS,
+    sendChatToSocket,
+    toInventorySnapshot,
+    clamp01,
+    getItemDefinition,
+  });
 }
 
 function performCraftingAtStation(player, stationType, recipeId, quantity) {
-  const station = CRAFTING_STATIONS[String(stationType ?? '')] ?? null;
-  if (!station) {
-    return { ok: false, reason: 'Unknown crafting station.' };
-  }
-
-  const config = CRAFTING_SKILL_CONFIGS[station.recipeSkill];
-  if (!config || !Array.isArray(config.recipes)) {
-    return { ok: false, reason: 'No recipes configured for this station.' };
-  }
-
-  const recipe = config.recipes.find((entry) => String(entry.id) === String(recipeId ?? ''));
-  if (!recipe) {
-    return { ok: false, reason: 'Unknown recipe.' };
-  }
-
-  const skillState = player.skills?.[station.xpSkill] ?? { level: 1 };
-  const requiredLevel = Math.max(1, Math.floor(Number(recipe.requiredLevel ?? 1)));
-  if (Math.max(1, Math.floor(Number(skillState.level ?? 1))) < requiredLevel) {
-    return { ok: false, reason: `Requires ${station.xpSkill} level ${requiredLevel}.` };
-  }
-
-  const craftAttempts = Math.max(1, Math.min(28, Math.floor(Number(quantity ?? 1))));
-  let craftedCount = 0;
-
-  for (let index = 0; index < craftAttempts; index += 1) {
-    if (!hasRequiredItemsForRecipe(player, recipe)) {
-      break;
-    }
-
-    if (!canReceiveRecipeOutputs(player, recipe)) {
-      if (craftedCount === 0) {
-        return { ok: false, reason: 'Not enough inventory space.' };
-      }
-      break;
-    }
-
-    for (const input of recipe.inputs) {
-      const inputQuantity = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
-      const removed = removeItemFromInventory(player, input.itemId, inputQuantity);
-      if (!removed) {
-        return craftedCount > 0
-          ? { ok: true, craftedCount, recipe: toCraftingRecipeSnapshot(recipe), partial: true }
-          : { ok: false, reason: 'Missing required materials.' };
-      }
-    }
-
-    const successChance = clamp01(recipe.successChance, 1);
-    if (Math.random() > successChance) {
-      continue;
-    }
-
-    for (const output of recipe.outputs) {
-      const outputQuantity = Math.max(1, Math.floor(Number(output.quantity ?? 1)));
-      const added = addItemToInventory(player, output.itemId, outputQuantity);
-      if (!added) {
-        return craftedCount > 0
-          ? { ok: true, craftedCount, recipe: toCraftingRecipeSnapshot(recipe), partial: true }
-          : { ok: false, reason: 'Not enough inventory space.' };
-      }
-    }
-
-    const xpGain = Math.max(0, Number(recipe.xp ?? 0));
-    if (xpGain > 0) {
-      addSkillXp(player, station.xpSkill, xpGain);
-    }
-
-    craftedCount += 1;
-  }
-
-  if (craftedCount <= 0) {
-    return { ok: false, reason: 'You do not have the required materials.' };
-  }
-
-  return {
-    ok: true,
-    craftedCount,
-    recipe: toCraftingRecipeSnapshot(recipe),
-    partial: craftedCount < craftAttempts,
-  };
+  return performCraftingAtStationFromSystem(player, stationType, recipeId, quantity, {
+    craftingStations: CRAFTING_STATIONS,
+    craftingSkillConfigs: CRAFTING_SKILL_CONFIGS,
+    clamp01,
+    getItemDefinition,
+    getInventoryItemCount,
+    cloneInventory,
+    inventoryMaxSlots: INVENTORY_MAX_SLOTS,
+    canAddItemToContainer,
+    addItemToContainer,
+    removeItemFromInventory,
+    addItemToInventory,
+    addSkillXp,
+  });
 }
 
 function getEnemySnapshot(now) {
@@ -4834,124 +4392,23 @@ function makeSnapshot(now, viewerPlayerId = null) {
 }
 
 function attemptStep(player, stepX, stepY) {
-  const nextTileX = clamp(player.tileX + stepX, 1, WORLD_WIDTH_TILES - 2);
-  const nextTileY = clamp(player.tileY + stepY, 1, WORLD_HEIGHT_TILES - 2);
-
-  if (!isWalkableTile(nextTileX, nextTileY)) {
-    return false;
-  }
-
-  player.previousTraversedTileX = player.tileX;
-  player.previousTraversedTileY = player.tileY;
-  player.tileX = nextTileX;
-  player.tileY = nextTileY;
-  return true;
+  return movementService.attemptStep(player, stepX, stepY);
 }
 
 function hasReachedTarget(player) {
-  return player.targetTileX === player.tileX && player.targetTileY === player.tileY;
+  return movementService.hasReachedTarget(player);
 }
 
 function stepTowardTarget(entity) {
-  if (entity.targetTileX === null || entity.targetTileY === null) {
-    return false;
-  }
-
-  if (hasReachedTarget(entity)) {
-    entity.targetTileX = null;
-    entity.targetTileY = null;
-    return false;
-  }
-
-  if (!Array.isArray(entity.targetPath) || entity.targetPath.length === 0) {
-    const rebuilt = findPath(entity.tileX, entity.tileY, entity.targetTileX, entity.targetTileY);
-    if (!rebuilt) {
-      entity.targetTileX = null;
-      entity.targetTileY = null;
-      entity.targetPath = [];
-      return false;
-    }
-
-    entity.targetPath = rebuilt;
-  }
-
-  const nextStep = entity.targetPath[0];
-  if (!nextStep) {
-    return false;
-  }
-
-  if (!canTraverseBetween(entity.tileX, entity.tileY, nextStep.tileX, nextStep.tileY)) {
-    const rebuilt = findPath(entity.tileX, entity.tileY, entity.targetTileX, entity.targetTileY);
-    if (!rebuilt) {
-      entity.targetTileX = null;
-      entity.targetTileY = null;
-      entity.targetPath = [];
-      return false;
-    }
-
-    entity.targetPath = rebuilt;
-    return stepTowardTarget(entity);
-  }
-
-  const deltaX = nextStep.tileX - entity.tileX;
-  const deltaY = nextStep.tileY - entity.tileY;
-  const isDiagonalStep = Math.abs(deltaX) === 1 && Math.abs(deltaY) === 1;
-
-  if (
-    Object.prototype.hasOwnProperty.call(entity, 'previousTraversedTileX') &&
-    Object.prototype.hasOwnProperty.call(entity, 'previousTraversedTileY')
-  ) {
-    entity.previousTraversedTileX = entity.tileX;
-    entity.previousTraversedTileY = entity.tileY;
-  }
-
-  entity.tileX = nextStep.tileX;
-  entity.tileY = nextStep.tileY;
-  entity.targetPath.shift();
-  const moved = true;
-  const moveDelayMs = isDiagonalStep
-    ? Math.round(TILE_STEP_INTERVAL_MS * DIAGONAL_STEP_MULTIPLIER)
-    : TILE_STEP_INTERVAL_MS;
-
-  if (hasReachedTarget(entity)) {
-    entity.targetTileX = null;
-    entity.targetTileY = null;
-    entity.targetPath = [];
-  }
-
-  return moved ? moveDelayMs : 0;
+  return movementService.stepTowardTarget(entity);
 }
 
 function stepWithDirection(player) {
-  if (player.directionX === 0 && player.directionY === 0) {
-    return 0;
-  }
-
-  const moved = attemptStep(player, player.directionX, player.directionY);
-  if (!moved) {
-    return 0;
-  }
-
-  const isDiagonalStep =
-    Math.abs(player.directionX) === 1 && Math.abs(player.directionY) === 1;
-  return isDiagonalStep
-    ? Math.round(TILE_STEP_INTERVAL_MS * DIAGONAL_STEP_MULTIPLIER)
-    : TILE_STEP_INTERVAL_MS;
+  return movementService.stepWithDirection(player);
 }
 
 function stepPlayerIfPossible(player, nowMs) {
-  if (nowMs < player.nextMoveAllowedAt) {
-    return;
-  }
-
-  const moveDelayMs =
-    (player.targetTileX !== null || player.targetTileY !== null)
-      ? stepTowardTarget(player)
-      : stepWithDirection(player);
-
-  if (moveDelayMs > 0) {
-    player.nextMoveAllowedAt = nowMs + moveDelayMs;
-  }
+  return movementService.stepPlayerIfPossible(player, nowMs);
 }
 
 function isWithinInteractionRange(player, node) {
@@ -4960,453 +4417,74 @@ function isWithinInteractionRange(player, node) {
 }
 
 function processInteraction(player, nowMs) {
-  if (!player.activeInteractionNodeId) {
-    return;
-  }
-
-  const node = worldNodes.get(player.activeInteractionNodeId);
-  if (!node) {
-    player.activeInteractionNodeId = null;
-    return;
-  }
-
-  if (!isWithinInteractionRange(player, node)) {
-    player.lastActionText = `Out of range for ${getResourceName(node.resourceId, node.type)}`;
-    return;
-  }
-
-  if (nowMs < player.nextInteractionAt) {
-    return;
-  }
-
-  if (node.depletedUntil > nowMs) {
-    const depletedConfig = getHarvestResourceConfig(node.resourceId, node.type);
-    if (depletedConfig) {
-      player.lastActionText = interpolateTemplate(depletedConfig.messages.depleted, {
-        resourceName: getResourceName(depletedConfig.id, depletedConfig.id.replaceAll('_', ' ')),
-      });
-    } else {
-      player.lastActionText = `${getResourceName(node.resourceId, node.type)} depleted`;
-    }
-
-    player.activeInteractionNodeId = null;
-    return;
-  }
-
-  const resourceConfig = getHarvestResourceConfig(node.resourceId, node.type);
-  if (!resourceConfig) {
-    player.lastActionText = `No resource config for ${node.resourceId}`;
-    return;
-  }
-
-  const playerSkill = player.skills[resourceConfig.skill];
-  if (!playerSkill || playerSkill.level < resourceConfig.requiredLevel) {
-    player.lastActionText = interpolateTemplate(resourceConfig.messages.locked, {
-      requiredLevel: resourceConfig.requiredLevel,
-    });
-    player.activeInteractionNodeId = null;
-    return;
-  }
-
-  if (!Number.isFinite(node.hitsRemaining) || node.hitsRemaining <= 0) {
-    node.hitsRemaining = rollDepletionHits(resourceConfig);
-  }
-
-  const skillBonuses = getPlayerSkillActionBonuses(player, resourceConfig.skill);
-  const playerSkillLevel = Math.max(
-    1,
-    Math.floor(Number(player.skills?.[resourceConfig.skill]?.level ?? 1)),
-  );
-  const levelDifference = Math.max(0, playerSkillLevel - resourceConfig.requiredLevel);
-  const levelSuccessChanceBonus = Math.min(
-    HARVEST_SUCCESS_CHANCE_BONUS_MAX,
-    levelDifference * HARVEST_SUCCESS_CHANCE_BONUS_PER_LEVEL,
-  );
-  const adjustedSuccessChance = clamp01(
-    resourceConfig.successChance + skillBonuses.successChanceBonus + levelSuccessChanceBonus,
-    resourceConfig.successChance,
-  );
-  const adjustedGatherIntervalMs = Math.max(
-    250,
-    Math.floor(resourceConfig.gatherIntervalMs * skillBonuses.gatherIntervalMultiplier),
-  );
-
-  node.gatherIntervalMs = adjustedGatherIntervalMs;
-  player.nextInteractionAt = nowMs + adjustedGatherIntervalMs;
-
-  node.hitsRemaining -= 1;
-  const depletedAfterThisHit = node.hitsRemaining <= 0;
-
-  if (Math.random() > adjustedSuccessChance) {
-    player.lastActionText = interpolateTemplate(resourceConfig.messages.gatherFail, {
-      resourceName: getResourceName(resourceConfig.id, resourceConfig.id.replaceAll('_', ' ')),
-    });
-
-    if (depletedAfterThisHit) {
-      node.depletedUntil = nowMs + rollDepletionDurationMs(resourceConfig, node.respawnMs);
-      node.hitsRemaining = rollDepletionHits(resourceConfig);
-      player.activeInteractionNodeId = null;
-    }
-
-    return;
-  }
-
-  const selectedDrop = pickWeightedDrop(resourceConfig.drops);
-  if (!selectedDrop) {
-    player.lastActionText = 'No drop config for resource';
-    return;
-  }
-
-  const rewardItem = getItemDefinition(selectedDrop.itemId);
-  if (!rewardItem) {
-    player.lastActionText = 'Invalid reward item config';
-    return;
-  }
-
-  const rewardQuantity = randomIntBetween(selectedDrop.quantity.min, selectedDrop.quantity.max);
-
-  const added = addItemToInventory(player, rewardItem.id, rewardQuantity);
-  if (!added) {
-    player.lastActionText = 'Inventory full';
-    return;
-  }
-
-  applyQuestObjectiveProgress(player, 'gather', rewardItem.id, rewardQuantity);
-
-  const xpResult = addSkillXp(player, resourceConfig.skill, selectedDrop.xp);
-  player.lastActionText = interpolateTemplate(resourceConfig.messages.success, {
-    quantity: rewardQuantity,
-    itemName: rewardItem.name.toLowerCase(),
-    xp: selectedDrop.xp,
+  processInteractionFromSystem(player, nowMs, {
+    getWorldNodeById: (nodeId) => worldNodes.get(nodeId),
+    isWithinInteractionRange,
+    getResourceName,
+    getHarvestResourceConfig,
+    interpolateTemplate,
+    rollDepletionHits,
+    getPlayerSkillActionBonuses,
+    harvestSuccessChanceBonusMax: HARVEST_SUCCESS_CHANCE_BONUS_MAX,
+    harvestSuccessChanceBonusPerLevel: HARVEST_SUCCESS_CHANCE_BONUS_PER_LEVEL,
+    clamp01,
+    rollDepletionDurationMs,
+    pickWeightedDrop,
+    getItemDefinition,
+    randomIntBetween,
+    addItemToInventory,
+    applyQuestObjectiveProgress,
+    addSkillXp,
   });
+}
 
-  if (depletedAfterThisHit) {
-    node.depletedUntil = nowMs + rollDepletionDurationMs(resourceConfig, node.respawnMs);
-    node.hitsRemaining = rollDepletionHits(resourceConfig);
-    player.activeInteractionNodeId = null;
-  }
+function createPlayerCombatDeps() {
+  return {
+    getEnemyById: (enemyId) => worldEnemies.get(enemyId),
+    resolvePlayerCombatPositioning: (attacker, targetEnemy) =>
+      playerCombatPositioningPolicy.resolvePositioning(attacker, targetEnemy),
+    resolvePlayerAttack: (attacker, targetEnemy, tickNowMs) =>
+      playerCombatResolutionService.resolvePlayerAttack(attacker, targetEnemy, tickNowMs),
+  };
+}
 
-  if (xpResult?.leveledUp) {
-    player.lastActionText = interpolateTemplate(resourceConfig.messages.levelUp, {
-      level: xpResult.newLevel,
-    });
-  }
+function createEnemyAiDeps() {
+  return {
+    forEachEnemy: (handler) => {
+      for (const enemy of worldEnemies.values()) {
+        handler(enemy);
+      }
+    },
+    setPathTarget,
+    stepTowardTarget,
+    shouldSkipEnemyForDeath: (enemy, tickNowMs) => enemyStateService.shouldSkipForDeath(enemy, tickNowMs),
+    applyEnemyRegeneration: (enemy, tickNowMs) => enemyStateService.applyRegeneration(enemy, tickNowMs),
+    handleEnemyOutOfChaseRange: (enemy, tickNowMs) => enemyStateService.handleOutOfChaseRange(enemy, tickNowMs),
+    handleEnemyNoTarget: (enemy, tickNowMs) => enemyStateService.handleNoTarget(enemy, tickNowMs),
+    selectAggroTargetEntry: (enemy) =>
+      combatTargetingPolicy.selectAggroTargetEntry(enemy, (handler) => {
+        for (const [playerId, client] of clients.entries()) {
+          handler(playerId, client);
+        }
+      }),
+    isEnemyInAttackRange: (enemy, targetPlayer) =>
+      enemyCombatPositioningPolicy.isInAttackRange(enemy, targetPlayer),
+    enterEnemyAttackStance: (enemy) => enemyCombatPositioningPolicy.enterAttackStance(enemy),
+    resolveEnemyAttack: (enemy, targetPlayer, tickNowMs) =>
+      enemyCombatResolutionService.resolveEnemyAttack(enemy, targetPlayer, tickNowMs),
+    updateEnemyPursuitPath: (enemy, targetPlayer) =>
+      enemyNavigationPolicy.updatePursuitPath(enemy, targetPlayer),
+    stepEnemyTowardPursuitTarget: (enemy, tickNowMs) =>
+      enemyNavigationPolicy.stepTowardPursuitTarget(enemy, tickNowMs),
+  };
 }
 
 function processPlayerCombat(player, nowMs) {
-  if (!player.combatTargetEnemyId) {
-    return;
-  }
-
-  const enemy = worldEnemies.get(player.combatTargetEnemyId);
-  if (!enemy || enemy.deadUntil > nowMs) {
-    player.combatTargetEnemyId = null;
-    return;
-  }
-
-  if (player.tileX === enemy.tileX && player.tileY === enemy.tileY) {
-    const fallbackTileX = Number(player.previousTraversedTileX);
-    const fallbackTileY = Number(player.previousTraversedTileY);
-    const hasValidFallback =
-      Number.isFinite(fallbackTileX) &&
-      Number.isFinite(fallbackTileY) &&
-      fallbackTileX >= 1 &&
-      fallbackTileX <= WORLD_WIDTH_TILES - 2 &&
-      fallbackTileY >= 1 &&
-      fallbackTileY <= WORLD_HEIGHT_TILES - 2 &&
-      isWalkableTile(fallbackTileX, fallbackTileY) &&
-      (fallbackTileX !== enemy.tileX || fallbackTileY !== enemy.tileY);
-
-    if (hasValidFallback) {
-      player.tileX = fallbackTileX;
-      player.tileY = fallbackTileY;
-      player.targetTileX = null;
-      player.targetTileY = null;
-      player.targetPath = [];
-      return;
-    }
-
-    if (player.targetTileX === null || player.targetTileY === null) {
-      const adjacentTile = findBestAdjacentTileToTarget(player, enemy.tileX, enemy.tileY);
-      if (adjacentTile) {
-        setPathTarget(player, adjacentTile.tileX, adjacentTile.tileY);
-      }
-    }
-    return;
-  }
-
-  if (!isWithinRange(player.tileX, player.tileY, enemy.tileX, enemy.tileY, PLAYER_ATTACK_RANGE_TILES)) {
-    if (player.targetTileX === null || player.targetTileY === null) {
-      const adjacentTile = findBestAdjacentTileToTarget(player, enemy.tileX, enemy.tileY);
-      if (adjacentTile) {
-        setPathTarget(player, adjacentTile.tileX, adjacentTile.tileY);
-      }
-    }
-    return;
-  }
-
-  if (nowMs < player.nextCombatAt) {
-    return;
-  }
-
-  player.targetTileX = null;
-  player.targetTileY = null;
-  player.targetPath = [];
-
-  const playerAccuracy = getPlayerMeleeAccuracyRating(player);
-  const enemyArmor = Math.max(0, Math.floor(Number(enemy.armor ?? ENEMY_ARMOR)));
-  const hitChance = getCombatHitChance(
-    playerAccuracy,
-    enemyArmor,
-    COMBAT_PLAYER_BASE_AFFINITY_PCT,
-    COMBAT_PLAYER_HIT_MODIFIER_PCT,
-  );
-  if (Math.random() > hitChance) {
-    player.nextCombatAt = nowMs + getPlayerAttackCooldownMs(player);
-    player.lastActionText = `Your attack glances off ${enemy.name}'s armor.`;
-    return;
-  }
-
-  const combatBonuses = getPlayerCombatBonuses(player);
-  const weaponBaseDamageTotal = getPlayerWeaponBaseDamageTotal(player);
-  const effectiveStrength = getPlayerEffectiveStrength(player);
-  const strengthMaxHitBonus = Math.floor((effectiveStrength * weaponBaseDamageTotal) / 100);
-  const attackMin = Math.max(1, PLAYER_ATTACK_DAMAGE_MIN + combatBonuses.minDamageBonus);
-  const attackMax = Math.max(
-    attackMin,
-    PLAYER_ATTACK_DAMAGE_MAX + combatBonuses.maxDamageBonus + strengthMaxHitBonus,
-  );
-  const damage = randomIntBetween(attackMin, attackMax);
-  enemy.hp = Math.max(0, enemy.hp - damage);
-  player.nextCombatAt = nowMs + getPlayerAttackCooldownMs(player);
-
-  addSkillXp(player, 'strength', STRENGTH_XP_PER_HIT);
-  addSkillXp(player, 'constitution', CONSTITUTION_XP_PER_HIT);
-
-  player.lastActionText = `You hit ${enemy.name} for ${damage}.`;
-
-  if (enemy.hp <= 0) {
-    const questTargetId = String(enemy.minionTypeId ?? enemy.type ?? '').trim();
-    if (questTargetId) {
-      applyQuestObjectiveProgress(player, 'kill', questTargetId, 1);
-    }
-
-    const dropResult = applyMinionDropsToPlayer(player, enemy);
-    const droppedDrops = dropResult.droppedDrops;
-    enemy.deadUntil = nowMs + enemy.respawnMs;
-    enemy.hp = 0;
-    enemy.targetPlayerId = null;
-    enemy.targetTileX = null;
-    enemy.targetTileY = null;
-    enemy.targetPath = [];
-    enemy.nextMoveAllowedAt = nowMs;
-    player.combatTargetEnemyId = null;
-    if (droppedDrops.length > 0) {
-      const dropSummary = droppedDrops
-        .map((drop) => `${drop.quantity > 1 ? `${drop.quantity} ` : ''}${drop.name.toLowerCase()}`)
-        .join(', ');
-      player.lastActionText = `You defeated ${enemy.name}. Ground loot: ${dropSummary}.`;
-    } else {
-      player.lastActionText = `You defeated ${enemy.name}.`;
-    }
-
-    for (const client of clients.values()) {
-      if (client.player.combatTargetEnemyId === enemy.id) {
-        client.player.combatTargetEnemyId = null;
-      }
-    }
-
-    const killerClient = clients.get(player.id);
-    if (killerClient && dropResult.lootTableDrops.length > 0) {
-      for (const lootTableDrop of dropResult.lootTableDrops) {
-        const itemQuantityText = lootTableDrop.quantity > 1
-          ? `${lootTableDrop.itemName} x${lootTableDrop.quantity}`
-          : lootTableDrop.itemName;
-        const lootTableName = String(
-          lootTableDrop.sourceLootTableName || lootTableDrop.sourceLootTableId || 'Unknown',
-        ).trim();
-        sendChatToSocket(
-          killerClient.socket,
-          `[Loot] You got ${itemQuantityText} from the ${lootTableName} loot table!`,
-        );
-      }
-    }
-  }
+  processPlayerCombatFromSystem(player, nowMs, createPlayerCombatDeps());
 }
 
 function processEnemyAi(nowMs) {
-  for (const enemy of worldEnemies.values()) {
-    if (enemy.deadUntil > nowMs) {
-      continue;
-    }
-
-    if (enemy.deadUntil !== 0 && enemy.deadUntil <= nowMs) {
-      enemy.deadUntil = 0;
-      enemy.hp = enemy.maxHp;
-      enemy.tileX = enemy.spawnTileX;
-      enemy.tileY = enemy.spawnTileY;
-      enemy.targetTileX = null;
-      enemy.targetTileY = null;
-      enemy.targetPath = [];
-      enemy.targetPlayerId = null;
-      enemy.nextMoveAllowedAt = nowMs;
-      enemy.nextAttackAt = nowMs;
-      enemy.nextHpRegenAt = nowMs + enemy.hpRegenIntervalMs;
-    }
-
-    if (enemy.hp < enemy.maxHp && nowMs >= enemy.nextHpRegenAt) {
-      enemy.hp = Math.min(enemy.maxHp, enemy.hp + enemy.hpRegenAmount);
-      enemy.nextHpRegenAt = nowMs + enemy.hpRegenIntervalMs;
-    }
-
-    const distanceFromSpawn =
-      Math.abs(enemy.tileX - enemy.spawnTileX) + Math.abs(enemy.tileY - enemy.spawnTileY);
-    if (distanceFromSpawn > enemy.maxChaseDistanceTiles) {
-      enemy.targetPlayerId = null;
-      const shouldReturnToSpawn =
-        enemy.targetTileX !== enemy.spawnTileX ||
-        enemy.targetTileY !== enemy.spawnTileY ||
-        enemy.targetPath.length === 0;
-      if (shouldReturnToSpawn) {
-        setPathTarget(enemy, enemy.spawnTileX, enemy.spawnTileY);
-      }
-
-      if (nowMs >= enemy.nextMoveAllowedAt) {
-        const moveDelayMs = stepTowardTarget(enemy);
-        if (moveDelayMs > 0) {
-          enemy.nextMoveAllowedAt = nowMs + moveDelayMs;
-        }
-      }
-
-      continue;
-    }
-
-    let targetEntry = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
-
-    for (const [playerId, client] of clients.entries()) {
-      if (client.player.hp <= 0) {
-        continue;
-      }
-
-      const distance =
-        Math.abs(client.player.tileX - enemy.tileX) + Math.abs(client.player.tileY - enemy.tileY);
-
-      if (distance < bestDistance && distance <= enemy.aggroRangeTiles) {
-        bestDistance = distance;
-        targetEntry = { playerId, player: client.player };
-      }
-    }
-
-    enemy.targetPlayerId = targetEntry?.playerId ?? null;
-    if (!targetEntry) {
-      const atSpawn = enemy.tileX === enemy.spawnTileX && enemy.tileY === enemy.spawnTileY;
-      if (atSpawn) {
-        enemy.targetTileX = null;
-        enemy.targetTileY = null;
-        enemy.targetPath = [];
-        continue;
-      }
-
-      const shouldReturnToSpawn =
-        enemy.targetTileX !== enemy.spawnTileX ||
-        enemy.targetTileY !== enemy.spawnTileY ||
-        enemy.targetPath.length === 0;
-      if (shouldReturnToSpawn) {
-        setPathTarget(enemy, enemy.spawnTileX, enemy.spawnTileY);
-      }
-
-      if (nowMs >= enemy.nextMoveAllowedAt) {
-        const moveDelayMs = stepTowardTarget(enemy);
-        if (moveDelayMs > 0) {
-          enemy.nextMoveAllowedAt = nowMs + moveDelayMs;
-        }
-      }
-
-      continue;
-    }
-
-    const targetPlayer = targetEntry.player;
-    const inAttackRange = isWithinRange(
-      enemy.tileX,
-      enemy.tileY,
-      targetPlayer.tileX,
-      targetPlayer.tileY,
-      ENEMY_ATTACK_RANGE_TILES,
-    );
-
-    if (inAttackRange) {
-      enemy.targetTileX = null;
-      enemy.targetTileY = null;
-      enemy.targetPath = [];
-
-      if (nowMs >= enemy.nextAttackAt) {
-        const isTargetingThisEnemy = targetPlayer.combatTargetEnemyId === enemy.id;
-        const nonTargetOffenseMultiplier = isTargetingThisEnemy ? 1 : 2;
-        const enemyAccuracy = Math.max(
-          1,
-          Math.floor(Number(enemy.attackAccuracy ?? ENEMY_ATTACK_ACCURACY) * nonTargetOffenseMultiplier),
-        );
-        const playerArmor = getPlayerArmorRating(targetPlayer);
-        const hitChance = getCombatHitChance(
-          enemyAccuracy,
-          playerArmor,
-          COMBAT_ENEMY_BASE_AFFINITY_PCT,
-          COMBAT_ENEMY_HIT_MODIFIER_PCT,
-        );
-        const didHit = Math.random() <= hitChance;
-
-        if (didHit) {
-          const attackDamageMin = Math.max(
-            1,
-            Math.floor(enemy.attackDamageMin * nonTargetOffenseMultiplier),
-          );
-          const attackDamageMax = Math.max(
-            attackDamageMin,
-            Math.floor(enemy.attackDamageMax * nonTargetOffenseMultiplier),
-          );
-          const damage = randomIntBetween(attackDamageMin, attackDamageMax);
-          targetPlayer.hp = Math.max(1, targetPlayer.hp - damage);
-          addSkillXp(targetPlayer, 'defense', DEFENSE_XP_PER_HIT_TAKEN);
-          targetPlayer.lastActionText = nonTargetOffenseMultiplier > 1
-            ? `${enemy.name} crushes you for ${damage}.`
-            : `${enemy.name} hits you for ${damage}.`;
-        } else {
-          targetPlayer.lastActionText = `You block ${enemy.name}'s attack with your armor.`;
-        }
-
-        enemy.nextAttackAt = nowMs + enemy.attackCooldownMs;
-
-        if (!isPlayerMoving(targetPlayer) && !targetPlayer.combatTargetEnemyId) {
-          targetPlayer.activeInteractionNodeId = null;
-          beginPlayerCombatTarget(targetPlayer, enemy.id, nowMs);
-          continue;
-        }
-
-        if (canAutoRetaliate(targetPlayer) && !targetPlayer.combatTargetEnemyId) {
-          targetPlayer.activeInteractionNodeId = null;
-          beginPlayerCombatTarget(targetPlayer, enemy.id, nowMs);
-        }
-      }
-      continue;
-    }
-
-    const adjacentTile = findBestAdjacentTileToTarget(enemy, targetPlayer.tileX, targetPlayer.tileY);
-    if (adjacentTile) {
-      const targetChanged =
-        enemy.targetTileX !== adjacentTile.tileX || enemy.targetTileY !== adjacentTile.tileY;
-      if (targetChanged || enemy.targetPath.length === 0) {
-        setPathTarget(enemy, adjacentTile.tileX, adjacentTile.tileY);
-      }
-    }
-
-    if (nowMs >= enemy.nextMoveAllowedAt) {
-      const moveDelayMs = stepTowardTarget(enemy);
-      if (moveDelayMs > 0) {
-        enemy.nextMoveAllowedAt = nowMs + moveDelayMs;
-      }
-    }
-  }
+  processEnemyAiFromSystem(nowMs, createEnemyAiDeps());
 }
 
 let previousTick = Date.now();
@@ -5673,8 +4751,28 @@ wss.on('connection', (socket) => {
         const tileX = clamp(Math.round(requestedTileX), 1, WORLD_WIDTH_TILES - 2);
         const tileY = clamp(Math.round(requestedTileY), 1, WORLD_HEIGHT_TILES - 2);
 
+        traceInteraction('server.moveTo.request', {
+          id,
+          requestedTileX,
+          requestedTileY,
+          clampedTileX: tileX,
+          clampedTileY: tileY,
+          playerTileX: player.tileX,
+          playerTileY: player.tileY,
+          currentTargetTileX: player.targetTileX,
+          currentTargetTileY: player.targetTileY,
+          currentTargetPathLength: Array.isArray(player.targetPath) ? player.targetPath.length : null,
+        });
+
         const hasPath = setPathTarget(player, tileX, tileY);
         if (!hasPath) {
+          traceInteraction('server.moveTo.noPath', {
+            id,
+            tileX,
+            tileY,
+            playerTileX: player.tileX,
+            playerTileY: player.tileY,
+          });
           player.lastActionText = 'No path to destination';
           return;
         }
@@ -5685,6 +4783,18 @@ wss.on('connection', (socket) => {
         player.activeCraftingStationType = null;
 
         stepPlayerIfPossible(player, Date.now());
+
+        traceInteraction('server.moveTo.pathSet', {
+          id,
+          tileX,
+          tileY,
+          playerTileX: player.tileX,
+          playerTileY: player.tileY,
+          targetTileX: player.targetTileX,
+          targetTileY: player.targetTileY,
+          targetPathLength: Array.isArray(player.targetPath) ? player.targetPath.length : null,
+          nextMoveAllowedAt: player.nextMoveAllowedAt,
+        });
 
         log('player_move_to', {
           id,
@@ -5845,57 +4955,31 @@ wss.on('connection', (socket) => {
       }
 
       if (message.type === 'npcTalk') {
-        const npcId = String(message.npcId ?? '');
-        const npc = getNpcById(npcId);
-        if (!npc || !isWithinNpcRange(player, npc)) {
+        const result = handleNpcTalk(player, message.npcId, {
+          getNpcById,
+          isWithinNpcRange,
+          getNpcQuestStatus,
+          startNpcQuestForPlayer,
+          getQuestProgressRecord,
+          completeNpcQuestForPlayer,
+        });
+        if (!result.handled) {
           return;
         }
 
-        if (npc.type === 'bank_chest') {
-          sendChatToSocket(socket, `[${npc.name}] Your valuables are safe inside.`);
-          return;
+        if (result.chatText) {
+          sendChatToSocket(socket, result.chatText);
         }
-
-        const quest = npc.quest ?? null;
-        if (quest) {
-          const questStatus = getNpcQuestStatus(player, quest);
-          if (questStatus === 'not_started') {
-            startNpcQuestForPlayer(player, npc, quest);
-            return;
-          }
-
-          if (questStatus === 'active') {
-            const progress = getQuestProgressRecord(player, quest.id) ?? { count: 0 };
-            sendChatToSocket(
-              socket,
-              `[${npc.name}] ${quest.progressText} (${progress.count}/${quest.requiredCount})`,
-            );
-            return;
-          }
-
-          if (questStatus === 'completable') {
-            const completed = completeNpcQuestForPlayer(player, npc, quest);
-            if (completed) {
-              return;
-            }
-          }
-        }
-
-        sendChatToSocket(socket, `[${npc.name}] ${npc.talkText}`);
         return;
       }
 
       if (message.type === 'bankOpen') {
-        const npcId = String(message.npcId ?? '');
-        const bankNpc = getBankNpcById(npcId);
-        if (!bankNpc || !isWithinNpcRange(player, bankNpc)) {
-          sendChatToSocket(socket, '[Bank] You are too far away.');
+        const result = handleBankOpen(player, message.npcId);
+        if (!result.ok) {
+          sendChatToSocket(socket, result.reason);
           return;
         }
 
-        player.activeBankNpcId = bankNpc.id;
-        player.activeCraftingObjectId = null;
-        player.activeCraftingStationType = null;
         sendBankSnapshotToSocket(socket, player);
         return;
       }
@@ -5903,18 +4987,54 @@ wss.on('connection', (socket) => {
       if (message.type === 'craftingOpen') {
         const objectId = String(message.objectId ?? '');
         const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === objectId) ?? null;
+
+        traceInteraction('server.craftingOpen.request', {
+          id,
+          objectId,
+          playerTileX: player.tileX,
+          playerTileY: player.tileY,
+        });
+
         if (!objectEntry) {
+          traceInteraction('server.craftingOpen.objectMissing', {
+            id,
+            objectId,
+          });
           sendChatToSocket(socket, '[Crafting] That workstation could not be found.');
           return;
         }
 
         const station = getCraftingStationByObjectType(objectEntry.objectTypeId);
         if (!station) {
+          traceInteraction('server.craftingOpen.notCraftingObject', {
+            id,
+            objectId,
+            objectTypeId: objectEntry.objectTypeId,
+          });
           sendChatToSocket(socket, '[Crafting] That object is not a crafting workstation.');
           return;
         }
 
-        if (!isWithinRange(player.tileX, player.tileY, objectEntry.tileX, objectEntry.tileY, INTERACTION_RANGE_TILES)) {
+        const inRange = isWithinRange(
+          player.tileX,
+          player.tileY,
+          objectEntry.tileX,
+          objectEntry.tileY,
+          INTERACTION_RANGE_TILES,
+        );
+        traceInteraction('server.craftingOpen.rangeCheck', {
+          id,
+          objectId,
+          objectTypeId: objectEntry.objectTypeId,
+          playerTileX: player.tileX,
+          playerTileY: player.tileY,
+          objectTileX: objectEntry.tileX,
+          objectTileY: objectEntry.tileY,
+          inRange,
+          interactionRangeTiles: INTERACTION_RANGE_TILES,
+        });
+
+        if (!inRange) {
           sendChatToSocket(socket, '[Crafting] Move closer to the workstation.');
           return;
         }
@@ -5922,6 +5042,13 @@ wss.on('connection', (socket) => {
         player.activeBankNpcId = null;
         player.activeCraftingObjectId = objectEntry.id;
         player.activeCraftingStationType = station.stationType;
+
+        traceInteraction('server.craftingOpen.success', {
+          id,
+          objectId: objectEntry.id,
+          stationType: station.stationType,
+        });
+
         sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
         return;
       }
@@ -5971,135 +5098,58 @@ wss.on('connection', (socket) => {
       }
 
       if (message.type === 'bankTransfer') {
-        const from = message.from === 'bank' ? 'bank' : 'inventory';
-        const to = message.to === 'bank' ? 'bank' : 'inventory';
-        const slotIndex = message.slotIndex;
-        const requestedQuantity = Number(message.quantity ?? 1);
-        const quantity = Number.isFinite(requestedQuantity)
-          ? Math.max(1, Math.floor(requestedQuantity))
-          : 1;
-
-        if (from === to) {
+        const result = handleBankTransfer(player, message);
+        if (result.skipped) {
           return;
         }
 
-        const activeBankNpc = player.activeBankNpcId
-          ? getBankNpcById(player.activeBankNpcId)
-          : null;
-        if (!activeBankNpc || !isWithinNpcRange(player, activeBankNpc)) {
-          player.activeBankNpcId = null;
-          sendChatToSocket(socket, '[Bank] Move closer to the bank chest.');
+        if (!result.ok) {
+          sendChatToSocket(socket, result.reason);
           return;
         }
 
-        const sourceContainer = from === 'bank' ? player.bank : player.inventory;
-        const destinationContainer = to === 'bank' ? player.bank : player.inventory;
-        const transferResult = transferContainerSlot(sourceContainer, destinationContainer, slotIndex, quantity);
-
-        if (!transferResult) {
-          sendChatToSocket(socket, '[Bank] Could not move that item.');
-          return;
-        }
-
-        const quantityText = transferResult.quantity > 1 ? ` x${transferResult.quantity}` : '';
-        player.lastActionText = `${from === 'inventory' ? 'Deposited' : 'Withdrew'} ${transferResult.itemName}${quantityText}`;
         sendBankSnapshotToSocket(socket, player);
         return;
       }
 
       if (message.type === 'shopOpen') {
-        const npcId = String(message.npcId ?? '');
-        const npc = getNpcById(npcId);
-        const shop = getShopByNpcId(npcId);
-        if (!npc || npc.type !== 'shopkeeper' || !shop || !isWithinNpcRange(player, npc)) {
+        const payload = handleShopOpen(player, message.npcId);
+        if (!payload) {
           return;
         }
 
         socket.send(
           JSON.stringify({
             type: 'shopOpen',
-            shopId: shop.id,
+            shopId: payload.shopId,
           }),
         );
         return;
       }
 
       if (message.type === 'shopBuy') {
-        const shopId = String(message.shopId ?? '');
-        const itemId = String(message.itemId ?? '');
-        const quantity = Math.max(1, Math.min(999, Number(message.quantity ?? 1)));
-
-        const shop = SHOP_DEFINITIONS.generalStore.id === shopId ? SHOP_DEFINITIONS.generalStore : null;
-        if (!shop) {
+        const result = handleShopBuy(player, message);
+        if (!result.ok) {
+          if (!result.silent) {
+            sendChatToSocket(socket, result.reason);
+          }
           return;
         }
 
-        const npc = getNpcById(shop.npcId);
-        if (!npc || !isWithinNpcRange(player, npc)) {
-          sendChatToSocket(socket, '[Shop] You are too far away.');
-          return;
-        }
-
-        const listing = shop.listings.find((entry) => entry.itemId === itemId);
-        if (!listing) {
-          return;
-        }
-
-        const totalCost = listing.buyPrice * quantity;
-        if (!canSpendPlayerGold(player, totalCost)) {
-          sendChatToSocket(socket, '[Shop] Not enough gold.');
-          return;
-        }
-
-        const added = addItemToInventory(player, listing.itemId, quantity);
-        if (!added) {
-          sendChatToSocket(socket, '[Shop] Not enough inventory space.');
-          return;
-        }
-
-        spendPlayerGold(player, totalCost);
-        player.lastActionText = `Bought ${listing.name} x${quantity}`;
-        sendChatToSocket(socket, `[Shop] Bought ${listing.name} x${quantity}.`);
+        sendChatToSocket(socket, result.chatText);
         return;
       }
 
       if (message.type === 'shopSell') {
-        const shopId = String(message.shopId ?? '');
-        const itemId = String(message.itemId ?? '');
-        const quantity = Math.max(1, Math.min(999, Number(message.quantity ?? 1)));
-
-        const shop = SHOP_DEFINITIONS.generalStore.id === shopId ? SHOP_DEFINITIONS.generalStore : null;
-        if (!shop) {
+        const result = handleShopSell(player, message);
+        if (!result.ok) {
+          if (!result.silent) {
+            sendChatToSocket(socket, result.reason);
+          }
           return;
         }
 
-        const npc = getNpcById(shop.npcId);
-        if (!npc || !isWithinNpcRange(player, npc)) {
-          sendChatToSocket(socket, '[Shop] You are too far away.');
-          return;
-        }
-
-        const listing = shop.listings.find((entry) => entry.itemId === itemId);
-        if (!listing) {
-          return;
-        }
-
-        const currentCount = getInventoryItemCount(player, itemId);
-        if (currentCount < quantity) {
-          sendChatToSocket(socket, '[Shop] Not enough items to sell.');
-          return;
-        }
-
-        const removed = removeItemFromInventory(player, itemId, quantity);
-        if (!removed) {
-          sendChatToSocket(socket, '[Shop] Could not complete sale.');
-          return;
-        }
-
-        const totalGold = listing.sellPrice * quantity;
-        addPlayerGold(player, totalGold);
-        player.lastActionText = `Sold ${listing.name} x${quantity}`;
-        sendChatToSocket(socket, `[Shop] Sold ${listing.name} x${quantity}.`);
+        sendChatToSocket(socket, result.chatText);
       }
     } catch {
       // ignore malformed payloads
