@@ -1,0 +1,181 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, Segoe UI, Roboto, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #0f1218;
+  color: #e8edf4;
+}
+
+#app {
+  width: 100%;
+  min-height: 100vh;
+  padding: 14px;
+}
+
+.editor-root {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.folder-status {
+  font-size: 12px;
+  color: #b8c1d0;
+}
+
+.tab-button,
+.action-button,
+.list-button {
+  border: 1px solid #3b4559;
+  background: #2e6ad9;
+  color: #ffffff;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.tab-button.active {
+  background: #3a77ea;
+  color: #ffffff;
+}
+
+.action-button {
+  background: #364154;
+}
+
+.status {
+  border: 1px solid #303848;
+  background: #10151e;
+  padding: 8px;
+  min-height: 34px;
+  white-space: pre-wrap;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 10px;
+  min-height: 70vh;
+}
+
+.list-panel,
+.form-panel {
+  border: 1px solid #303848;
+  background: #171c25;
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.list-panel h3,
+.form-panel h3 {
+  margin: 0 0 8px 0;
+}
+
+.list-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.list-button {
+  text-align: left;
+  width: 100%;
+}
+
+.list-button.selected {
+  background: #3a77ea;
+  color: #ffffff;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-field.full {
+  grid-column: 1 / -1;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #3b4559;
+  border-radius: 6px;
+  background: #0f141c;
+  color: #e8edf4;
+  padding: 6px;
+}
+
+textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.preview-card {
+  border: 1px solid #303848;
+  border-radius: 8px;
+  background: #10151e;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.preview-card h4 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  color: #b8c1d0;
+}
+
+.preview-frame {
+  width: 140px;
+  height: 140px;
+  border: 1px dashed #3b4559;
+  border-radius: 6px;
+  background: #0f141c;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.preview-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.preview-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #9aa7bc;
+}
