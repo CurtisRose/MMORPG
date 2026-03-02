@@ -11,4 +11,22 @@ export interface QuestJournalSelectRequest {
   questId: string;
 }
 
-export type ClientMessage = QuestDialogueActionRequest | QuestJournalSelectRequest;
+export interface MoveToRequest {
+  type: 'moveTo';
+  tileX: number;
+  tileY: number;
+  routeId?: string;
+}
+
+export interface RouteArrivedRequest {
+  type: 'routeArrived';
+  routeId: string;
+  tileX: number;
+  tileY: number;
+}
+
+export type ClientMessage =
+  | QuestDialogueActionRequest
+  | QuestJournalSelectRequest
+  | MoveToRequest
+  | RouteArrivedRequest;

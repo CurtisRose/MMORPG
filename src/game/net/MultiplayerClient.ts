@@ -80,6 +80,7 @@ export interface RemotePlayerState {
   y: number;
   tileX: number;
   tileY: number;
+  routeId: string | null;
   targetTileX: number | null;
   targetTileY: number | null;
   targetPath: Array<{
@@ -516,7 +517,7 @@ export class MultiplayerClient {
     );
   }
 
-  sendMoveTo(tileX: number, tileY: number): void {
+  sendMoveTo(tileX: number, tileY: number, routeId?: string): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -525,6 +526,23 @@ export class MultiplayerClient {
     this.socket.send(
       JSON.stringify({
         type: 'moveTo',
+        tileX,
+        tileY,
+        routeId,
+      }),
+    );
+  }
+
+  sendRouteArrived(routeId: string, tileX: number, tileY: number): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'routeArrived',
+        routeId,
         tileX,
         tileY,
       }),
