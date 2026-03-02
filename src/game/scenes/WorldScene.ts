@@ -79,6 +79,12 @@ const HEALTH_BAR_VISIBLE_MS = 3000;
 const ACTIVE_QUESTS_EXPANDED_STORAGE_KEY = 'game-active-quests-expanded-v1';
 const QUEST_DIALOGUE_RETRY_INTERVAL_MS = 350;
 const QUEST_DIALOGUE_RETRY_TIMEOUT_MS = 9000;
+const MINIMAP_MARGIN_PX = 12;
+const MINIMAP_PADDING_PX = 12;
+const MINIMAP_INNER_SIZE_PX = 320;
+const MINIMAP_VIEW_RADIUS_TILES = 27;
+const MINIMAP_COLLAPSED_SIZE_PX = 28;
+const MINIMAP_REDRAW_INTERVAL_MS = 90;
 const HEALTH_BAR_WIDTH = 26;
 const HEALTH_BAR_HEIGHT = 4;
 const DEBUG_HUD_VISIBLE_BY_DEFAULT =
@@ -86,6 +92,14 @@ const DEBUG_HUD_VISIBLE_BY_DEFAULT =
 const DEBUG_INTERACTION_TRACE =
   String(import.meta.env.VITE_DEBUG_INTERACTION ?? 'true').toLowerCase() === 'true';
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
+
+const RESOURCE_MINIMAP_COLORS: Record<string, number> = {
+  birch_tree: 0x9ed37c,
+  oak_tree: 0x4a8f3a,
+  copper_rock: 0xc9834f,
+  tin_rock: 0xa8b7c7,
+  iron_rock: 0x7f8c98,
+};
 
 function isValidTerrainGrid(value: unknown): value is number[][] {
   return Array.isArray(value)
@@ -275,12 +289,21 @@ export class WorldScene extends Phaser.Scene {
   private debugHudVisible = DEBUG_HUD_VISIBLE_BY_DEFAULT;
   private debugToggleKey: Phaser.Input.Keyboard.Key | null = null;
   private questJournalToggleKey: Phaser.Input.Keyboard.Key | null = null;
+  private skillsTabToggleKey: Phaser.Input.Keyboard.Key | null = null;
+  private inventoryTabToggleKey: Phaser.Input.Keyboard.Key | null = null;
+  private gearTabToggleKey: Phaser.Input.Keyboard.Key | null = null;
   private lastStateUpdateAt: number | null = null;
   private snapshotCount = 0;
   private remotePlayers = new Map<string, RemotePlayerVisual>();
   private worldNodes = new Map<string, WorldNodeVisual>();
   private worldNpcs = new Map<string, NpcVisual>();
   private npcQuestMarkers = new Map<string, Phaser.GameObjects.Text>();
+  private minimapRootElement: HTMLDivElement | null = null;
+  private minimapCanvasElement: HTMLCanvasElement | null = null;
+  private minimapCanvasContext: CanvasRenderingContext2D | null = null;
+  private minimapToggleButtonElement: HTMLButtonElement | null = null;
+  private minimapCollapsed = false;
+  private minimapRedrawAccumulatorMs = 0;
   private worldObjects = new Map<string, WorldObjectVisual>();
   private worldEnemies = new Map<string, EnemyVisual>();
   private worldGroundItems = new Map<string, GroundItemVisual>();
@@ -359,6 +382,11 @@ export class WorldScene extends Phaser.Scene {
   private timeSinceInputSendMs = 0;
   private lastSentDirection = new Phaser.Math.Vector2(0, 0);
   private localPathWaypoints: Phaser.Math.Vector2[] = [];
+  private localActiveRouteId: string | null = null;
+  private localCommittedDestination: Phaser.Math.Vector2 | null = null;
+  private localArrivalReportedRouteId: string | null = null;
+  private nextClientRouteSequence = 1;
+  private localRouteLocked = false;
   private sceneOrchestrator = new WorldSceneOrchestrator({
     setLocalPlayerId: (id: string) => {
       this.localPlayerId = id;
@@ -503,7 +531,10 @@ export class WorldScene extends Phaser.Scene {
 
 
     this.debugToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
-  this.questJournalToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.J);
+    this.questJournalToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.J);
+    this.skillsTabToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S);
+    this.inventoryTabToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.I);
+    this.gearTabToggleKey = keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.G);
     this.initDebugHudPanel();
 
     this.actionStatusText = this.add
@@ -525,6 +556,7 @@ export class WorldScene extends Phaser.Scene {
     this.initQuestJournalUi();
     this.initQuestDialogueUi();
     this.initQuestNotificationFeedUi();
+    this.initMinimap();
     this.appendSystemChatMessage('Welcome to the world.');
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
@@ -586,6 +618,16 @@ export class WorldScene extends Phaser.Scene {
       }
     }
 
+    if (!this.isTextInputFocused()) {
+      if (this.skillsTabToggleKey && Phaser.Input.Keyboard.JustDown(this.skillsTabToggleKey)) {
+        this.setCharacterTab('skills');
+      } else if (this.inventoryTabToggleKey && Phaser.Input.Keyboard.JustDown(this.inventoryTabToggleKey)) {
+        this.setCharacterTab('inventory');
+      } else if (this.gearTabToggleKey && Phaser.Input.Keyboard.JustDown(this.gearTabToggleKey)) {
+        this.setCharacterTab('gear');
+      }
+    }
+
     this.updatePlayerSmoothing(delta);
 
     if (
@@ -600,9 +642,295 @@ export class WorldScene extends Phaser.Scene {
     this.updateHarvestingActionIndicator(delta);
     this.updateRemoteHarvestingActionIndicators(delta);
     this.updatePendingQuestDialogueRequest();
+    this.updateMinimap(delta);
 
     this.renderActionStatus();
     this.renderDebugHud();
+  }
+
+  private initMinimap(): void {
+    const appElement = document.querySelector<HTMLDivElement>('#app');
+    if (!appElement) {
+      return;
+    }
+
+    const panelSize = MINIMAP_INNER_SIZE_PX + MINIMAP_PADDING_PX * 2;
+    const root = document.createElement('div');
+    root.style.position = 'fixed';
+    root.style.left = `${MINIMAP_MARGIN_PX}px`;
+    root.style.top = `${MINIMAP_MARGIN_PX}px`;
+    root.style.width = `${panelSize}px`;
+    root.style.height = `${panelSize}px`;
+    root.style.zIndex = '3600';
+    root.style.pointerEvents = 'auto';
+    root.style.background = 'rgba(0, 0, 0, 0.72)';
+    root.style.border = '1px solid rgba(210, 194, 143, 0.95)';
+    root.style.boxSizing = 'border-box';
+    root.style.overflow = 'hidden';
+
+    const canvas = document.createElement('canvas');
+    canvas.width = panelSize;
+    canvas.height = panelSize;
+    canvas.style.width = `${panelSize}px`;
+    canvas.style.height = `${panelSize}px`;
+    canvas.style.display = 'block';
+    canvas.style.pointerEvents = 'auto';
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return;
+    }
+
+    canvas.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.handleMinimapPointerDown(event);
+    });
+
+    const toggleButton = document.createElement('button');
+    toggleButton.textContent = '−';
+    toggleButton.setAttribute('aria-label', 'Toggle minimap');
+    toggleButton.style.position = 'absolute';
+    toggleButton.style.top = '2px';
+    toggleButton.style.right = '2px';
+    toggleButton.style.width = '22px';
+    toggleButton.style.height = '22px';
+    toggleButton.style.padding = '0';
+    toggleButton.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+    toggleButton.style.background = 'rgba(64, 58, 41, 0.95)';
+    toggleButton.style.color = '#f0e5c1';
+    toggleButton.style.fontFamily = 'monospace';
+    toggleButton.style.fontSize = '14px';
+    toggleButton.style.cursor = 'pointer';
+    toggleButton.style.pointerEvents = 'auto';
+    toggleButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.minimapCollapsed = !this.minimapCollapsed;
+      this.applyMinimapCollapsedState();
+      if (!this.minimapCollapsed) {
+        this.renderMinimap();
+      }
+    });
+
+    root.append(canvas, toggleButton);
+    appElement.appendChild(root);
+    this.minimapRootElement = root;
+    this.minimapCanvasElement = canvas;
+    this.minimapCanvasContext = context;
+    this.minimapToggleButtonElement = toggleButton;
+    this.applyMinimapCollapsedState();
+    this.renderMinimap();
+  }
+
+  private applyMinimapCollapsedState(): void {
+    if (!this.minimapRootElement || !this.minimapCanvasElement || !this.minimapToggleButtonElement) {
+      return;
+    }
+
+    const panelSize = MINIMAP_INNER_SIZE_PX + MINIMAP_PADDING_PX * 2;
+    if (this.minimapCollapsed) {
+      this.minimapCanvasElement.style.display = 'none';
+      this.minimapRootElement.style.width = `${MINIMAP_COLLAPSED_SIZE_PX}px`;
+      this.minimapRootElement.style.height = `${MINIMAP_COLLAPSED_SIZE_PX}px`;
+      this.minimapToggleButtonElement.textContent = '+';
+      return;
+    }
+
+    this.minimapCanvasElement.style.display = 'block';
+    this.minimapRootElement.style.width = `${panelSize}px`;
+    this.minimapRootElement.style.height = `${panelSize}px`;
+    this.minimapToggleButtonElement.textContent = '−';
+  }
+
+  private updateMinimap(deltaMs: number): void {
+    if (this.minimapCollapsed) {
+      return;
+    }
+
+    this.minimapRedrawAccumulatorMs += deltaMs;
+    if (this.minimapRedrawAccumulatorMs < MINIMAP_REDRAW_INTERVAL_MS) {
+      return;
+    }
+
+    this.minimapRedrawAccumulatorMs = 0;
+    this.renderMinimap();
+  }
+
+  private handleMinimapPointerDown(event: PointerEvent): void {
+    if (this.minimapCollapsed || !this.minimapCanvasElement) {
+      return;
+    }
+
+    const bounds = this.minimapCanvasElement.getBoundingClientRect();
+    const localX = event.clientX - bounds.left;
+    const localY = event.clientY - bounds.top;
+    const innerMinX = MINIMAP_PADDING_PX;
+    const innerMinY = MINIMAP_PADDING_PX;
+    const innerMaxX = innerMinX + MINIMAP_INNER_SIZE_PX;
+    const innerMaxY = innerMinY + MINIMAP_INNER_SIZE_PX;
+
+    if (localX < innerMinX || localY < innerMinY || localX >= innerMaxX || localY >= innerMaxY) {
+      return;
+    }
+
+    const viewDiameterTiles = MINIMAP_VIEW_RADIUS_TILES * 2 + 1;
+    const pixelsPerTile = MINIMAP_INNER_SIZE_PX / viewDiameterTiles;
+    const centerSource = this.localRenderedTilePosition
+      ?? this.localTilePosition
+      ?? new Phaser.Math.Vector2(
+        Math.floor(this.player.x / TILE_SIZE),
+        Math.floor(this.player.y / TILE_SIZE),
+      );
+    const centerTileX = Math.round(centerSource.x);
+    const centerTileY = Math.round(centerSource.y);
+    const startTileX = centerTileX - MINIMAP_VIEW_RADIUS_TILES;
+    const startTileY = centerTileY - MINIMAP_VIEW_RADIUS_TILES;
+
+    const tileOffsetX = Phaser.Math.Clamp(
+      Math.floor((localX - innerMinX) / pixelsPerTile),
+      0,
+      viewDiameterTiles - 1,
+    );
+    const tileOffsetY = Phaser.Math.Clamp(
+      Math.floor((localY - innerMinY) / pixelsPerTile),
+      0,
+      viewDiameterTiles - 1,
+    );
+
+    const destinationTileX = Phaser.Math.Clamp(startTileX + tileOffsetX, 0, this.worldWidthTiles - 1);
+    const destinationTileY = Phaser.Math.Clamp(startTileY + tileOffsetY, 0, this.worldHeightTiles - 1);
+
+    this.performWalkTo(destinationTileX, destinationTileY);
+  }
+
+  private renderMinimap(): void {
+    if (this.minimapCollapsed || !this.minimapCanvasContext || !this.minimapCanvasElement) {
+      return;
+    }
+
+    const context = this.minimapCanvasContext;
+    const panelSize = MINIMAP_INNER_SIZE_PX + MINIMAP_PADDING_PX * 2;
+    const viewDiameterTiles = MINIMAP_VIEW_RADIUS_TILES * 2 + 1;
+    const pixelsPerTile = MINIMAP_INNER_SIZE_PX / viewDiameterTiles;
+    const panelLeft = 0;
+    const panelTop = 0;
+    const innerLeft = panelLeft + MINIMAP_PADDING_PX;
+    const innerTop = panelTop + MINIMAP_PADDING_PX;
+
+    const centerSource = this.localRenderedTilePosition
+      ?? this.localTilePosition
+      ?? new Phaser.Math.Vector2(
+        Math.floor(this.player.x / TILE_SIZE),
+        Math.floor(this.player.y / TILE_SIZE),
+      );
+    const centerTileX = Math.round(centerSource.x);
+    const centerTileY = Math.round(centerSource.y);
+
+    const startTileX = centerTileX - MINIMAP_VIEW_RADIUS_TILES;
+    const startTileY = centerTileY - MINIMAP_VIEW_RADIUS_TILES;
+
+    context.clearRect(0, 0, panelSize, panelSize);
+
+    context.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    context.fillRect(panelLeft, panelTop, panelSize, panelSize);
+    context.strokeStyle = 'rgba(210, 194, 143, 0.95)';
+    context.lineWidth = 1;
+    context.strokeRect(panelLeft + 0.5, panelTop + 0.5, panelSize - 1, panelSize - 1);
+
+    for (let localY = 0; localY < viewDiameterTiles; localY += 1) {
+      const tileY = startTileY + localY;
+      for (let localX = 0; localX < viewDiameterTiles; localX += 1) {
+        const tileX = startTileX + localX;
+        const tileId = this.terrainData[tileY]?.[tileX];
+        context.fillStyle = this.toCanvasHexColor(this.getMinimapTerrainColor(tileId));
+        context.fillRect(
+          innerLeft + localX * pixelsPerTile,
+          innerTop + localY * pixelsPerTile,
+          pixelsPerTile,
+          pixelsPerTile,
+        );
+      }
+    }
+
+    for (const nodeVisual of this.worldNodes.values()) {
+      if (nodeVisual.state.isDepleted) {
+        continue;
+      }
+
+      const color = RESOURCE_MINIMAP_COLORS[nodeVisual.state.resourceId]
+        ?? (nodeVisual.state.type === 'tree' ? 0x6fbf64 : 0x8b939b);
+      this.drawMinimapDot(startTileX, startTileY, pixelsPerTile, nodeVisual.state.tileX, nodeVisual.state.tileY, color, 0.85);
+    }
+
+    for (const npcVisual of this.worldNpcs.values()) {
+      this.drawMinimapDot(startTileX, startTileY, pixelsPerTile, npcVisual.state.tileX, npcVisual.state.tileY, 0xffffff, 1.2);
+    }
+
+    for (const enemyVisual of this.worldEnemies.values()) {
+      if (enemyVisual.state.isDead) {
+        continue;
+      }
+
+      this.drawMinimapDot(startTileX, startTileY, pixelsPerTile, enemyVisual.state.tileX, enemyVisual.state.tileY, 0xff4d4d, 1.2);
+    }
+
+    this.drawMinimapDot(startTileX, startTileY, pixelsPerTile, centerTileX, centerTileY, 0x00d8ff, 1.35);
+  }
+
+  private drawMinimapDot(
+    startTileX: number,
+    startTileY: number,
+    pixelsPerTile: number,
+    tileX: number,
+    tileY: number,
+    color: number,
+    radiusScale = 1,
+  ): void {
+    if (!this.minimapCanvasContext) {
+      return;
+    }
+
+    const localTileX = tileX - startTileX;
+    const localTileY = tileY - startTileY;
+    const viewDiameterTiles = MINIMAP_VIEW_RADIUS_TILES * 2 + 1;
+    if (localTileX < 0 || localTileY < 0 || localTileX >= viewDiameterTiles || localTileY >= viewDiameterTiles) {
+      return;
+    }
+
+    const centerX = MINIMAP_PADDING_PX + (localTileX + 0.5) * pixelsPerTile;
+    const centerY = MINIMAP_PADDING_PX + (localTileY + 0.5) * pixelsPerTile;
+    const radius = Math.max(1, pixelsPerTile * 0.24 * radiusScale);
+
+    this.minimapCanvasContext.fillStyle = this.toCanvasHexColor(color);
+    this.minimapCanvasContext.beginPath();
+    this.minimapCanvasContext.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    this.minimapCanvasContext.fill();
+  }
+
+  private toCanvasHexColor(color: number): string {
+    const safeColor = Math.max(0, Math.min(0xffffff, Math.floor(Number(color) || 0)));
+    return `#${safeColor.toString(16).padStart(6, '0')}`;
+  }
+
+  private getMinimapTerrainColor(tileId: number | undefined): number {
+    if (tileId === 0) {
+      return 0x3f7a3a;
+    }
+
+    if (tileId === 1) {
+      return 0x7a5f3a;
+    }
+
+    if (tileId === 2) {
+      return 0x2f69a8;
+    }
+
+    if (tileId === 3) {
+      return 0xc8b06e;
+    }
+
+    return 0x2f2f2f;
   }
 
   private beginQuestDialogueRequest(npcId: string): void {
@@ -918,11 +1246,19 @@ export class WorldScene extends Phaser.Scene {
 
   private updatePlayerSmoothing(deltaMs: number): void {
     if (this.localTilePosition && this.localRenderedTilePosition) {
+      const hasActiveMoveTarget =
+        this.localPlayerState?.targetTileX !== null
+        && this.localPlayerState?.targetTileY !== null;
+      const shouldHoldCommittedDestination = this.shouldHoldCommittedDestination();
       const localWaypoints =
         this.localPathWaypoints.length > 0
           ? this.localPathWaypoints
-          : [this.localTilePosition.clone()];
+          : (hasActiveMoveTarget || shouldHoldCommittedDestination) && this.localCommittedDestination
+            ? [this.localCommittedDestination.clone()]
+            : [this.localTilePosition.clone()];
       this.advanceAlongWaypoints(this.localRenderedTilePosition, localWaypoints, deltaMs);
+
+      this.maybeReportCommittedRouteArrival();
 
       const worldPosition = this.getWorldPositionFromTile(
         this.localRenderedTilePosition.x,
@@ -956,6 +1292,42 @@ export class WorldScene extends Phaser.Scene {
       );
       enemy.sprite.setPosition(worldPosition.x, worldPosition.y);
     }
+  }
+
+  private maybeReportCommittedRouteArrival(): void {
+    if (
+      !this.localRouteLocked
+      || !this.localActiveRouteId
+      || !this.localCommittedDestination
+      || !this.localRenderedTilePosition
+    ) {
+      return;
+    }
+
+    if (this.localArrivalReportedRouteId === this.localActiveRouteId) {
+      return;
+    }
+
+    if (this.localPathWaypoints.length > 0) {
+      return;
+    }
+
+    const distanceToDestination = Phaser.Math.Distance.Between(
+      this.localRenderedTilePosition.x,
+      this.localRenderedTilePosition.y,
+      this.localCommittedDestination.x,
+      this.localCommittedDestination.y,
+    );
+    if (distanceToDestination > 0.02) {
+      return;
+    }
+
+    this.localArrivalReportedRouteId = this.localActiveRouteId;
+    this.multiplayerClient.sendRouteArrived(
+      this.localActiveRouteId,
+      Math.round(this.localCommittedDestination.x),
+      Math.round(this.localCommittedDestination.y),
+    );
   }
 
   private advanceAlongWaypoints(
@@ -1011,6 +1383,63 @@ export class WorldScene extends Phaser.Scene {
     );
   }
 
+  private trimCommittedRouteFromRenderedPosition(route: Phaser.Math.Vector2[]): Phaser.Math.Vector2[] {
+    if (!this.localRenderedTilePosition || route.length === 0) {
+      return route;
+    }
+
+    let startIndex = 0;
+    while (startIndex < route.length) {
+      const waypoint = route[startIndex];
+      const distance = Phaser.Math.Distance.Between(
+        this.localRenderedTilePosition.x,
+        this.localRenderedTilePosition.y,
+        waypoint.x,
+        waypoint.y,
+      );
+      if (distance > 0.2) {
+        break;
+      }
+
+      startIndex += 1;
+    }
+
+    return route.slice(startIndex);
+  }
+
+  private buildCommittedLocalRoute(playerState: RemotePlayerState): Phaser.Math.Vector2[] {
+    const route = this.buildPathWaypoints(playerState);
+    if (route.length > 0) {
+      return this.trimCommittedRouteFromRenderedPosition(route);
+    }
+
+    if (playerState.targetTileX !== null && playerState.targetTileY !== null) {
+      return [
+        new Phaser.Math.Vector2(
+          Phaser.Math.Clamp(Math.round(playerState.targetTileX), 0, this.worldWidthTiles - 1),
+          Phaser.Math.Clamp(Math.round(playerState.targetTileY), 0, this.worldHeightTiles - 1),
+        ),
+      ];
+    }
+
+    return [];
+  }
+
+  private shouldHoldCommittedDestination(): boolean {
+    if (!this.localCommittedDestination || !this.localTilePosition) {
+      return false;
+    }
+
+    const distanceToCommittedDestination = Phaser.Math.Distance.Between(
+      this.localTilePosition.x,
+      this.localTilePosition.y,
+      this.localCommittedDestination.x,
+      this.localCommittedDestination.y,
+    );
+
+    return distanceToCommittedDestination > 0.05;
+  }
+
   private buildEnemyPathWaypoints(enemyState: EnemyState): Phaser.Math.Vector2[] {
     if (!Array.isArray(enemyState.targetPath)) {
       return [];
@@ -1060,6 +1489,10 @@ export class WorldScene extends Phaser.Scene {
         const previousCombatTargetEnemyId = this.localPlayerState?.combatTargetEnemyId ?? null;
         const previousActionText = this.localPlayerState?.lastActionText;
         this.localPlayerState = playerState;
+        const hasActiveMoveTarget = playerState.targetTileX !== null && playerState.targetTileY !== null;
+        const activeRouteId = hasActiveMoveTarget
+          ? (String(playerState.routeId ?? '').trim() || `${playerState.targetTileX},${playerState.targetTileY}`)
+          : null;
 
         if (!previousCombatTargetEnemyId && playerState.combatTargetEnemyId) {
           this.closeTransientInteractionUi();
@@ -1070,7 +1503,33 @@ export class WorldScene extends Phaser.Scene {
         } else {
           this.localTilePosition.copy(tilePosition);
         }
-        this.localPathWaypoints = this.buildPathWaypoints(playerState);
+
+        if (!hasActiveMoveTarget) {
+          if (!this.shouldHoldCommittedDestination()) {
+            this.localPathWaypoints.length = 0;
+            this.localActiveRouteId = null;
+            this.localCommittedDestination = null;
+            this.localArrivalReportedRouteId = null;
+            this.localRouteLocked = false;
+          }
+        } else if (this.localActiveRouteId !== activeRouteId) {
+          const committedRoute = this.buildCommittedLocalRoute(playerState);
+          this.localPathWaypoints = committedRoute;
+          this.localActiveRouteId = activeRouteId;
+          this.localCommittedDestination = committedRoute.length > 0
+            ? committedRoute[committedRoute.length - 1].clone()
+            : new Phaser.Math.Vector2(
+                Phaser.Math.Clamp(Math.round(playerState.targetTileX ?? tilePosition.x), 0, this.worldWidthTiles - 1),
+                Phaser.Math.Clamp(Math.round(playerState.targetTileY ?? tilePosition.y), 0, this.worldHeightTiles - 1),
+              );
+          this.localArrivalReportedRouteId = null;
+          this.localRouteLocked = true;
+
+          this.logInteractionTrace('move.route.commit', {
+            routeId: activeRouteId,
+            waypointCount: committedRoute.length,
+          });
+        }
 
         if (!this.localRenderedTilePosition) {
           this.localRenderedTilePosition = tilePosition.clone();
@@ -1080,6 +1539,7 @@ export class WorldScene extends Phaser.Scene {
           );
           this.player.setPosition(localWorldPosition.x, localWorldPosition.y);
         } else if (
+          !this.localRouteLocked &&
           Phaser.Math.Distance.Between(
             this.localRenderedTilePosition.x,
             this.localRenderedTilePosition.y,
@@ -1947,10 +2407,17 @@ export class WorldScene extends Phaser.Scene {
     if (showClickFeedback) {
       this.showTileClickFeedback(destination.x, destination.y, 'walk');
     }
+    this.localPathWaypoints.length = 0;
+    this.localActiveRouteId = null;
+    this.localCommittedDestination = null;
+    this.localArrivalReportedRouteId = null;
+    const routeId = `client-route-${this.nextClientRouteSequence}`;
+    this.nextClientRouteSequence += 1;
+    this.localRouteLocked = false;
     this.multiplayerClient.sendInput(0, 0);
     this.lastSentDirection.set(0, 0);
     this.multiplayerClient.sendInteractStop();
-    this.multiplayerClient.sendMoveTo(destination.x, destination.y);
+    this.multiplayerClient.sendMoveTo(destination.x, destination.y, routeId);
   }
 
   private resolveWalkDestination(tileX: number, tileY: number): Phaser.Math.Vector2 {
@@ -2307,15 +2774,6 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private processPendingInteractionTarget(): void {
-    this.logInteractionTrace('interaction.pending.process', {
-      localTile: this.localTilePosition
-        ? { x: Math.round(this.localTilePosition.x), y: Math.round(this.localTilePosition.y) }
-        : null,
-      localStateTarget: this.localPlayerState
-        ? { x: this.localPlayerState.targetTileX, y: this.localPlayerState.targetTileY }
-        : null,
-    });
-
     this.pendingInteractionController.process(this.getPendingInteractionDeps());
   }
 
@@ -2486,8 +2944,7 @@ export class WorldScene extends Phaser.Scene {
 
   private initCharacterUi(): void {
     const panel = createCharacterPanel((tab) => {
-      this.activeCharacterTab = tab;
-      this.updateCharacterTabState();
+      this.setCharacterTab(tab);
     });
 
     if (!panel) {
@@ -2504,6 +2961,15 @@ export class WorldScene extends Phaser.Scene {
     this.gearContentElement = panel.gearContent;
     this.gearGridElement = panel.gearGrid;
     this.gearSummaryElement = panel.gearSummary;
+    this.updateCharacterTabState();
+  }
+
+  private setCharacterTab(tab: 'skills' | 'inventory' | 'gear'): void {
+    if (this.activeCharacterTab === tab) {
+      return;
+    }
+
+    this.activeCharacterTab = tab;
     this.updateCharacterTabState();
   }
 
@@ -4485,6 +4951,13 @@ export class WorldScene extends Phaser.Scene {
     this.worldObjects.clear();
     this.worldEnemies.clear();
     this.worldGroundItems.clear();
+    this.minimapRootElement?.remove();
+    this.minimapRootElement = null;
+    this.minimapCanvasElement = null;
+    this.minimapCanvasContext = null;
+    this.minimapToggleButtonElement = null;
+    this.minimapCollapsed = false;
+    this.minimapRedrawAccumulatorMs = 0;
     this.blockedNodeTiles.clear();
     this.blockedNpcTiles.clear();
     this.blockedObjectTiles.clear();
@@ -4498,6 +4971,12 @@ export class WorldScene extends Phaser.Scene {
     this.localPlayerState = null;
     this.localTilePosition = null;
     this.localRenderedTilePosition = null;
+    this.localPathWaypoints.length = 0;
+    this.localActiveRouteId = null;
+    this.localCommittedDestination = null;
+    this.localArrivalReportedRouteId = null;
+    this.nextClientRouteSequence = 1;
+    this.localRouteLocked = false;
     this.previousSkillLevels = null;
     this.chatRootElement?.remove();
     this.chatRootElement = null;

@@ -3069,6 +3069,7 @@ const clients = new Map();
 const worldNodes = createWorldNodes();
 const worldEnemies = createWorldEnemies();
 const worldGroundItems = new Map();
+let nextRouteIdSequence = 1;
 
 const wss = new WebSocketServer({ port: SERVER_PORT });
 
@@ -3084,6 +3085,9 @@ function createPlayer(id) {
     previousTraversedTileY: null,
     directionX: 0,
     directionY: 0,
+    routeId: null,
+    routeDestinationTileX: null,
+    routeDestinationTileY: null,
     targetTileX: null,
     targetTileY: null,
     targetPath: [],
@@ -3110,6 +3114,16 @@ function createPlayer(id) {
 
   addPlayerGold(player, STARTING_GOLD);
   return player;
+}
+
+function createRouteId() {
+  const routeId = `route-${nextRouteIdSequence}`;
+  nextRouteIdSequence += 1;
+  if (nextRouteIdSequence > Number.MAX_SAFE_INTEGER - 1) {
+    nextRouteIdSequence = 1;
+  }
+
+  return routeId;
 }
 
 function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS) {
@@ -5717,6 +5731,7 @@ function makeSnapshot(now, viewerPlayerId = null) {
       tileY: client.player.tileY,
       x: client.player.tileX * TILE_SIZE + TILE_SIZE * 0.5,
       y: client.player.tileY * TILE_SIZE + TILE_SIZE * 0.5,
+      routeId: client.player.routeId ?? null,
       targetTileX: client.player.targetTileX,
       targetTileY: client.player.targetTileY,
       targetPath: client.player.targetPath.map((step) => ({
@@ -5978,6 +5993,7 @@ wss.on('connection', (socket) => {
         tileY: player.tileY,
         x: player.tileX * TILE_SIZE + TILE_SIZE * 0.5,
         y: player.tileY * TILE_SIZE + TILE_SIZE * 0.5,
+        routeId: player.routeId ?? null,
         targetTileX: player.targetTileX,
         targetTileY: player.targetTileY,
         targetPath: player.targetPath.map((step) => ({
@@ -6114,6 +6130,9 @@ wss.on('connection', (socket) => {
         player.targetTileX = null;
         player.targetTileY = null;
         player.targetPath = [];
+        player.routeId = null;
+        player.routeDestinationTileX = null;
+        player.routeDestinationTileY = null;
         player.combatTargetEnemyId = null;
         player.activeBankNpcId = null;
         player.activeCraftingObjectId = null;
@@ -6141,6 +6160,7 @@ wss.on('connection', (socket) => {
       if (message.type === 'moveTo') {
         const requestedTileX = Number(message.tileX);
         const requestedTileY = Number(message.tileY);
+        const requestedRouteId = String(message.routeId ?? '').trim();
 
         if (!Number.isFinite(requestedTileX) || !Number.isFinite(requestedTileY)) {
           return;
@@ -6175,6 +6195,10 @@ wss.on('connection', (socket) => {
           return;
         }
 
+        player.routeId = requestedRouteId || createRouteId();
+        player.routeDestinationTileX = player.targetTileX;
+        player.routeDestinationTileY = player.targetTileY;
+
         player.combatTargetEnemyId = null;
         player.activeBankNpcId = null;
         player.activeCraftingObjectId = null;
@@ -6184,6 +6208,7 @@ wss.on('connection', (socket) => {
 
         traceInteraction('server.moveTo.pathSet', {
           id,
+          routeId: player.routeId,
           tileX,
           tileY,
           playerTileX: player.tileX,
@@ -6196,8 +6221,63 @@ wss.on('connection', (socket) => {
 
         log('player_move_to', {
           id,
+          routeId: player.routeId,
           tileX,
           tileY,
+        });
+        return;
+      }
+
+      if (message.type === 'routeArrived') {
+        const arrivedRouteId = String(message.routeId ?? '').trim();
+        if (!arrivedRouteId || arrivedRouteId !== String(player.routeId ?? '')) {
+          return;
+        }
+
+        const expectedTileX = Number(player.routeDestinationTileX);
+        const expectedTileY = Number(player.routeDestinationTileY);
+        const reportedTileX = Number(message.tileX);
+        const reportedTileY = Number(message.tileY);
+        if (
+          !Number.isFinite(expectedTileX)
+          || !Number.isFinite(expectedTileY)
+          || !Number.isFinite(reportedTileX)
+          || !Number.isFinite(reportedTileY)
+        ) {
+          return;
+        }
+
+        if (Math.round(reportedTileX) !== Math.round(expectedTileX)
+          || Math.round(reportedTileY) !== Math.round(expectedTileY)
+        ) {
+          return;
+        }
+
+        const destinationTileX = Math.round(expectedTileX);
+        const destinationTileY = Math.round(expectedTileY);
+        const manhattanDistance =
+          Math.abs(player.tileX - destinationTileX) + Math.abs(player.tileY - destinationTileY);
+        if (manhattanDistance > 1) {
+          return;
+        }
+
+        player.previousTraversedTileX = player.tileX;
+        player.previousTraversedTileY = player.tileY;
+        player.tileX = destinationTileX;
+        player.tileY = destinationTileY;
+        player.targetTileX = null;
+        player.targetTileY = null;
+        player.targetPath = [];
+        player.routeId = null;
+        player.routeDestinationTileX = null;
+        player.routeDestinationTileY = null;
+        player.nextMoveAllowedAt = Date.now();
+
+        traceInteraction('server.routeArrived.accepted', {
+          id,
+          routeId: arrivedRouteId,
+          destinationTileX,
+          destinationTileY,
         });
         return;
       }
