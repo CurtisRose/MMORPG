@@ -1,6 +1,8 @@
 import './styles.css';
 
-type EditorTab = 'items' | 'npcs' | 'minions' | 'tiles';
+type EditorTab = 'items' | 'npcs' | 'minions' | 'tiles' | 'worldObjects' | 'recipes' | 'player';
+
+type WorldObjectBehavior = 'decorative' | 'harvestable' | 'station' | 'bank' | 'shop' | 'npc';
 
 type ItemDefinition = {
   id: string;
@@ -80,6 +82,56 @@ type TileDefinition = {
   walkable: boolean;
 };
 
+type WorldObjectTypeDefinition = {
+  id: string;
+  name: string;
+  behavior: WorldObjectBehavior;
+  blocksMovement: boolean;
+  image?: string;
+  examineText: string;
+  tags: string[];
+  behaviorConfig: Record<string, unknown>;
+};
+
+type PlayerAppearanceConfig = {
+  image: string;
+};
+
+type CraftingSkillId = 'smelting' | 'smithing' | 'fletching';
+
+type CraftingStationType = 'smelting_station' | 'smithing_station' | 'fletching_station';
+
+type RecipeItemStack = {
+  itemId: string;
+  quantity: number;
+};
+
+type CraftingRecipeDefinition = {
+  id: string;
+  name: string;
+  requiredLevel: number;
+  durationMs: number;
+  successChance: number;
+  xp: number;
+  inputs: RecipeItemStack[];
+  outputs: RecipeItemStack[];
+};
+
+type CraftingMessages = {
+  locked?: string;
+  missingItems?: string;
+  success?: string;
+  failure?: string;
+};
+
+type CraftingSkillConfig = {
+  skill: CraftingSkillId;
+  recipes: CraftingRecipeDefinition[];
+  messages?: CraftingMessages;
+};
+
+type HiddenNpcPlacement = NpcPlacement;
+
 type PendingImageImport = {
   targetId: string | number;
   file: File;
@@ -97,9 +149,26 @@ const GEAR_URL = `${import.meta.env.BASE_URL}server/data/content/gear.json`;
 const MINIONS_URL = `${import.meta.env.BASE_URL}server/data/content/minions.json`;
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
 const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+const WORLD_OBJECT_TYPES_URL = `${import.meta.env.BASE_URL}data/worldObjectTypes.json`;
+const PLAYER_APPEARANCE_URL = `${import.meta.env.BASE_URL}data/playerAppearance.json`;
+const SMELTING_RECIPES_URL = `${import.meta.env.BASE_URL}server/data/skills/crafting/smelting.json`;
+const SMITHING_RECIPES_URL = `${import.meta.env.BASE_URL}server/data/skills/crafting/smithing.json`;
+const FLETCHING_RECIPES_URL = `${import.meta.env.BASE_URL}server/data/skills/crafting/fletching.json`;
 const TERRAIN_TILESET_RELATIVE_PATH = 'public/assets/terrain/terrain_tileset.png';
 const TILESET_TILE_SIZE = 32;
 const DEBUG_PREFIX = '[DataEditor Debug]';
+
+const CRAFTING_SKILL_ORDER: CraftingSkillId[] = ['smelting', 'smithing', 'fletching'];
+const CRAFTING_STATION_BY_SKILL: Record<CraftingSkillId, CraftingStationType> = {
+  smelting: 'smelting_station',
+  smithing: 'smithing_station',
+  fletching: 'fletching_station',
+};
+const CRAFTING_SKILL_BY_STATION: Record<CraftingStationType, CraftingSkillId> = {
+  smelting_station: 'smelting',
+  smithing_station: 'smithing',
+  fletching_station: 'fletching',
+};
 
 function debugLog(step: string, details?: unknown): void {
   if (typeof details === 'undefined') {
@@ -124,7 +193,11 @@ const state: {
   items: ItemRecord[];
   minions: MinionDefinition[];
   npcs: NpcPlacement[];
+  hiddenNpcs: HiddenNpcPlacement[];
   tileTypes: TileDefinition[];
+  worldObjectTypes: WorldObjectTypeDefinition[];
+  playerAppearance: PlayerAppearanceConfig;
+  craftingConfigs: Record<CraftingSkillId, CraftingSkillConfig>;
   worldMap: WorldMapData | null;
   projectDirectoryHandle: any | null;
   projectDirectoryName: string | null;
@@ -132,16 +205,30 @@ const state: {
   pendingNpcImageImport: PendingImageImport | null;
   pendingMinionImageImport: PendingImageImport | null;
   pendingTileImageImport: PendingImageImport | null;
+  pendingWorldObjectImageImport: PendingImageImport | null;
   selectedItemId: string | null;
   selectedNpcId: string | null;
   selectedMinionId: string | null;
   selectedTileId: number | null;
+  selectedWorldObjectTypeId: string | null;
+  selectedRecipeSkill: CraftingSkillId;
+  selectedRecipeIdBySkill: Partial<Record<CraftingSkillId, string>>;
 } = {
   tab: 'items',
   items: [],
   minions: [],
   npcs: [],
+  hiddenNpcs: [],
   tileTypes: [],
+  worldObjectTypes: [],
+  playerAppearance: {
+    image: '',
+  },
+  craftingConfigs: {
+    smelting: { skill: 'smelting', recipes: [], messages: {} },
+    smithing: { skill: 'smithing', recipes: [], messages: {} },
+    fletching: { skill: 'fletching', recipes: [], messages: {} },
+  },
   worldMap: null,
   projectDirectoryHandle: null,
   projectDirectoryName: null,
@@ -149,10 +236,14 @@ const state: {
   pendingNpcImageImport: null,
   pendingMinionImageImport: null,
   pendingTileImageImport: null,
+  pendingWorldObjectImageImport: null,
   selectedItemId: null,
   selectedNpcId: null,
   selectedMinionId: null,
   selectedTileId: null,
+  selectedWorldObjectTypeId: null,
+  selectedRecipeSkill: 'smelting',
+  selectedRecipeIdBySkill: {},
 };
 
 function setStatus(message: string): void {
@@ -184,6 +275,125 @@ function forceNumber(value: string, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function normalizeWorldObjectBehavior(value: unknown): WorldObjectBehavior {
+  const parsed = String(value ?? '').trim();
+  if (parsed === 'harvestable' || parsed === 'station' || parsed === 'bank' || parsed === 'shop' || parsed === 'npc') {
+    return parsed;
+  }
+
+  return 'decorative';
+}
+
+function normalizeCraftingSkillId(value: unknown): CraftingSkillId {
+  const parsed = String(value ?? '').trim().toLowerCase();
+  if (parsed === 'smithing' || parsed === 'fletching') {
+    return parsed;
+  }
+
+  return 'smelting';
+}
+
+function normalizeRecipeItemStack(value: unknown): RecipeItemStack | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const itemId = String(raw.itemId ?? '').trim();
+  const quantity = Math.max(1, Math.floor(Number(raw.quantity ?? 1)));
+  if (!itemId) {
+    return null;
+  }
+
+  return { itemId, quantity };
+}
+
+function normalizeCraftingRecipe(value: unknown, index: number): CraftingRecipeDefinition | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const id = String(raw.id ?? '').trim();
+  if (!id) {
+    return null;
+  }
+
+  const inputs = Array.isArray(raw.inputs)
+    ? raw.inputs.map((entry) => normalizeRecipeItemStack(entry)).filter((entry): entry is RecipeItemStack => entry !== null)
+    : [];
+  const outputs = Array.isArray(raw.outputs)
+    ? raw.outputs.map((entry) => normalizeRecipeItemStack(entry)).filter((entry): entry is RecipeItemStack => entry !== null)
+    : [];
+  const normalizedOutputs = outputs.length > 0 ? outputs : [{ itemId: `placeholder_output_${index + 1}`, quantity: 1 }];
+  const configuredName = String(raw.name ?? '').trim();
+  const fallbackName = getItemNameById(normalizedOutputs[0]?.itemId ?? id) || id;
+
+  return {
+    id,
+    name: configuredName || fallbackName,
+    requiredLevel: Math.max(1, Math.floor(Number(raw.requiredLevel ?? 1))),
+    durationMs: Math.max(100, Math.floor(Number(raw.durationMs ?? 1500))),
+    successChance: Math.max(0, Math.min(1, Number(raw.successChance ?? 1))),
+    xp: Math.max(0, Number(raw.xp ?? 0)),
+    inputs: inputs.length > 0 ? inputs : [{ itemId: 'placeholder_input', quantity: 1 }],
+    outputs: normalizedOutputs,
+  };
+}
+
+function normalizeCraftingMessages(value: unknown): CraftingMessages {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const raw = value as Record<string, unknown>;
+  return {
+    locked: String(raw.locked ?? '').trim(),
+    missingItems: String(raw.missingItems ?? '').trim(),
+    success: String(raw.success ?? '').trim(),
+    failure: String(raw.failure ?? '').trim(),
+  };
+}
+
+function normalizeCraftingSkillConfig(value: unknown, fallbackSkill: CraftingSkillId): CraftingSkillConfig {
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const skill = normalizeCraftingSkillId(raw.skill ?? fallbackSkill);
+  const recipes = Array.isArray(raw.recipes)
+    ? raw.recipes.map((entry, index) => normalizeCraftingRecipe(entry, index)).filter((entry): entry is CraftingRecipeDefinition => entry !== null)
+    : [];
+
+  return {
+    skill,
+    recipes,
+    messages: normalizeCraftingMessages(raw.messages),
+  };
+}
+
+function getSelectedRecipe(): CraftingRecipeDefinition | null {
+  const selectedId = state.selectedRecipeIdBySkill[state.selectedRecipeSkill] ?? null;
+  if (!selectedId) {
+    return null;
+  }
+
+  return state.craftingConfigs[state.selectedRecipeSkill].recipes.find((entry) => entry.id === selectedId) ?? null;
+}
+
+function getCraftingFilePathForSkill(skill: CraftingSkillId): string {
+  return `server/data/skills/crafting/${skill}.json`;
+}
+
+function getItemNameById(itemId: string): string {
+  const normalizedItemId = String(itemId ?? '').trim();
+  if (!normalizedItemId) {
+    return '';
+  }
+
+  const match = state.items.find((entry) => entry.item.id === normalizedItemId);
+  return match?.item.name?.trim() || normalizedItemId;
+}
+
 function downloadJsonFile(fileName: string, value: unknown): void {
   debugLog('Downloading fallback JSON file', { fileName });
   const data = JSON.stringify(value, null, 2);
@@ -210,6 +420,48 @@ function resolveAssetUrl(input: string): string {
 
   const normalized = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
   return `${import.meta.env.BASE_URL}${normalized}`;
+}
+
+function buildNpcFallbackAvatarDataUrl(npc: Pick<NpcPlacement, 'name' | 'type'>): string {
+  const name = String(npc?.name ?? '').trim();
+  const type = String(npc?.type ?? '').trim().toLowerCase();
+
+  const backgroundByType: Record<string, string> = {
+    shopkeeper: '#a2744f',
+    villager: '#5f8cc9',
+    bank_chest: '#8c7b4f',
+  };
+
+  const background = backgroundByType[type] || '#7b6ba3';
+  const letter = (name || type || 'N').slice(0, 1).toUpperCase().replace(/[^A-Z0-9]/g, 'N');
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <text x="32" y="21" text-anchor="middle" font-family="monospace" font-size="9" fill="${background}">NO IMG</text>
+  <text x="32" y="47" text-anchor="middle" font-family="monospace" font-size="22" font-weight="700" fill="${background}">${letter}</text>
+</svg>`;
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg.trim())}`;
+}
+
+async function applyTintToPreviewImage(image: HTMLImageElement): Promise<void> {
+  const baseSource = String(image.dataset.baseSrc ?? '').trim();
+  if (!baseSource) {
+    return;
+  }
+
+  if (image.src !== baseSource) {
+    image.src = baseSource;
+  }
+}
+
+function applyPreviewTint(imgId: string): void {
+  const image = document.querySelector<HTMLImageElement>(`#${imgId}`);
+  if (!image) {
+    return;
+  }
+
+  void applyTintToPreviewImage(image);
 }
 
 function supportsFileSystemAccess(): boolean {
@@ -566,6 +818,13 @@ function buildWorldMapWithNpcChanges(): WorldMapData {
     grouped.set(key, list);
   }
 
+  for (const npc of state.hiddenNpcs) {
+    const key = `${npc.chunkX},${npc.chunkY}`;
+    const list = grouped.get(key) ?? [];
+    list.push(npc);
+    grouped.set(key, list);
+  }
+
   return {
     ...state.worldMap,
     chunks: state.worldMap.chunks.map((chunk) => {
@@ -602,14 +861,19 @@ function bindImagePreview(inputId: string, imgId: string, hintId: string): void 
     if (!rawPath) {
       image.style.display = 'none';
       image.removeAttribute('src');
+      delete image.dataset.baseSrc;
       hint.textContent = 'No image path set.';
       return;
     }
 
     const url = resolveAssetUrl(rawPath);
     image.style.display = 'block';
+    image.dataset.baseSrc = url;
+    delete image.dataset.tintedKey;
+    delete image.dataset.tintedSrc;
     image.src = url;
     hint.textContent = rawPath;
+    applyPreviewTint(imgId);
   };
 
   image.addEventListener('error', () => {
@@ -618,10 +882,16 @@ function bindImagePreview(inputId: string, imgId: string, hintId: string): void 
   });
   image.addEventListener('load', () => {
     image.style.display = 'block';
+    if (image.dataset.baseSrc && image.src === image.dataset.baseSrc) {
+      applyPreviewTint(imgId);
+    }
   });
 
   input.addEventListener('input', update);
   update();
+  requestAnimationFrame(() => {
+    applyPreviewTint(imgId);
+  });
 }
 
 function setPreviewFromPendingImport(
@@ -640,8 +910,12 @@ function setPreviewFromPendingImport(
   }
 
   image.style.display = 'block';
+  image.dataset.baseSrc = pending.objectUrl;
+  delete image.dataset.tintedKey;
+  delete image.dataset.tintedSrc;
   image.src = pending.objectUrl;
   hint.textContent = `Selected local file: ${pending.file.name}`;
+  applyPreviewTint(imgId);
 }
 
 function clearPendingImport(entry: PendingImageImport | null): void {
@@ -664,11 +938,19 @@ async function loadJson<T>(url: string): Promise<T> {
 function renderShell(): void {
   appElement.innerHTML = `
     <div class="editor-root">
+      <div class="toolbar toolbar-shortcuts">
+        <a class="action-button shortcut-link" href="${import.meta.env.BASE_URL}">Game</a>
+        <a class="action-button shortcut-link" href="${import.meta.env.BASE_URL}map-editor.html">Map Editor</a>
+        <a class="action-button shortcut-link" href="${import.meta.env.BASE_URL}data-editor.html">Data Editor</a>
+      </div>
       <div class="toolbar">
         <button id="tab-items" class="tab-button">Items</button>
         <button id="tab-npcs" class="tab-button">NPCs</button>
         <button id="tab-minions" class="tab-button">Minions</button>
+        <button id="tab-recipes" class="tab-button">Recipes</button>
         <button id="tab-tiles" class="tab-button">Tiles</button>
+        <button id="tab-world-objects" class="tab-button">World Objects</button>
+        <button id="tab-player" class="tab-button">Player</button>
         <button id="connect-folder" class="action-button">Connect Project Folder</button>
         <span id="folder-status" class="folder-status"></span>
       </div>
@@ -689,8 +971,20 @@ function renderShell(): void {
     state.tab = 'minions';
     render();
   });
+  document.querySelector<HTMLButtonElement>('#tab-recipes')?.addEventListener('click', () => {
+    state.tab = 'recipes';
+    render();
+  });
   document.querySelector<HTMLButtonElement>('#tab-tiles')?.addEventListener('click', () => {
     state.tab = 'tiles';
+    render();
+  });
+  document.querySelector<HTMLButtonElement>('#tab-world-objects')?.addEventListener('click', () => {
+    state.tab = 'worldObjects';
+    render();
+  });
+  document.querySelector<HTMLButtonElement>('#tab-player')?.addEventListener('click', () => {
+    state.tab = 'player';
     render();
   });
   document.querySelector<HTMLButtonElement>('#connect-folder')?.addEventListener('click', () => {
@@ -704,7 +998,10 @@ function renderTabsActiveState(): void {
     items: '#tab-items',
     npcs: '#tab-npcs',
     minions: '#tab-minions',
+    recipes: '#tab-recipes',
     tiles: '#tab-tiles',
+    worldObjects: '#tab-world-objects',
+    player: '#tab-player',
   };
 
   for (const [tab, selector] of Object.entries(buttonMap) as Array<[EditorTab, string]>) {
@@ -747,6 +1044,231 @@ function getSelectedTileDefinition(): TileDefinition | null {
   }
 
   return state.tileTypes.find((entry) => entry.id === state.selectedTileId) ?? null;
+}
+
+function getSelectedWorldObjectType(): WorldObjectTypeDefinition | null {
+  if (!state.selectedWorldObjectTypeId) {
+    return null;
+  }
+
+  return state.worldObjectTypes.find((entry) => entry.id === state.selectedWorldObjectTypeId) ?? null;
+}
+
+function renderWorldObjectsTab(workspace: HTMLDivElement): void {
+  const selected = getSelectedWorldObjectType();
+
+  workspace.innerHTML = `
+    <div class="list-panel">
+      <h3>World Object Types</h3>
+      <div class="form-actions">
+        <button id="world-object-add" class="action-button">Add Type</button>
+        <button id="world-object-delete" class="action-button">Delete</button>
+      </div>
+      <div id="world-object-list" class="list-items"></div>
+    </div>
+    <div class="form-panel">
+      <h3>World Object Type</h3>
+      <div class="preview-card">
+        <h4>Image Preview</h4>
+        <div class="preview-frame"><img id="world-object-image-preview" alt="World object preview" style="display:none;" /></div>
+        <div id="world-object-image-preview-hint" class="preview-hint">No image path set.</div>
+        <div class="form-actions">
+          <button id="world-object-choose-image" class="action-button" type="button">Choose Local Image</button>
+          <input id="world-object-choose-image-input" type="file" accept="image/*" style="display:none;" />
+        </div>
+      </div>
+      <div class="form-grid">
+        <label class="form-field"><span>ID</span><input id="world-object-id" value="${selected?.id ?? ''}" /></label>
+        <label class="form-field"><span>Name</span><input id="world-object-name" value="${selected?.name ?? ''}" /></label>
+        <label class="form-field"><span>Behavior</span>
+          <select id="world-object-behavior">
+            <option value="decorative">decorative</option>
+            <option value="harvestable">harvestable</option>
+            <option value="station">station</option>
+            <option value="bank">bank</option>
+            <option value="shop">shop</option>
+            <option value="npc">npc</option>
+          </select>
+        </label>
+        <label class="form-field"><span>Blocks Movement</span>
+          <select id="world-object-blocks-movement">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </label>
+        <label class="form-field full"><span>Image</span><input id="world-object-image" value="${selected?.image ?? ''}" /></label>
+        <label class="form-field full"><span>Examine Text</span><textarea id="world-object-examine">${selected?.examineText ?? ''}</textarea></label>
+        <label class="form-field full"><span>Tags (comma-separated)</span><input id="world-object-tags" value="${(selected?.tags ?? []).join(', ')}" /></label>
+        <label class="form-field full"><span>Behavior Config JSON</span><textarea id="world-object-config">${toPrettyJson(selected?.behaviorConfig ?? {})}</textarea></label>
+      </div>
+      <div class="form-actions">
+        <button id="world-object-save-row" class="action-button">Apply Changes</button>
+        <button id="world-object-export" class="action-button">Save worldObjectTypes.json</button>
+      </div>
+      <div class="preview-hint">Unified object type definitions: <strong>public/data/worldObjectTypes.json</strong>.</div>
+    </div>
+  `;
+
+  const behaviorSelect = document.querySelector<HTMLSelectElement>('#world-object-behavior');
+  const blocksMovementSelect = document.querySelector<HTMLSelectElement>('#world-object-blocks-movement');
+  if (behaviorSelect) {
+    behaviorSelect.value = normalizeWorldObjectBehavior(selected?.behavior);
+  }
+  if (blocksMovementSelect) {
+    blocksMovementSelect.value = selected?.blocksMovement === false ? 'false' : 'true';
+  }
+
+  const listRoot = document.querySelector<HTMLDivElement>('#world-object-list');
+  if (listRoot) {
+    const sorted = [...state.worldObjectTypes].sort((a, b) => a.id.localeCompare(b.id));
+    for (const entry of sorted) {
+      const button = document.createElement('button');
+      button.className = `list-button${entry.id === state.selectedWorldObjectTypeId ? ' selected' : ''}`;
+      button.textContent = entry.name;
+      button.addEventListener('click', () => {
+        state.selectedWorldObjectTypeId = entry.id;
+        render();
+      });
+      listRoot.appendChild(button);
+    }
+  }
+
+  bindImagePreview('world-object-image', 'world-object-image-preview', 'world-object-image-preview-hint');
+
+  document.querySelector<HTMLButtonElement>('#world-object-choose-image')?.addEventListener('click', () => {
+    document.querySelector<HTMLInputElement>('#world-object-choose-image-input')?.click();
+  });
+  document.querySelector<HTMLInputElement>('#world-object-choose-image-input')?.addEventListener('change', async (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const current = getSelectedWorldObjectType();
+      if (!current) {
+        throw new Error('Select a world object type first.');
+      }
+
+      clearPendingImport(state.pendingWorldObjectImageImport);
+      state.pendingWorldObjectImageImport = {
+        targetId: current.id,
+        file,
+        objectUrl: URL.createObjectURL(file),
+      };
+      setPreviewFromPendingImport(state.pendingWorldObjectImageImport, 'world-object-image-preview', 'world-object-image-preview-hint');
+      setStatus(`Selected local image '${file.name}'. Click Apply Changes to copy it into public/assets/world-objects.`);
+    } catch (error) {
+      setStatus((error as Error).message);
+    } finally {
+      input.value = '';
+    }
+  });
+
+  setPreviewFromPendingImport(state.pendingWorldObjectImageImport, 'world-object-image-preview', 'world-object-image-preview-hint');
+
+  document.querySelector<HTMLButtonElement>('#world-object-add')?.addEventListener('click', () => {
+    const id = `world_object_${Date.now()}`;
+    state.worldObjectTypes.push({
+      id,
+      name: 'New World Object',
+      behavior: 'decorative',
+      blocksMovement: false,
+      image: '/assets/world-objects/new_world_object.png',
+      examineText: 'A world object.',
+      tags: [],
+      behaviorConfig: {},
+    });
+    state.selectedWorldObjectTypeId = id;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#world-object-delete')?.addEventListener('click', () => {
+    if (!state.selectedWorldObjectTypeId) {
+      return;
+    }
+
+    state.worldObjectTypes = state.worldObjectTypes.filter((entry) => entry.id !== state.selectedWorldObjectTypeId);
+    state.selectedWorldObjectTypeId = state.worldObjectTypes[0]?.id ?? null;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#world-object-save-row')?.addEventListener('click', async () => {
+    const current = getSelectedWorldObjectType();
+    if (!current) {
+      return;
+    }
+
+    try {
+      const previousId = current.id;
+      const nextId = String(document.querySelector<HTMLInputElement>('#world-object-id')?.value ?? '').trim();
+      const nextName = String(document.querySelector<HTMLInputElement>('#world-object-name')?.value ?? '').trim();
+      const nextBehavior = normalizeWorldObjectBehavior(document.querySelector<HTMLSelectElement>('#world-object-behavior')?.value ?? 'decorative');
+      const nextBlocksMovement = document.querySelector<HTMLSelectElement>('#world-object-blocks-movement')?.value !== 'false';
+      const nextImage = String(document.querySelector<HTMLInputElement>('#world-object-image')?.value ?? '').trim();
+      const nextExamineText = String(document.querySelector<HTMLTextAreaElement>('#world-object-examine')?.value ?? '').trim();
+      const nextTags = String(document.querySelector<HTMLInputElement>('#world-object-tags')?.value ?? '')
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      const nextBehaviorConfig = parseJsonField('behavior config', document.querySelector<HTMLTextAreaElement>('#world-object-config')?.value ?? '{}', {});
+
+      if (!nextId) {
+        throw new Error('World object type id is required.');
+      }
+      if (!nextName) {
+        throw new Error('World object type name is required.');
+      }
+
+      const duplicate = state.worldObjectTypes.find((entry) => entry.id === nextId && entry !== current);
+      if (duplicate) {
+        throw new Error(`World object type id '${nextId}' already exists.`);
+      }
+
+      current.id = nextId;
+      current.name = nextName;
+      current.behavior = nextBehavior;
+      current.blocksMovement = nextBlocksMovement;
+      current.image = nextImage;
+      current.examineText = nextExamineText;
+      current.tags = nextTags;
+      current.behaviorConfig = nextBehaviorConfig as Record<string, unknown>;
+
+      if (state.pendingWorldObjectImageImport && state.pendingWorldObjectImageImport.targetId === previousId) {
+        const imagePath = await copyLocalImageToAssets(state.pendingWorldObjectImageImport.file, 'world-objects');
+        current.image = imagePath;
+        const imageInput = document.querySelector<HTMLInputElement>('#world-object-image');
+        if (imageInput) {
+          imageInput.value = imagePath;
+          imageInput.dispatchEvent(new Event('input'));
+        }
+        clearPendingImport(state.pendingWorldObjectImageImport);
+        state.pendingWorldObjectImageImport = null;
+      }
+
+      state.worldObjectTypes.sort((a, b) => a.id.localeCompare(b.id));
+      await writeProjectJsonFile('public/data/worldObjectTypes.json', state.worldObjectTypes);
+
+      state.selectedWorldObjectTypeId = current.id;
+      setStatus(`Updated world object type '${current.id}' and saved to public/data/worldObjectTypes.json.`);
+      render();
+    } catch (error) {
+      debugError('World object type apply failed', error);
+      setStatus((error as Error).message);
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>('#world-object-export')?.addEventListener('click', async () => {
+    try {
+      await writeProjectJsonFile('public/data/worldObjectTypes.json', state.worldObjectTypes);
+      setStatus('Saved directly to public/data/worldObjectTypes.json.');
+    } catch (error) {
+      debugError('World object type save fell back to download', error);
+      downloadJsonFile('worldObjectTypes.json', state.worldObjectTypes);
+      setStatus(`Could not write to project folder, downloaded worldObjectTypes.json instead: ${(error as Error).message}`);
+    }
+  });
 }
 
 function renderTilesTab(workspace: HTMLDivElement): void {
@@ -1101,7 +1623,7 @@ function renderItemsTab(workspace: HTMLDivElement): void {
     for (const record of sorted) {
       const button = document.createElement('button');
       button.className = `list-button${record.item.id === state.selectedItemId ? ' selected' : ''}`;
-      button.textContent = `${record.item.id} — ${record.item.name}`;
+      button.textContent = record.item.name;
       button.addEventListener('click', () => {
         state.selectedItemId = record.item.id;
         render();
@@ -1117,7 +1639,7 @@ function renderItemsTab(workspace: HTMLDivElement): void {
         id,
         name: 'New item',
         stackable: false,
-        image: '/assets/items/new_item.svg',
+        image: '/assets/items/new_item.png',
         examineText: 'An unfinished item.',
       },
       gear: null,
@@ -1311,7 +1833,30 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
     for (const npc of sorted) {
       const button = document.createElement('button');
       button.className = `list-button${npc.id === state.selectedNpcId ? ' selected' : ''}`;
-      button.textContent = `${npc.id} (${npc.chunkX},${npc.chunkY})`;
+      button.style.display = 'flex';
+      button.style.alignItems = 'center';
+      button.style.gap = '8px';
+
+      const image = document.createElement('img');
+      image.alt = `${npc.name} preview`;
+      image.width = 24;
+      image.height = 24;
+      image.style.width = '24px';
+      image.style.height = '24px';
+      image.style.objectFit = 'cover';
+      image.style.borderRadius = '4px';
+      image.style.border = '1px solid rgba(255,255,255,0.25)';
+      const fallbackImage = buildNpcFallbackAvatarDataUrl(npc);
+      const configuredImage = String(npc.image ?? '').trim();
+      image.src = configuredImage ? resolveAssetUrl(configuredImage) : fallbackImage;
+      image.addEventListener('error', () => {
+        image.src = fallbackImage;
+      });
+
+      const label = document.createElement('span');
+      label.textContent = npc.name;
+
+      button.append(image, label);
       button.addEventListener('click', () => {
         state.selectedNpcId = npc.id;
         render();
@@ -1327,7 +1872,7 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
       id,
       type: 'villager',
       name: 'New NPC',
-      image: '/assets/npcs/new_npc.svg',
+      image: '/assets/npcs/new_npc.png',
       chunkX: Number(firstChunk?.chunkX ?? 0),
       chunkY: Number(firstChunk?.chunkY ?? 0),
       tileX: 0,
@@ -1428,6 +1973,23 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
 
   bindImagePreview('npc-image', 'npc-image-preview', 'npc-image-preview-hint');
 
+  const applyNpcPreviewFallback = (): void => {
+    const activeNpc = getSelectedNpc();
+    if (!activeNpc || String(activeNpc.image ?? '').trim()) {
+      return;
+    }
+
+    const image = document.querySelector<HTMLImageElement>('#npc-image-preview');
+    const hint = document.querySelector<HTMLDivElement>('#npc-image-preview-hint');
+    if (!image || !hint) {
+      return;
+    }
+
+    image.style.display = 'block';
+    image.src = buildNpcFallbackAvatarDataUrl(activeNpc);
+    hint.textContent = 'Using generated preview (no image path set).';
+  };
+
   document.querySelector<HTMLButtonElement>('#npc-choose-image')?.addEventListener('click', () => {
     document.querySelector<HTMLInputElement>('#npc-choose-image-input')?.click();
   });
@@ -1460,6 +2022,9 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
   });
 
   setPreviewFromPendingImport(state.pendingNpcImageImport, 'npc-image-preview', 'npc-image-preview-hint');
+  if (!state.pendingNpcImageImport) {
+    applyNpcPreviewFallback();
+  }
 }
 
 function renderMinionsTab(workspace: HTMLDivElement): void {
@@ -1520,7 +2085,7 @@ function renderMinionsTab(workspace: HTMLDivElement): void {
     for (const minion of sorted) {
       const button = document.createElement('button');
       button.className = `list-button${minion.id === state.selectedMinionId ? ' selected' : ''}`;
-      button.textContent = `${minion.id} — ${minion.name}`;
+      button.textContent = minion.name;
       button.addEventListener('click', () => {
         state.selectedMinionId = minion.id;
         render();
@@ -1535,7 +2100,7 @@ function renderMinionsTab(workspace: HTMLDivElement): void {
       id,
       type: 'custom',
       name: 'New Minion',
-      image: '/assets/minions/new_minion.svg',
+      image: '/assets/minions/new_minion.png',
       maxHp: 50,
       armor: 5,
       attackAccuracy: 10,
@@ -1677,6 +2242,305 @@ function renderMinionsTab(workspace: HTMLDivElement): void {
   setPreviewFromPendingImport(state.pendingMinionImageImport, 'minion-image-preview', 'minion-image-preview-hint');
 }
 
+function renderRecipesTab(workspace: HTMLDivElement): void {
+  const skill = state.selectedRecipeSkill;
+  const config = state.craftingConfigs[skill];
+  const selected = getSelectedRecipe();
+  const stationType = CRAFTING_STATION_BY_SKILL[skill];
+
+  workspace.innerHTML = `
+    <div class="list-panel">
+      <h3>Recipes</h3>
+      <div class="row">
+        <label for="recipe-skill-select">Skill</label>
+        <select id="recipe-skill-select">
+          ${CRAFTING_SKILL_ORDER.map((entry) => `<option value="${entry}">${entry}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-actions">
+        <button id="recipe-add" class="action-button">Add Recipe</button>
+        <button id="recipe-delete" class="action-button">Delete</button>
+      </div>
+      <div id="recipe-list" class="list-items"></div>
+    </div>
+    <div class="form-panel">
+      <h3>Recipe</h3>
+      <div class="form-grid">
+        <label class="form-field"><span>ID</span><input id="recipe-id" value="${selected?.id ?? ''}" /></label>
+        <label class="form-field"><span>Name</span><input id="recipe-name" value="${selected?.name ?? ''}" /></label>
+        <label class="form-field"><span>Required Level</span><input id="recipe-required-level" type="number" min="1" value="${selected?.requiredLevel ?? 1}" /></label>
+        <label class="form-field"><span>Duration (ms)</span><input id="recipe-duration-ms" type="number" min="100" value="${selected?.durationMs ?? 1500}" /></label>
+        <label class="form-field"><span>Success Chance</span><input id="recipe-success-chance" type="number" min="0" max="1" step="0.01" value="${selected?.successChance ?? 1}" /></label>
+        <label class="form-field"><span>XP</span><input id="recipe-xp" type="number" min="0" step="0.1" value="${selected?.xp ?? 0}" /></label>
+        <label class="form-field"><span>Crafting Table</span>
+          <select id="recipe-station-type">
+            <option value="smelting_station">smelting_station</option>
+            <option value="smithing_station">smithing_station</option>
+            <option value="fletching_station">fletching_station</option>
+          </select>
+        </label>
+        <label class="form-field full"><span>Inputs JSON (itemId + quantity)</span><textarea id="recipe-inputs">${toPrettyJson(selected?.inputs ?? [])}</textarea></label>
+        <label class="form-field full"><span>Outputs JSON (itemId + quantity)</span><textarea id="recipe-outputs">${toPrettyJson(selected?.outputs ?? [])}</textarea></label>
+      </div>
+
+      <h3>Skill Messages</h3>
+      <div class="form-grid">
+        <label class="form-field full"><span>Locked</span><textarea id="recipe-message-locked">${config.messages?.locked ?? ''}</textarea></label>
+        <label class="form-field full"><span>Missing Items</span><textarea id="recipe-message-missing">${config.messages?.missingItems ?? ''}</textarea></label>
+        <label class="form-field full"><span>Success</span><textarea id="recipe-message-success">${config.messages?.success ?? ''}</textarea></label>
+        <label class="form-field full"><span>Failure</span><textarea id="recipe-message-failure">${config.messages?.failure ?? ''}</textarea></label>
+      </div>
+
+      <div class="form-actions">
+        <button id="recipe-save-row" class="action-button">Apply Recipe</button>
+        <button id="recipe-save-skill" class="action-button">Save Current Skill</button>
+        <button id="recipe-save-all" class="action-button">Save All Recipe Files</button>
+      </div>
+      <div class="preview-hint">Files: <strong>server/data/skills/crafting/smelting.json</strong>, <strong>smithing.json</strong>, <strong>fletching.json</strong>.</div>
+    </div>
+  `;
+
+  const skillSelect = document.querySelector<HTMLSelectElement>('#recipe-skill-select');
+  const stationSelect = document.querySelector<HTMLSelectElement>('#recipe-station-type');
+  if (skillSelect) {
+    skillSelect.value = skill;
+  }
+  if (stationSelect) {
+    stationSelect.value = stationType;
+  }
+
+  const listRoot = document.querySelector<HTMLDivElement>('#recipe-list');
+  if (listRoot) {
+    const sorted = [...config.recipes].sort((a, b) => a.id.localeCompare(b.id));
+    for (const recipe of sorted) {
+      const button = document.createElement('button');
+      button.className = `list-button${recipe.id === state.selectedRecipeIdBySkill[skill] ? ' selected' : ''}`;
+      button.textContent = recipe.name;
+      button.addEventListener('click', () => {
+        state.selectedRecipeIdBySkill[skill] = recipe.id;
+        render();
+      });
+      listRoot.appendChild(button);
+    }
+  }
+
+  skillSelect?.addEventListener('change', () => {
+    state.selectedRecipeSkill = normalizeCraftingSkillId(skillSelect.value);
+    if (!state.selectedRecipeIdBySkill[state.selectedRecipeSkill]) {
+      state.selectedRecipeIdBySkill[state.selectedRecipeSkill] = state.craftingConfigs[state.selectedRecipeSkill].recipes[0]?.id;
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#recipe-add')?.addEventListener('click', () => {
+    const targetSkill = state.selectedRecipeSkill;
+    const targetConfig = state.craftingConfigs[targetSkill];
+    const id = `new_recipe_${Date.now()}`;
+    targetConfig.recipes.push({
+      id,
+      name: 'New Recipe',
+      requiredLevel: 1,
+      durationMs: 1500,
+      successChance: 1,
+      xp: 1,
+      inputs: [{ itemId: 'placeholder_input', quantity: 1 }],
+      outputs: [{ itemId: 'placeholder_output', quantity: 1 }],
+    });
+    state.selectedRecipeIdBySkill[targetSkill] = id;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#recipe-delete')?.addEventListener('click', () => {
+    const targetSkill = state.selectedRecipeSkill;
+    const selectedRecipeId = state.selectedRecipeIdBySkill[targetSkill];
+    if (!selectedRecipeId) {
+      return;
+    }
+
+    const targetConfig = state.craftingConfigs[targetSkill];
+    targetConfig.recipes = targetConfig.recipes.filter((entry) => entry.id !== selectedRecipeId);
+    state.selectedRecipeIdBySkill[targetSkill] = targetConfig.recipes[0]?.id;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>('#recipe-save-row')?.addEventListener('click', async () => {
+    const currentSkill = state.selectedRecipeSkill;
+    const currentConfig = state.craftingConfigs[currentSkill];
+    const currentRecipeId = state.selectedRecipeIdBySkill[currentSkill];
+    const currentRecipe = currentConfig.recipes.find((entry) => entry.id === currentRecipeId);
+    if (!currentRecipe) {
+      return;
+    }
+
+    try {
+      const nextId = String(document.querySelector<HTMLInputElement>('#recipe-id')?.value ?? '').trim();
+      if (!nextId) {
+        throw new Error('Recipe id is required.');
+      }
+
+      const targetStation = String(document.querySelector<HTMLSelectElement>('#recipe-station-type')?.value ?? stationType) as CraftingStationType;
+      const targetSkill = CRAFTING_SKILL_BY_STATION[targetStation] ?? currentSkill;
+      const targetConfig = state.craftingConfigs[targetSkill];
+
+      const inputsRaw = parseJsonField<unknown[]>('recipe inputs', document.querySelector<HTMLTextAreaElement>('#recipe-inputs')?.value ?? '[]', []);
+      const outputsRaw = parseJsonField<unknown[]>('recipe outputs', document.querySelector<HTMLTextAreaElement>('#recipe-outputs')?.value ?? '[]', []);
+
+      const inputs = inputsRaw.map((entry) => normalizeRecipeItemStack(entry)).filter((entry): entry is RecipeItemStack => entry !== null);
+      const outputs = outputsRaw.map((entry) => normalizeRecipeItemStack(entry)).filter((entry): entry is RecipeItemStack => entry !== null);
+
+      if (inputs.length === 0) {
+        throw new Error('Recipe requires at least one valid input item stack.');
+      }
+      if (outputs.length === 0) {
+        throw new Error('Recipe requires at least one valid output item stack.');
+      }
+
+      const duplicateInTarget = targetConfig.recipes.find((entry) => entry.id === nextId && entry !== currentRecipe);
+      if (duplicateInTarget) {
+        throw new Error(`Recipe id '${nextId}' already exists in ${targetSkill}.`);
+      }
+
+      currentRecipe.id = nextId;
+      currentRecipe.name = String(document.querySelector<HTMLInputElement>('#recipe-name')?.value ?? '').trim() || getItemNameById(outputs[0]?.itemId ?? nextId) || nextId;
+      currentRecipe.requiredLevel = Math.max(1, Math.floor(Number(document.querySelector<HTMLInputElement>('#recipe-required-level')?.value ?? '1')));
+      currentRecipe.durationMs = Math.max(100, Math.floor(Number(document.querySelector<HTMLInputElement>('#recipe-duration-ms')?.value ?? '1500')));
+      currentRecipe.successChance = Math.max(0, Math.min(1, Number(document.querySelector<HTMLInputElement>('#recipe-success-chance')?.value ?? '1')));
+      currentRecipe.xp = Math.max(0, Number(document.querySelector<HTMLInputElement>('#recipe-xp')?.value ?? '0'));
+      currentRecipe.inputs = inputs;
+      currentRecipe.outputs = outputs;
+
+      currentConfig.messages = {
+        locked: String(document.querySelector<HTMLTextAreaElement>('#recipe-message-locked')?.value ?? '').trim(),
+        missingItems: String(document.querySelector<HTMLTextAreaElement>('#recipe-message-missing')?.value ?? '').trim(),
+        success: String(document.querySelector<HTMLTextAreaElement>('#recipe-message-success')?.value ?? '').trim(),
+        failure: String(document.querySelector<HTMLTextAreaElement>('#recipe-message-failure')?.value ?? '').trim(),
+      };
+
+      if (targetSkill !== currentSkill) {
+        currentConfig.recipes = currentConfig.recipes.filter((entry) => entry !== currentRecipe);
+        targetConfig.recipes.push(currentRecipe);
+        state.selectedRecipeSkill = targetSkill;
+      }
+
+      state.selectedRecipeIdBySkill[currentSkill] = state.craftingConfigs[currentSkill].recipes[0]?.id;
+      state.selectedRecipeIdBySkill[state.selectedRecipeSkill] = nextId;
+      setStatus(`Updated recipe '${nextId}' in ${state.selectedRecipeSkill}.`);
+      render();
+    } catch (error) {
+      setStatus((error as Error).message);
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>('#recipe-save-skill')?.addEventListener('click', async () => {
+    const targetSkill = state.selectedRecipeSkill;
+    const targetConfig = state.craftingConfigs[targetSkill];
+
+    try {
+      await writeProjectJsonFile(getCraftingFilePathForSkill(targetSkill), targetConfig);
+      setStatus(`Saved ${targetSkill} recipes to ${getCraftingFilePathForSkill(targetSkill)}.`);
+    } catch (error) {
+      downloadJsonFile(`${targetSkill}.json`, targetConfig);
+      setStatus(`Could not write ${targetSkill}.json directly; downloaded fallback file: ${(error as Error).message}`);
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>('#recipe-save-all')?.addEventListener('click', async () => {
+    try {
+      for (const skillId of CRAFTING_SKILL_ORDER) {
+        await writeProjectJsonFile(getCraftingFilePathForSkill(skillId), state.craftingConfigs[skillId]);
+      }
+      setStatus('Saved all crafting recipe files.');
+    } catch (error) {
+      for (const skillId of CRAFTING_SKILL_ORDER) {
+        downloadJsonFile(`${skillId}.json`, state.craftingConfigs[skillId]);
+      }
+      setStatus(`Could not write all recipe files directly; downloaded fallback JSON files: ${(error as Error).message}`);
+    }
+  });
+}
+
+function renderPlayerTab(workspace: HTMLDivElement): void {
+  const playerAppearance = state.playerAppearance;
+
+  workspace.innerHTML = `
+    <div class="list-panel">
+      <h3>Player Appearance</h3>
+      <div class="preview-hint">Global player visuals used by local + remote players.</div>
+    </div>
+    <div class="form-panel">
+      <h3>Player</h3>
+      <div class="preview-card">
+        <h4>Image Preview</h4>
+        <div class="preview-frame"><img id="player-image-preview" alt="Player preview" style="display:none;" /></div>
+        <div id="player-image-preview-hint" class="preview-hint">No image path set.</div>
+        <div class="form-actions">
+          <button id="player-choose-image" class="action-button" type="button">Choose Local Image</button>
+          <input id="player-choose-image-input" type="file" accept="image/*" style="display:none;" />
+        </div>
+      </div>
+      <div class="form-grid">
+        <label class="form-field full"><span>Image</span><input id="player-image" value="${playerAppearance.image}" /></label>
+      </div>
+      <div class="form-actions">
+        <button id="player-save-row" class="action-button">Apply Changes</button>
+        <button id="player-export" class="action-button">Save playerAppearance.json</button>
+      </div>
+      <div class="preview-hint">File: <strong>public/data/playerAppearance.json</strong>.</div>
+    </div>
+  `;
+
+  bindImagePreview('player-image', 'player-image-preview', 'player-image-preview-hint');
+
+  document.querySelector<HTMLButtonElement>('#player-choose-image')?.addEventListener('click', () => {
+    document.querySelector<HTMLInputElement>('#player-choose-image-input')?.click();
+  });
+  document.querySelector<HTMLInputElement>('#player-choose-image-input')?.addEventListener('change', async (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const imagePath = await copyLocalImageToAssets(file, 'players');
+      state.playerAppearance.image = imagePath;
+      const imageInput = document.querySelector<HTMLInputElement>('#player-image');
+      if (imageInput) {
+        imageInput.value = imagePath;
+        imageInput.dispatchEvent(new Event('input'));
+      }
+      setStatus(`Copied player image '${file.name}' to ${imagePath}. Click Apply Changes to save config.`);
+    } catch (error) {
+      setStatus((error as Error).message);
+    } finally {
+      input.value = '';
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>('#player-save-row')?.addEventListener('click', async () => {
+    try {
+      state.playerAppearance.image = String(document.querySelector<HTMLInputElement>('#player-image')?.value ?? '').trim();
+      await writeProjectJsonFile('public/data/playerAppearance.json', state.playerAppearance);
+      setStatus('Saved player appearance to public/data/playerAppearance.json.');
+      render();
+    } catch (error) {
+      debugError('Player appearance apply failed', error);
+      setStatus((error as Error).message);
+    }
+  });
+
+  document.querySelector<HTMLButtonElement>('#player-export')?.addEventListener('click', async () => {
+    try {
+      await writeProjectJsonFile('public/data/playerAppearance.json', state.playerAppearance);
+      setStatus('Saved directly to public/data/playerAppearance.json.');
+    } catch (error) {
+      debugError('Player appearance save fell back to download', error);
+      downloadJsonFile('playerAppearance.json', state.playerAppearance);
+      setStatus(`Could not write to project folder, downloaded playerAppearance.json instead: ${(error as Error).message}`);
+    }
+  });
+}
+
 function render(): void {
   renderTabsActiveState();
 
@@ -1695,8 +2559,23 @@ function render(): void {
     return;
   }
 
+  if (state.tab === 'recipes') {
+    renderRecipesTab(workspace);
+    return;
+  }
+
   if (state.tab === 'tiles') {
     renderTilesTab(workspace);
+    return;
+  }
+
+  if (state.tab === 'worldObjects') {
+    renderWorldObjectsTab(workspace);
+    return;
+  }
+
+  if (state.tab === 'player') {
+    renderPlayerTab(workspace);
     return;
   }
 
@@ -1707,12 +2586,28 @@ async function init(): Promise<void> {
   renderShell();
 
   try {
-    const [itemsRaw, gearRaw, minionsRaw, worldMapRaw, tileTypesRaw] = await Promise.all([
+    const [
+      itemsRaw,
+      gearRaw,
+      minionsRaw,
+      worldMapRaw,
+      tileTypesRaw,
+      worldObjectTypesRaw,
+      playerAppearanceRaw,
+      smeltingRecipesRaw,
+      smithingRecipesRaw,
+      fletchingRecipesRaw,
+    ] = await Promise.all([
       loadJson<ItemDefinition[]>(ITEMS_URL),
       loadJson<GearDefinition[]>(GEAR_URL),
       loadJson<MinionDefinition[]>(MINIONS_URL),
       loadJson<WorldMapData>(WORLD_MAP_URL),
       loadJson<TileDefinition[]>(TILE_TYPES_URL),
+      loadJson<WorldObjectTypeDefinition[]>(WORLD_OBJECT_TYPES_URL),
+      loadJson<PlayerAppearanceConfig>(PLAYER_APPEARANCE_URL).catch(() => ({ image: '' })),
+      loadJson<CraftingSkillConfig>(SMELTING_RECIPES_URL),
+      loadJson<CraftingSkillConfig>(SMITHING_RECIPES_URL),
+      loadJson<CraftingSkillConfig>(FLETCHING_RECIPES_URL),
     ]);
 
     const gearByItemId = new Map<string, GearDefinition>();
@@ -1725,7 +2620,13 @@ async function init(): Promise<void> {
       gear: gearByItemId.get(item.id) ? { ...gearByItemId.get(item.id)! } : null,
     }));
 
-    state.minions = Array.isArray(minionsRaw) ? minionsRaw.map((entry) => ({ ...entry })) : [];
+    state.minions = Array.isArray(minionsRaw)
+      ? minionsRaw.map((entry) => {
+        const { visualTint: _legacyVisualTint, ...rest } = entry as MinionDefinition & { visualTint?: unknown };
+        void _legacyVisualTint;
+        return rest;
+      })
+      : [];
     state.tileTypes = Array.isArray(tileTypesRaw)
       ? tileTypesRaw
         .map((entry) => ({
@@ -1737,9 +2638,38 @@ async function init(): Promise<void> {
         }))
         .filter((entry) => Number.isFinite(entry.id) && entry.label.trim().length > 0)
       : [];
+    state.worldObjectTypes = Array.isArray(worldObjectTypesRaw)
+      ? worldObjectTypesRaw
+        .map((entry) => ({
+          id: String(entry?.id ?? '').trim(),
+          name: String(entry?.name ?? '').trim(),
+          behavior: normalizeWorldObjectBehavior(entry?.behavior),
+          blocksMovement: Boolean(entry?.blocksMovement),
+          image: String(entry?.image ?? '').trim(),
+          examineText: String(entry?.examineText ?? 'A world object.').trim(),
+          tags: Array.isArray(entry?.tags)
+            ? entry.tags.map((value: unknown) => String(value ?? '').trim()).filter(Boolean)
+            : [],
+          behaviorConfig:
+            entry?.behaviorConfig && typeof entry.behaviorConfig === 'object'
+              ? { ...(entry.behaviorConfig as Record<string, unknown>) }
+              : {},
+        }))
+        .filter((entry) => entry.id.length > 0 && entry.name.length > 0)
+      : [];
+    state.playerAppearance = {
+      image: String(playerAppearanceRaw?.image ?? '').trim(),
+    };
     state.tileTypes.sort((a, b) => a.id - b.id);
+    state.worldObjectTypes.sort((a, b) => a.id.localeCompare(b.id));
+    state.craftingConfigs = {
+      smelting: normalizeCraftingSkillConfig(smeltingRecipesRaw, 'smelting'),
+      smithing: normalizeCraftingSkillConfig(smithingRecipesRaw, 'smithing'),
+      fletching: normalizeCraftingSkillConfig(fletchingRecipesRaw, 'fletching'),
+    };
     state.worldMap = worldMapRaw;
     state.npcs = [];
+    state.hiddenNpcs = [];
 
     const chunks = Array.isArray(worldMapRaw?.chunks) ? worldMapRaw.chunks : [];
     for (const chunk of chunks) {
@@ -1747,7 +2677,7 @@ async function init(): Promise<void> {
       const chunkY = Number(chunk?.chunkY ?? 0);
       const chunkNpcs = Array.isArray(chunk?.npcs) ? chunk.npcs : [];
       for (const rawNpc of chunkNpcs) {
-        state.npcs.push({
+        const normalizedNpc = {
           id: String(rawNpc?.id ?? ''),
           type: String(rawNpc?.type ?? 'villager'),
           name: String(rawNpc?.name ?? 'NPC'),
@@ -1761,7 +2691,14 @@ async function init(): Promise<void> {
             : [],
           chunkX,
           chunkY,
-        });
+        };
+
+        if (normalizedNpc.type === 'bank_chest') {
+          state.hiddenNpcs.push(normalizedNpc);
+          continue;
+        }
+
+        state.npcs.push(normalizedNpc);
       }
     }
 
@@ -1769,8 +2706,13 @@ async function init(): Promise<void> {
     state.selectedNpcId = state.npcs[0]?.id ?? null;
     state.selectedMinionId = state.minions[0]?.id ?? null;
     state.selectedTileId = state.tileTypes[0]?.id ?? null;
+    state.selectedWorldObjectTypeId = state.worldObjectTypes[0]?.id ?? null;
+    state.selectedRecipeSkill = 'smelting';
+    for (const skillId of CRAFTING_SKILL_ORDER) {
+      state.selectedRecipeIdBySkill[skillId] = state.craftingConfigs[skillId].recipes[0]?.id;
+    }
 
-    setStatus('Loaded items, NPCs, minions, and tiles. Edit values and use Save buttons to export updated files.');
+    setStatus('Loaded items, NPCs, minions, recipes, tiles, and world object types. Edit values and use Save buttons to export updated files.');
     render();
   } catch (error) {
     setStatus((error as Error).message);

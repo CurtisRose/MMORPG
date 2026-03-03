@@ -6,7 +6,7 @@ export type InteractionTargetType =
   | 'node-harvest'
   | 'npc-talk'
   | 'npc-trade'
-  | 'npc-bank'
+  | 'object-bank'
   | 'enemy-attack'
   | 'ground-pickup'
   | 'object-crafting'

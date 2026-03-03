@@ -6,6 +6,7 @@ import {
 } from '../config/gameConfig';
 import {
   type CraftingOpenState,
+  type CraftingProgressState,
   type CraftingRecipeState,
   type ChatMessageState,
   type EquipmentSlotName,
@@ -93,10 +94,15 @@ const DEBUG_INTERACTION_TRACE =
   String(import.meta.env.VITE_DEBUG_INTERACTION ?? 'true').toLowerCase() === 'true';
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
 const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+const PLAYER_APPEARANCE_URL = `${import.meta.env.BASE_URL}data/playerAppearance.json`;
 
 type TerrainTileDefinition = {
   id?: unknown;
   walkable?: unknown;
+};
+
+type PlayerAppearanceConfig = {
+  image?: string;
 };
 
 const RESOURCE_MINIMAP_COLORS: Record<string, number> = {
@@ -317,7 +323,12 @@ export class WorldScene extends Phaser.Scene {
   private blockedNpcTiles = new Set<string>();
   private blockedObjectTiles = new Set<string>();
   private blockedTerrainTileIds = new Set<number>([WATER_TILE_ID]);
+  private pendingEntityTextureLoads = new Set<string>();
+  private entityTexturePathByKey = new Map<string, string>();
   private pendingGroundItemTextureLoads = new Set<string>();
+  private playerAppearance: PlayerAppearanceConfig = {
+    image: '',
+  };
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
   private contextMenuCloseListener: ((event: PointerEvent) => void) | null = null;
@@ -361,6 +372,7 @@ export class WorldScene extends Phaser.Scene {
   private activeCraftingTitle = 'Crafting';
   private craftingRecipes: CraftingRecipeState[] = [];
   private selectedSmithingMaterialTab: 'bronze' | 'iron' = 'bronze';
+  private activeCraftingProgress: CraftingProgressState | null = null;
   private craftingVisible = false;
   private lastRenderedCraftingSignature: string | null = null;
   private questJournalRootElement: HTMLDivElement | null = null;
@@ -462,6 +474,9 @@ export class WorldScene extends Phaser.Scene {
     openCrafting: (craftingState: CraftingOpenState) => {
       this.openCrafting(craftingState);
     },
+    handleCraftingProgress: (progressState: CraftingProgressState) => {
+      this.handleCraftingProgress(progressState);
+    },
     handleAuthFailure: (reason: string) => {
       this.scene.start('splash', { errorMessage: reason });
     },
@@ -476,8 +491,14 @@ export class WorldScene extends Phaser.Scene {
     this.sceneReady = false;
     this.input.mouse?.disableContextMenu();
 
-    this.terrainData = await this.loadTerrainData();
-    this.blockedTerrainTileIds = await this.loadBlockedTerrainTileIds();
+    const [terrainData, blockedTerrainTileIds, playerAppearance] = await Promise.all([
+      this.loadTerrainData(),
+      this.loadBlockedTerrainTileIds(),
+      this.loadPlayerAppearanceConfig(),
+    ]);
+    this.terrainData = terrainData;
+    this.blockedTerrainTileIds = blockedTerrainTileIds;
+    this.playerAppearance = playerAppearance;
     this.worldHeightTiles = this.terrainData.length;
     this.worldWidthTiles = this.terrainData[0]?.length ?? MAP_WIDTH_TILES;
     const terrainMap = this.make.tilemap({
@@ -511,8 +532,9 @@ export class WorldScene extends Phaser.Scene {
       this.worldHeightTiles * TILE_SIZE * 0.5,
       PLAYER_TEXTURE_KEY,
     );
+    this.player.setDisplaySize(TILE_SIZE, TILE_SIZE);
 
-    this.player.setTint(0xb8f0ff);
+    this.applyPlayerSpriteAppearance(this.player);
     this.localHealthBar = this.add.graphics().setDepth(60);
     this.localHealthBar.setVisible(false);
     this.createHarvestIndicatorTextures();
@@ -635,6 +657,88 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
+  private async loadPlayerAppearanceConfig(): Promise<PlayerAppearanceConfig> {
+    try {
+      const response = await fetch(PLAYER_APPEARANCE_URL, { cache: 'no-store' });
+      if (!response.ok) {
+        return { image: '' };
+      }
+
+      const raw = await response.json() as PlayerAppearanceConfig;
+      return {
+        image: String(raw?.image ?? '').trim(),
+      };
+    } catch {
+      return { image: '' };
+    }
+  }
+
+  private resolveEntityTextureKey(
+    prefix: string,
+    id: string,
+    imagePath: string | null | undefined,
+    fallbackTextureKey: string,
+  ): string {
+    const normalizedImagePath = String(imagePath ?? '').trim();
+    if (!normalizedImagePath) {
+      return fallbackTextureKey;
+    }
+
+    const key = `${prefix}-${id}`;
+    const loaded = this.ensureEntityTextureLoaded(key, normalizedImagePath);
+    return loaded ? key : fallbackTextureKey;
+  }
+
+  private ensureEntityTextureLoaded(textureKey: string, imagePath: string): boolean {
+    const normalizedPath = String(imagePath ?? '').trim();
+    if (!normalizedPath) {
+      return false;
+    }
+
+    const previousPath = this.entityTexturePathByKey.get(textureKey) ?? '';
+    if (this.textures.exists(textureKey) && previousPath === normalizedPath) {
+      return true;
+    }
+
+    if (this.pendingEntityTextureLoads.has(textureKey)) {
+      return false;
+    }
+
+    if (this.textures.exists(textureKey) && previousPath !== normalizedPath) {
+      this.textures.remove(textureKey);
+    }
+
+    this.entityTexturePathByKey.set(textureKey, normalizedPath);
+    this.pendingEntityTextureLoads.add(textureKey);
+    this.load.image(textureKey, normalizedPath);
+    this.load.once(`filecomplete-image-${textureKey}`, () => {
+      this.pendingEntityTextureLoads.delete(textureKey);
+    });
+    this.load.once('loaderror', (file: { key?: string }): void => {
+      if (file?.key === textureKey) {
+        this.pendingEntityTextureLoads.delete(textureKey);
+      }
+    });
+
+    if (!this.load.isLoading()) {
+      this.load.start();
+    }
+
+    return false;
+  }
+
+  private applyPlayerSpriteAppearance(sprite: Phaser.GameObjects.Sprite): void {
+    const playerTextureKey = this.resolveEntityTextureKey(
+      'player-appearance',
+      'global',
+      this.playerAppearance.image,
+      PLAYER_TEXTURE_KEY,
+    );
+
+    sprite.setTexture(playerTextureKey);
+    sprite.setDisplaySize(TILE_SIZE, TILE_SIZE);
+  }
+
   update(_: number, delta: number): void {
     if (!this.sceneReady) {
       return;
@@ -687,6 +791,7 @@ export class WorldScene extends Phaser.Scene {
     this.updateRemoteHarvestingActionIndicators(delta);
     this.updatePendingQuestDialogueRequest();
     this.updateMinimap(delta);
+    this.applyPlayerSpriteAppearance(this.player);
 
     this.renderActionStatus();
     this.renderDebugHud();
@@ -1681,6 +1786,15 @@ export class WorldScene extends Phaser.Scene {
       createNodeSprite: (worldX: number, worldY: number, textureKey: string) =>
         this.add.sprite(worldX, worldY, textureKey).setDepth(2),
       styleNodeSprite: (sprite: Phaser.GameObjects.Sprite, nodeState: WorldNodeState) => {
+        const fallbackTextureKey = nodeState.type === 'tree' ? TREE_TEXTURE_KEY : ROCK_TEXTURE_KEY;
+        const resolvedTextureKey = this.resolveEntityTextureKey(
+          'resource-node',
+          nodeState.resourceId,
+          nodeState.resourceImage,
+          fallbackTextureKey,
+        );
+        sprite.setTexture(resolvedTextureKey);
+        sprite.setDisplaySize(TILE_SIZE, TILE_SIZE);
         applyNodeSpriteStyling(sprite, nodeState);
       },
       treeTextureKey: TREE_TEXTURE_KEY,
@@ -1696,6 +1810,14 @@ export class WorldScene extends Phaser.Scene {
       createNpcSprite: (worldX: number, worldY: number, textureKey: string) =>
         this.add.sprite(worldX, worldY, textureKey).setDepth(2),
       styleNpcSprite: (sprite: Phaser.GameObjects.Sprite, npcState: NpcState) => {
+        const resolvedTextureKey = this.resolveEntityTextureKey(
+          'npc',
+          npcState.id,
+          npcState.image,
+          PLAYER_TEXTURE_KEY,
+        );
+        sprite.setTexture(resolvedTextureKey);
+        sprite.setDisplaySize(TILE_SIZE, TILE_SIZE);
         applyNpcSpriteStyling(sprite, npcState, {
           player: PLAYER_TEXTURE_KEY,
           tree: TREE_TEXTURE_KEY,
@@ -1754,6 +1876,14 @@ export class WorldScene extends Phaser.Scene {
       createObjectSprite: (worldX: number, worldY: number, textureKey: string) =>
         this.add.sprite(worldX, worldY, textureKey).setDepth(1.8),
       styleObjectSprite: (sprite: Phaser.GameObjects.Sprite, objectState: WorldObjectState) => {
+        const resolvedTextureKey = this.resolveEntityTextureKey(
+          'world-object',
+          objectState.objectTypeId,
+          objectState.image,
+          ROCK_TEXTURE_KEY,
+        );
+        sprite.setTexture(resolvedTextureKey);
+        sprite.setDisplaySize(TILE_SIZE, TILE_SIZE);
         applyObjectSpriteStyling(sprite, objectState, {
           player: PLAYER_TEXTURE_KEY,
           tree: TREE_TEXTURE_KEY,
@@ -1776,6 +1906,17 @@ export class WorldScene extends Phaser.Scene {
         this.showFloatingText(worldX, worldY, text, color);
       },
       enemyTextureKey: ENEMY_TEXTURE_KEY,
+      styleEnemySprite: (sprite: Phaser.GameObjects.Sprite, enemyState: EnemyState) => {
+        const textureIdentity = String(enemyState.minionTypeId ?? enemyState.type ?? enemyState.id);
+        const resolvedTextureKey = this.resolveEntityTextureKey(
+          'enemy',
+          textureIdentity,
+          enemyState.image,
+          ENEMY_TEXTURE_KEY,
+        );
+        sprite.setTexture(resolvedTextureKey);
+        sprite.setDisplaySize(TILE_SIZE, TILE_SIZE);
+      },
       healthBarVisibleMs: HEALTH_BAR_VISIBLE_MS,
       tileSize: TILE_SIZE,
     });
@@ -1840,6 +1981,10 @@ export class WorldScene extends Phaser.Scene {
       createHarvestingIndicator: (x: number, y: number, textureKey: string) =>
         this.add.image(x, y, textureKey),
       playerTextureKey: PLAYER_TEXTURE_KEY,
+      stylePlayerSprite: (sprite: Phaser.GameObjects.Sprite) => {
+        this.applyPlayerSpriteAppearance(sprite);
+        sprite.setDisplaySize(TILE_SIZE, TILE_SIZE);
+      },
       harvestIndicatorTextureKey: HARVEST_AXE_TEXTURE_KEY,
       healthBarVisibleMs: HEALTH_BAR_VISIBLE_MS,
       tileSize: TILE_SIZE,
@@ -1924,11 +2069,7 @@ export class WorldScene extends Phaser.Scene {
         tile: { x: tileX, y: tileY },
       });
       this.showTileClickFeedback(tileX, tileY, 'npc-interact');
-      if (clickedNpc.state.type === 'bank_chest') {
-        this.useBankChest(clickedNpc.state.id);
-      } else {
-        this.talkToNpc(clickedNpc.state.id);
-      }
+      this.talkToNpc(clickedNpc.state.id);
       return;
     }
 
@@ -2031,28 +2172,19 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (npcAtTile) {
-      if (npcAtTile.state.type === 'bank_chest') {
-        options.push({
-          label: `Use ${npcAtTile.state.name}`,
-          onSelect: () => {
-            this.useBankChest(npcAtTile.state.id);
-          },
-        });
-      } else {
-        options.push({
-          label: `Talk-to ${npcAtTile.state.name}`,
-          onSelect: () => {
-            this.talkToNpc(npcAtTile.state.id);
-          },
-        });
+      options.push({
+        label: `Talk-to ${npcAtTile.state.name}`,
+        onSelect: () => {
+          this.talkToNpc(npcAtTile.state.id);
+        },
+      });
 
-        options.push({
-          label: `Trade with ${npcAtTile.state.name}`,
-          onSelect: () => {
-            this.tradeWithNpc(npcAtTile.state.id);
-          },
-        });
-      }
+      options.push({
+        label: `Trade with ${npcAtTile.state.name}`,
+        onSelect: () => {
+          this.tradeWithNpc(npcAtTile.state.id);
+        },
+      });
 
       options.push({
         label: `Examine ${npcAtTile.state.name}`,
@@ -2729,25 +2861,18 @@ export class WorldScene extends Phaser.Scene {
     this.startNpcAction(npcId, 'trade');
   }
 
-  private useBankChest(npcId: string): void {
-    this.hideContextMenu();
-    this.startNpcAction(npcId, 'bank');
-  }
-
   private useWorldObject(objectId: string): void {
     this.hideContextMenu();
     this.startObjectAction(objectId);
   }
 
-  private startNpcAction(npcId: string, action: 'talk' | 'trade' | 'bank'): void {
+  private startNpcAction(npcId: string, action: 'talk' | 'trade'): void {
     const npcVisual = this.worldNpcs.get(npcId);
     if (!npcVisual) {
       return;
     }
 
-    const type: InteractionTargetType = action === 'bank'
-      ? 'npc-bank'
-      : action === 'trade'
+    const type: InteractionTargetType = action === 'trade'
         ? 'npc-trade'
         : 'npc-talk';
 
@@ -2921,7 +3046,7 @@ export class WorldScene extends Phaser.Scene {
       },
       executeNpcTalk: (targetId: string) => this.multiplayerClient.sendNpcTalk(targetId),
       executeNpcTrade: (targetId: string) => this.multiplayerClient.sendShopOpen(targetId),
-      executeNpcBank: (targetId: string) => this.multiplayerClient.sendBankOpen(targetId),
+      executeObjectBank: (targetId: string) => this.multiplayerClient.sendBankOpen(targetId),
       executeEnemyAttack: (targetId: string) => this.multiplayerClient.sendCombatAttack(targetId),
       executeGroundPickup: (targetId: string) => this.multiplayerClient.sendGroundItemPickup(targetId),
       executeObjectCrafting: (targetId: string) => this.multiplayerClient.sendCraftingOpen(targetId),
@@ -3567,6 +3692,26 @@ export class WorldScene extends Phaser.Scene {
     this.renderCraftingPanel();
   }
 
+  private handleCraftingProgress(state: CraftingProgressState): void {
+    if (!state.active) {
+      this.activeCraftingProgress = null;
+      this.lastRenderedCraftingSignature = null;
+      return;
+    }
+
+    this.activeCraftingProgress = {
+      ...state,
+      durationMs: Math.max(1, Math.floor(Number(state.durationMs ?? 1))),
+      totalCount: Math.max(0, Math.floor(Number(state.totalCount ?? 0))),
+      completedCount: Math.max(0, Math.floor(Number(state.completedCount ?? 0))),
+      cycleStartedAt: Math.max(0, Math.floor(Number(state.cycleStartedAt ?? 0))),
+      cycleEndsAt: Math.max(0, Math.floor(Number(state.cycleEndsAt ?? 0))),
+      cycleRemainingMs: Math.max(0, Math.floor(Number(state.cycleRemainingMs ?? 0))),
+      cycleProgress: Math.max(0, Math.min(1, Number(state.cycleProgress ?? 0))),
+    };
+    this.lastRenderedCraftingSignature = null;
+  }
+
   private getSortedCraftingRecipes(recipes: CraftingRecipeState[], stationType: string): CraftingRecipeState[] {
     const safeRecipes = [...recipes];
     if (stationType === 'smelting_station') {
@@ -3694,6 +3839,7 @@ export class WorldScene extends Phaser.Scene {
 
   private closeCrafting(): void {
     this.craftingVisible = false;
+    this.activeCraftingProgress = null;
     this.lastRenderedCraftingSignature = null;
     if (this.craftingRootElement) {
       this.craftingRootElement.style.display = 'none';
@@ -4176,7 +4322,7 @@ export class WorldScene extends Phaser.Scene {
       slotSize,
       inventory.maxSlots,
       inventory.slots
-        .map((slot) => `${slot.image || '/assets/items/unknown.svg'}:${slot.itemId}:${slot.quantity}:${JSON.stringify(slot.gearStats)}`)
+        .map((slot) => `${slot.image || '/assets/items/unknown.png'}:${slot.itemId}:${slot.quantity}:${JSON.stringify(slot.gearStats)}`)
         .join('|'),
     ].join('::');
 
@@ -4919,6 +5065,26 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
 
+    const craftingProgress = this.activeCraftingProgress;
+    const progressIsForActiveStation = Boolean(
+      craftingProgress
+      && craftingProgress.active
+      && craftingProgress.objectId
+      && craftingProgress.objectId === this.activeCraftingObjectId,
+    );
+    const cycleRemainingMs = progressIsForActiveStation
+      ? Math.max(0, (craftingProgress?.cycleEndsAt ?? 0) - Date.now())
+      : 0;
+    const cycleProgress = progressIsForActiveStation
+      ? Math.max(
+        0,
+        Math.min(
+          1,
+          1 - cycleRemainingMs / Math.max(1, craftingProgress?.durationMs ?? 1),
+        ),
+      )
+      : 0;
+
     const inventorySignature = this.localPlayerState.inventory.slots
       .map((slot) => `${slot.itemId}:${slot.quantity}`)
       .sort()
@@ -4931,6 +5097,11 @@ export class WorldScene extends Phaser.Scene {
       this.activeCraftingStationType ?? '',
       this.activeCraftingTitle,
       this.selectedSmithingMaterialTab,
+      progressIsForActiveStation ? 'busy' : 'idle',
+      progressIsForActiveStation ? String(craftingProgress?.recipeId ?? '') : '',
+      progressIsForActiveStation ? `${craftingProgress?.completedCount ?? 0}/${craftingProgress?.totalCount ?? 0}` : '',
+      progressIsForActiveStation ? String(Math.floor(cycleProgress * 100)) : '',
+      progressIsForActiveStation ? String(Math.floor(cycleRemainingMs / 100)) : '',
       inventorySignature,
       recipeSignature,
     ].join('::');
@@ -4948,6 +5119,53 @@ export class WorldScene extends Phaser.Scene {
     title.style.fontWeight = 'bold';
     title.style.marginBottom = '6px';
     this.craftingContentElement.appendChild(title);
+
+    if (progressIsForActiveStation && craftingProgress) {
+      const progressContainer = document.createElement('div');
+      progressContainer.style.display = 'flex';
+      progressContainer.style.flexDirection = 'column';
+      progressContainer.style.gap = '4px';
+      progressContainer.style.marginBottom = '8px';
+      progressContainer.style.padding = '6px';
+      progressContainer.style.border = '1px solid rgba(150, 138, 102, 0.65)';
+      progressContainer.style.background = 'rgba(30, 27, 20, 0.72)';
+
+      const progressLabel = document.createElement('div');
+      progressLabel.style.color = '#f0e5c1';
+      progressLabel.textContent = `Crafting ${craftingProgress.recipeName ?? 'Recipe'} • ${Math.max(0, craftingProgress.completedCount)}/${Math.max(0, craftingProgress.totalCount)}`;
+
+      const progressTrack = document.createElement('div');
+      progressTrack.style.height = '8px';
+      progressTrack.style.border = '1px solid rgba(150, 138, 102, 0.8)';
+      progressTrack.style.background = 'rgba(0, 0, 0, 0.5)';
+      progressTrack.style.position = 'relative';
+
+      const progressFill = document.createElement('div');
+      progressFill.style.height = '100%';
+      progressFill.style.width = `${Math.max(0, Math.min(100, cycleProgress * 100)).toFixed(1)}%`;
+      progressFill.style.background = 'rgba(215, 187, 94, 0.95)';
+
+      const progressMeta = document.createElement('div');
+      progressMeta.style.color = '#d8cba0';
+      progressMeta.style.fontSize = '11px';
+      progressMeta.textContent = `${(cycleRemainingMs / 1000).toFixed(1)}s remaining on current item`;
+
+      const cancelButton = document.createElement('button');
+      cancelButton.textContent = 'Cancel';
+      cancelButton.style.fontFamily = 'monospace';
+      cancelButton.style.fontSize = '11px';
+      cancelButton.style.cursor = 'pointer';
+      cancelButton.style.width = 'fit-content';
+      cancelButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.multiplayerClient.sendCraftingCancel(this.activeCraftingObjectId ?? undefined);
+      });
+
+      progressTrack.appendChild(progressFill);
+      progressContainer.append(progressLabel, progressTrack, progressMeta, cancelButton);
+      this.craftingContentElement.appendChild(progressContainer);
+    }
 
     if (this.activeCraftingStationType === 'smithing_station') {
       const tabRow = document.createElement('div');
@@ -5057,7 +5275,7 @@ export class WorldScene extends Phaser.Scene {
           .find((slot) => slot.itemId === entry.itemId)?.quantity ?? 0;
         return count >= entry.quantity;
       });
-      const canCraftRecipe = hasRequiredLevel && hasAllInputs;
+      const canCraftRecipe = hasRequiredLevel && hasAllInputs && !progressIsForActiveStation;
 
       const makeOneButton = document.createElement('button');
       makeOneButton.textContent = 'Make 1';
@@ -5274,6 +5492,7 @@ export class WorldScene extends Phaser.Scene {
     this.activeCraftingStationType = null;
     this.activeCraftingTitle = 'Crafting';
     this.craftingRecipes = [];
+    this.activeCraftingProgress = null;
     this.craftingVisible = false;
     this.lastRenderedCraftingSignature = null;
     this.itemTooltipElement?.remove();

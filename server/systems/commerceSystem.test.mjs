@@ -4,18 +4,18 @@ import { buyFromShop, openBankForPlayer, sellToShop } from './commerceSystem.mjs
 
 export function runCommerceSystemTests() {
   const player = {
-    activeBankNpcId: null,
+    activeBankObjectId: null,
     activeCraftingObjectId: 'obj-1',
     activeCraftingStationType: 'smelting',
   };
 
-  const result = openBankForPlayer(player, 'npc-bank', {
-    getBankNpcById: () => ({ id: 'npc-bank' }),
-    isWithinNpcRange: () => true,
+  const result = openBankForPlayer(player, 'obj-bank', {
+    getBankObjectById: () => ({ id: 'obj-bank' }),
+    isWithinObjectRange: () => true,
   });
 
   assert.equal(result.ok, true);
-  assert.equal(player.activeBankNpcId, 'npc-bank');
+  assert.equal(player.activeBankObjectId, 'obj-bank');
   assert.equal(player.activeCraftingObjectId, null);
   assert.equal(player.activeCraftingStationType, null);
 

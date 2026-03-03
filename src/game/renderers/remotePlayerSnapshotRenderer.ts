@@ -23,6 +23,7 @@ export function upsertRemotePlayerVisual(params: {
   createHealthBar: () => Phaser.GameObjects.Graphics;
   createHarvestingIndicator: (x: number, y: number, textureKey: string) => Phaser.GameObjects.Image;
   playerTextureKey: string;
+  stylePlayerSprite?: (sprite: Phaser.GameObjects.Sprite, playerState: RemotePlayerState) => void;
   harvestIndicatorTextureKey: string;
   healthBarVisibleMs: number;
   tileSize: number;
@@ -62,12 +63,13 @@ export function upsertRemotePlayerVisual(params: {
     ) {
       existingPlayer.renderedTilePosition.copy(existingPlayer.targetTilePosition);
     }
+    params.stylePlayerSprite?.(existingPlayer.sprite, params.playerState);
     return;
   }
 
   const remotePlayer = params
-    .createPlayerSprite(worldPosition.x, worldPosition.y, params.playerTextureKey)
-    .setTint(0xffd38f);
+    .createPlayerSprite(worldPosition.x, worldPosition.y, params.playerTextureKey);
+  params.stylePlayerSprite?.(remotePlayer, params.playerState);
   const healthBar = params.createHealthBar().setDepth(60);
   healthBar.setVisible(false);
   const harvestingIndicator = params

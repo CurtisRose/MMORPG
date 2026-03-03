@@ -1,6 +1,7 @@
 import {
   type ChatMessageState,
   type CraftingOpenState,
+  type CraftingProgressState,
   type InventoryState,
   MultiplayerClient,
   type QuestDialogueState,
@@ -34,6 +35,7 @@ export interface WorldSceneOrchestratorDeps {
   openShop: (shopId: string) => void;
   openBank: (inventory: InventoryState, bank: InventoryState) => void;
   openCrafting: (state: CraftingOpenState) => void;
+  handleCraftingProgress: (state: CraftingProgressState) => void;
   handleAuthFailure: (reason: string) => void;
 }
 
@@ -94,6 +96,9 @@ export class WorldSceneOrchestrator {
       },
       (craftingState) => {
         this.deps.openCrafting(craftingState);
+      },
+      (progressState) => {
+        this.deps.handleCraftingProgress(progressState);
       },
       (reason) => {
         this.deps.handleAuthFailure(reason);

@@ -8,8 +8,10 @@ const WORLD_DATA_VERSION = 1;
 const MAX_HISTORY_STEPS = 100;
 const CANONICAL_WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
 const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+const WORLD_OBJECT_TYPES_URL = `${import.meta.env.BASE_URL}data/worldObjectTypes.json`;
 const TERRAIN_TILESET_URL = `${import.meta.env.BASE_URL}assets/terrain/terrain_tileset.png`;
 const QUEST_INDEX_URL = `${import.meta.env.BASE_URL}data/quests/index.json`;
+const PROJECT_WORLD_MAP_RELATIVE_PATH = 'public/data/worldMap.json';
 const DEBUG_LOG_MAX_LINES = 160;
 const SIDEBAR_WIDTH_STORAGE_KEY = 'mapEditor.sidebarWidth';
 const SIDEBAR_MIN_WIDTH = 220;
@@ -42,10 +44,24 @@ type ObjectPlacement = {
   examineText: string;
 };
 
+type WorldObjectPlacement = {
+  id: string;
+  objectTypeId: string;
+  tileX: number;
+  tileY: number;
+  resourceId?: string;
+  nodeType?: 'tree' | 'rock';
+  respawnMs?: number;
+  name?: string;
+  blocksMovement?: boolean;
+  examineText?: string;
+};
+
 type NpcPlacement = {
   id: string;
   type: string;
   name: string;
+  image?: string;
   tileX: number;
   tileY: number;
   examineText: string;
@@ -95,6 +111,7 @@ type EditorChunkData = {
   width: number;
   height: number;
   terrain: number[][];
+  worldObjects: WorldObjectPlacement[];
   resources: ResourcePlacement[];
   monsters: MonsterPlacement[];
   objects: ObjectPlacement[];
@@ -104,6 +121,7 @@ type EditorChunkData = {
 
 type ChunkSnapshot = {
   terrain: number[][];
+  worldObjects: WorldObjectPlacement[];
   resources: ResourcePlacement[];
   monsters: MonsterPlacement[];
   objects: ObjectPlacement[];
@@ -127,6 +145,34 @@ type TileTypeDefinition = {
   image: string;
 };
 
+type WorldObjectBehavior = 'decorative' | 'harvestable' | 'station' | 'bank' | 'shop' | 'npc';
+
+type WorldObjectTypeDefinition = {
+  id: string;
+  name: string;
+  behavior: WorldObjectBehavior;
+  blocksMovement: boolean;
+  image: string;
+  examineText: string;
+  tags: string[];
+  behaviorConfig: Record<string, unknown>;
+};
+
+type ResourceTypeDefinition = {
+  id: string;
+  label: string;
+  nodeType: 'tree' | 'rock';
+  respawnMs: number;
+};
+
+type ObjectTypeDefinition = {
+  id: string;
+  label: string;
+  name: string;
+  blocksMovement: boolean;
+  examineText: string;
+};
+
 type QuestPreviewContext = {
   questId: string | null;
   zoneIds: Set<string>;
@@ -145,7 +191,7 @@ const DEFAULT_TILE_TYPES: TileTypeDefinition[] = [
   { id: 3, label: 'Sand', color: '#b9a56d', image: '' },
 ];
 
-const RESOURCE_TYPES: Array<{ id: string; label: string; nodeType: 'tree' | 'rock'; respawnMs: number }> = [
+const DEFAULT_RESOURCE_TYPES: ResourceTypeDefinition[] = [
   { id: 'birch_tree', label: 'Birch Tree', nodeType: 'tree', respawnMs: 5000 },
   { id: 'oak_tree', label: 'Oak Tree', nodeType: 'tree', respawnMs: 6500 },
   { id: 'copper_rock', label: 'Copper Rock', nodeType: 'rock', respawnMs: 6500 },
@@ -159,7 +205,7 @@ const MONSTER_TYPES: Array<{ id: string; label: string }> = [
   { id: 'goblin_archer', label: 'Goblin Archer' },
 ];
 
-const OBJECT_TYPES: Array<{ id: string; label: string; name: string; blocksMovement: boolean; examineText: string }> = [
+const DEFAULT_OBJECT_TYPES: ObjectTypeDefinition[] = [
   {
     id: 'smelting_station',
     label: 'Smelting Station',
@@ -211,25 +257,49 @@ const OBJECT_TYPES: Array<{ id: string; label: string; name: string; blocksMovem
   },
 ];
 
-const NPC_TYPES: Array<{ id: string; label: string; defaultName: string; examineText: string; talkText: string }> = [
+const DEFAULT_WORLD_OBJECT_TYPES: WorldObjectTypeDefinition[] = [
+  ...DEFAULT_RESOURCE_TYPES.map((entry) => ({
+    id: entry.id,
+    name: entry.label,
+    behavior: 'harvestable' as WorldObjectBehavior,
+    blocksMovement: true,
+    image: '',
+    examineText: `A ${entry.label.toLowerCase()}.`,
+    tags: ['legacy-default'],
+    behaviorConfig: {
+      resourceId: entry.id,
+      nodeType: entry.nodeType,
+      respawnMs: entry.respawnMs,
+    },
+  })),
+  ...DEFAULT_OBJECT_TYPES.map((entry) => ({
+    id: entry.id,
+    name: entry.label,
+    behavior: entry.id.includes('station') ? 'station' as WorldObjectBehavior : 'decorative' as WorldObjectBehavior,
+    blocksMovement: entry.blocksMovement,
+    image: '',
+    examineText: entry.examineText,
+    tags: ['legacy-default'],
+    behaviorConfig: entry.id.includes('station')
+      ? { stationType: entry.id.replace(/_station$/i, '') }
+      : {},
+  })),
+].sort((a, b) => a.id.localeCompare(b.id));
+
+const NPC_TYPES: Array<{ id: string; label: string; defaultName: string; image: string; examineText: string; talkText: string }> = [
   {
     id: 'shopkeeper',
     label: 'Shopkeeper',
     defaultName: 'Bob',
+    image: '/assets/npcs/shopkeeper.png',
     examineText: 'A friendly general store shopkeeper.',
     talkText: 'Hello there! Need supplies or want to sell your goods?',
-  },
-  {
-    id: 'bank_chest',
-    label: 'Bank Chest',
-    defaultName: 'Bank chest',
-    examineText: 'A sturdy chest for secure item storage.',
-    talkText: 'Your valuables are safe inside.',
   },
   {
     id: 'villager',
     label: 'Villager',
     defaultName: 'Villager',
+    image: '/assets/npcs/villager.png',
     examineText: 'A local villager going about their day.',
     talkText: 'Lovely weather for skilling, isn\'t it?',
   },
@@ -266,10 +336,10 @@ const state: {
   toolMode: ToolMode;
   layer: LayerMode;
   tileTypes: TileTypeDefinition[];
+  worldObjectTypes: WorldObjectTypeDefinition[];
   selectedTileType: number;
-  selectedResourceId: string;
+  selectedWorldObjectTypeId: string;
   selectedMonsterId: string;
-  selectedObjectTypeId: string;
   selectedNpcTypeId: string;
   selectedMonsterTier: number;
   tilePixelSize: number;
@@ -281,6 +351,8 @@ const state: {
   questZoneIdsByQuestId: Map<string, Set<string>>;
   npcFormDirty: boolean;
   npcFormSelectionKey: string | null;
+  projectDirectoryHandle: any | null;
+  projectDirectoryName: string | null;
 } = {
   data: createChunkData(0, 0),
   chunks: new Map<string, EditorChunkData>(),
@@ -290,10 +362,14 @@ const state: {
   toolMode: 'paint',
   layer: 'terrain',
   tileTypes: DEFAULT_TILE_TYPES.map((entry) => ({ ...entry })),
+  worldObjectTypes: DEFAULT_WORLD_OBJECT_TYPES.map((entry) => ({
+    ...entry,
+    behaviorConfig: { ...(entry.behaviorConfig ?? {}) },
+    tags: [...(entry.tags ?? [])],
+  })),
   selectedTileType: 0,
-  selectedResourceId: RESOURCE_TYPES[0].id,
+  selectedWorldObjectTypeId: DEFAULT_WORLD_OBJECT_TYPES[0]?.id ?? '',
   selectedMonsterId: MONSTER_TYPES[0].id,
-  selectedObjectTypeId: OBJECT_TYPES[0].id,
   selectedNpcTypeId: NPC_TYPES[0].id,
   selectedMonsterTier: 1,
   tilePixelSize: 16,
@@ -305,21 +381,25 @@ const state: {
   questZoneIdsByQuestId: new Map<string, Set<string>>(),
   npcFormDirty: false,
   npcFormSelectionKey: null,
+  projectDirectoryHandle: null,
+  projectDirectoryName: null,
 };
 
 state.chunks.set(state.activeChunkKey, state.data);
 state.loadedChunkKeys.add(state.activeChunkKey);
 state.histories.set(state.activeChunkKey, { undo: [], redo: [] });
 
-const resourceSelectOptions = RESOURCE_TYPES.map(
-  (entry) => `<option value="${entry.id}">${entry.label}</option>`,
-).join('');
+const resourceSelectOptions = state.worldObjectTypes
+  .filter((entry) => entry.behavior === 'harvestable')
+  .map((entry) => `<option value="${entry.id}">${entry.name}</option>`)
+  .join('');
 const monsterSelectOptions = MONSTER_TYPES.map(
   (entry) => `<option value="${entry.id}">${entry.label}</option>`,
 ).join('');
-const objectSelectOptions = OBJECT_TYPES.map(
-  (entry) => `<option value="${entry.id}">${entry.label}</option>`,
-).join('');
+const objectSelectOptions = state.worldObjectTypes
+  .filter((entry) => entry.behavior !== 'harvestable' && entry.behavior !== 'npc')
+  .map((entry) => `<option value="${entry.id}">${entry.name}</option>`)
+  .join('');
 const npcSelectOptions = NPC_TYPES.map(
   (entry) => `<option value="${entry.id}">${entry.label}</option>`,
 ).join('');
@@ -331,7 +411,8 @@ app.innerHTML = `
   <aside class="sidebar">
     <div class="panel">
       <h3>Map Making</h3>
-      <div class="note">Editor auto-loads the live game map from ${CANONICAL_WORLD_MAP_URL} when available.</div>
+      <div class="row row-buttons"><button id="connectProjectFolder" class="secondary">Connect Project Folder</button></div>
+      <div class="note" id="projectFolderStatus">No project folder connected</div>
     </div>
 
     <div class="panel">
@@ -741,6 +822,8 @@ const redoActionButton = requireElement<HTMLButtonElement>('#redoAction', 'Redo 
 const resetDefaultButton = requireElement<HTMLButtonElement>('#resetDefault', 'Reset button not found');
 const clearEntitiesButton = requireElement<HTMLButtonElement>('#clearEntities', 'Clear entities button not found');
 const exportButton = requireElement<HTMLButtonElement>('#exportJson', 'Save Map button not found');
+const connectProjectFolderButton = requireElement<HTMLButtonElement>('#connectProjectFolder', 'Connect Project Folder button not found');
+const projectFolderStatusElement = requireElement<HTMLDivElement>('#projectFolderStatus', 'Project folder status not found');
 // Removed exportWorldButton and importInput
 const editorViewport = requireElement<HTMLElement>('.canvas-wrap', 'Editor viewport not found');
 const selectionSummaryElement = requireElement<HTMLDivElement>('#selectionSummary', 'Selection summary not found');
@@ -857,6 +940,138 @@ let questEditorDraft: QuestIndexEntry = buildDefaultQuestDefinition('');
 let questEditorSelectedStepIndex = 0;
 let questEditorSelectedObjectiveIndex = 0;
 let tileTypesSyncSignature = '';
+let worldObjectTypesSyncSignature = '';
+
+function supportsFileSystemAccess(): boolean {
+  return typeof (window as unknown as { showDirectoryPicker?: () => Promise<any> }).showDirectoryPicker === 'function';
+}
+
+async function ensureProjectFolderWritePermission(handle: any): Promise<void> {
+  const queryPermission = handle?.queryPermission as ((options: { mode: 'readwrite' }) => Promise<string>) | undefined;
+  const requestPermission = handle?.requestPermission as ((options: { mode: 'readwrite' }) => Promise<string>) | undefined;
+
+  if (queryPermission) {
+    const existing = await queryPermission.call(handle, { mode: 'readwrite' });
+    if (existing === 'granted') {
+      return;
+    }
+  }
+
+  if (!requestPermission) {
+    throw new Error('Browser does not support requesting write permission for this folder.');
+  }
+
+  const granted = await requestPermission.call(handle, { mode: 'readwrite' });
+  if (granted !== 'granted') {
+    throw new Error('Write permission denied. Please reconnect folder and allow write access.');
+  }
+}
+
+async function folderHasDirectory(handle: any, name: string): Promise<boolean> {
+  try {
+    await handle.getDirectoryHandle(name, { create: false });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function folderHasFile(handle: any, name: string): Promise<boolean> {
+  try {
+    await handle.getFileHandle(name, { create: false });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function validateProjectRootFolder(handle: any): Promise<void> {
+  const [hasPublicDir, hasServerDir, hasPackageJson] = await Promise.all([
+    folderHasDirectory(handle, 'public'),
+    folderHasDirectory(handle, 'server'),
+    folderHasFile(handle, 'package.json'),
+  ]);
+
+  if (!hasPublicDir || !hasServerDir || !hasPackageJson) {
+    throw new Error(
+      "Selected folder is not your game project root. Pick the folder that contains 'package.json', 'public/', and 'server/' (for this workspace, that should be the Game folder).",
+    );
+  }
+}
+
+function updateProjectFolderStatusLabel(): void {
+  if (!supportsFileSystemAccess()) {
+    projectFolderStatusElement.textContent = 'Local project save unsupported in this browser';
+    return;
+  }
+
+  if (!state.projectDirectoryHandle) {
+    projectFolderStatusElement.textContent = 'No project folder connected';
+    return;
+  }
+
+  projectFolderStatusElement.textContent = `Connected: ${state.projectDirectoryName ?? 'project folder'}`;
+}
+
+async function connectProjectFolder(): Promise<boolean> {
+  if (!supportsFileSystemAccess()) {
+    window.alert('This browser does not support local folder writes. Use Chrome or Edge.');
+    updateProjectFolderStatusLabel();
+    return false;
+  }
+
+  try {
+    const picker = (window as unknown as { showDirectoryPicker: (options?: { mode?: 'readwrite' | 'read' }) => Promise<any> }).showDirectoryPicker;
+    const handle = await picker({ mode: 'readwrite' });
+    await ensureProjectFolderWritePermission(handle);
+    await validateProjectRootFolder(handle);
+    state.projectDirectoryHandle = handle;
+    state.projectDirectoryName = String(handle?.name ?? 'project');
+    updateProjectFolderStatusLabel();
+    window.alert(`Connected project folder '${state.projectDirectoryName}'. Save Map will now write to ${PROJECT_WORLD_MAP_RELATIVE_PATH}.`);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    window.alert(message ? `Project folder connection cancelled: ${message}` : 'Project folder connection cancelled.');
+    updateProjectFolderStatusLabel();
+    return false;
+  }
+}
+
+async function getOrCreateDirectory(root: any, segments: string[]): Promise<any> {
+  let current = root;
+  for (const segment of segments) {
+    current = await current.getDirectoryHandle(segment, { create: true });
+  }
+
+  return current;
+}
+
+async function writeProjectJsonFile(relativeFilePath: string, value: unknown): Promise<void> {
+  if (!state.projectDirectoryHandle) {
+    const connected = await connectProjectFolder();
+    if (!connected || !state.projectDirectoryHandle) {
+      throw new Error('Project folder not connected.');
+    }
+  }
+
+  await ensureProjectFolderWritePermission(state.projectDirectoryHandle);
+  await validateProjectRootFolder(state.projectDirectoryHandle);
+
+  const normalized = String(relativeFilePath ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const pathParts = normalized.split('/').filter(Boolean);
+  if (pathParts.length < 2) {
+    throw new Error(`Invalid relative path '${relativeFilePath}'.`);
+  }
+
+  const fileName = pathParts[pathParts.length - 1];
+  const directoryParts = pathParts.slice(0, -1);
+  const directoryHandle = await getOrCreateDirectory(state.projectDirectoryHandle, directoryParts);
+  const fileHandle = await directoryHandle.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(`${JSON.stringify(value, null, 2)}\n`);
+  await writable.close();
+}
 
 function appendDebugLog(label: string, details: string): void {
   const time = new Date().toISOString().slice(11, 23);
@@ -869,6 +1084,8 @@ function appendDebugLog(label: string, details: string): void {
   debugLogElement.textContent = debugLogLines.join('\n');
   console.debug('[MapEditor]', line);
 }
+
+updateProjectFolderStatusLabel();
 
 function normalizeTileTypes(input: unknown): TileTypeDefinition[] {
   if (!Array.isArray(input)) {
@@ -895,6 +1112,207 @@ function normalizeTileTypes(input: unknown): TileTypeDefinition[] {
     })
     .filter((entry): entry is TileTypeDefinition => entry !== null)
     .sort((a, b) => a.id - b.id);
+}
+
+function normalizeWorldObjectBehavior(value: unknown): WorldObjectBehavior {
+  const parsed = String(value ?? '').trim();
+  if (parsed === 'harvestable' || parsed === 'station' || parsed === 'bank' || parsed === 'shop' || parsed === 'npc') {
+    return parsed;
+  }
+
+  return 'decorative';
+}
+
+function normalizeWorldObjectTypes(input: unknown): WorldObjectTypeDefinition[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((entry) => {
+      const candidate = entry as Record<string, unknown>;
+      const id = String(candidate?.id ?? '').trim();
+      const name = String(candidate?.name ?? '').trim();
+      if (!id || !name) {
+        return null;
+      }
+
+      return {
+        id,
+        name,
+        behavior: normalizeWorldObjectBehavior(candidate?.behavior),
+        blocksMovement: Boolean(candidate?.blocksMovement),
+        image: String(candidate?.image ?? '').trim(),
+        examineText: String(candidate?.examineText ?? "It's an object."),
+        tags: Array.isArray(candidate?.tags)
+          ? candidate.tags.map((tag: unknown) => String(tag ?? '').trim()).filter(Boolean)
+          : [],
+        behaviorConfig:
+          candidate?.behaviorConfig && typeof candidate.behaviorConfig === 'object'
+            ? { ...(candidate.behaviorConfig as Record<string, unknown>) }
+            : {},
+      };
+    })
+    .filter((entry): entry is WorldObjectTypeDefinition => entry !== null)
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function getSelectableWorldObjectTypesForLayer(layer: LayerMode): WorldObjectTypeDefinition[] {
+  if (layer === 'resources') {
+    return state.worldObjectTypes.filter((entry) => entry.behavior === 'harvestable');
+  }
+
+  if (layer === 'objects') {
+    return state.worldObjectTypes.filter((entry) => entry.behavior !== 'harvestable' && entry.behavior !== 'npc');
+  }
+
+  return state.worldObjectTypes;
+}
+
+function getWorldObjectTypeById(objectTypeId: string): WorldObjectTypeDefinition | null {
+  return state.worldObjectTypes.find((entry) => entry.id === objectTypeId) ?? null;
+}
+
+function getWorldObjectTypeByIdFromList(
+  worldObjectTypes: WorldObjectTypeDefinition[],
+  objectTypeId: string,
+): WorldObjectTypeDefinition | null {
+  return worldObjectTypes.find((entry) => entry.id === objectTypeId) ?? null;
+}
+
+function resolveSelectedWorldObjectTypeForLayer(layer: LayerMode): WorldObjectTypeDefinition | null {
+  const candidates = getSelectableWorldObjectTypesForLayer(layer);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const selected = candidates.find((entry) => entry.id === state.selectedWorldObjectTypeId) ?? candidates[0];
+  state.selectedWorldObjectTypeId = selected.id;
+  return selected;
+}
+
+function normalizeWorldObjectPlacement(rawEntry: unknown, index: number): WorldObjectPlacement | null {
+  if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
+    return null;
+  }
+
+  const entry = rawEntry as Record<string, unknown>;
+  const objectTypeId = String(entry.objectTypeId ?? '').trim();
+  if (!objectTypeId) {
+    return null;
+  }
+
+  const tileX = Math.floor(Number(entry.tileX ?? 0));
+  const tileY = Math.floor(Number(entry.tileY ?? 0));
+  const parsedNodeType = String(entry.nodeType ?? '').trim();
+  const nodeType: 'tree' | 'rock' | undefined = parsedNodeType === 'rock' ? 'rock' : parsedNodeType === 'tree' ? 'tree' : undefined;
+
+  return {
+    id: normalizeText(String(entry.id ?? ''), `world-object-${index + 1}`),
+    objectTypeId,
+    tileX,
+    tileY,
+    ...(typeof entry.resourceId === 'string' && entry.resourceId.trim() ? { resourceId: entry.resourceId.trim() } : {}),
+    ...(nodeType ? { nodeType } : {}),
+    ...(Number.isFinite(Number(entry.respawnMs)) ? { respawnMs: Math.max(250, Math.floor(Number(entry.respawnMs))) } : {}),
+    ...(typeof entry.name === 'string' && entry.name.trim() ? { name: entry.name.trim() } : {}),
+    ...(typeof entry.blocksMovement === 'boolean' ? { blocksMovement: entry.blocksMovement } : {}),
+    ...(typeof entry.examineText === 'string' && entry.examineText.trim() ? { examineText: entry.examineText.trim() } : {}),
+  };
+}
+
+function mapLegacyPlacementsToWorldObjects(
+  resources: ResourcePlacement[],
+  objects: ObjectPlacement[],
+): WorldObjectPlacement[] {
+  const mappedResources: WorldObjectPlacement[] = resources.map((entry, index) => ({
+    id: normalizeText(entry.id, `resource-${index + 1}`),
+    objectTypeId: normalizeText(entry.resourceId, `resource_type_${index + 1}`),
+    tileX: Math.floor(Number(entry.tileX ?? 0)),
+    tileY: Math.floor(Number(entry.tileY ?? 0)),
+    resourceId: normalizeText(entry.resourceId, `resource_type_${index + 1}`),
+    nodeType: (entry.nodeType === 'rock' ? 'rock' : 'tree') as 'tree' | 'rock',
+    respawnMs: Math.max(250, Math.floor(Number(entry.respawnMs ?? 5000))),
+  }));
+
+  const mappedObjects: WorldObjectPlacement[] = objects.map((entry, index) => ({
+    id: normalizeText(entry.id, `object-${index + 1}`),
+    objectTypeId: normalizeText(entry.objectTypeId, `object_type_${index + 1}`),
+    tileX: Math.floor(Number(entry.tileX ?? 0)),
+    tileY: Math.floor(Number(entry.tileY ?? 0)),
+    name: normalizeText(entry.name),
+    blocksMovement: Boolean(entry.blocksMovement),
+    examineText: normalizeText(entry.examineText),
+  }));
+
+  return [...mappedResources, ...mappedObjects];
+}
+
+function mapWorldObjectsToLegacyPlacements(
+  worldObjects: WorldObjectPlacement[],
+  worldObjectTypes: WorldObjectTypeDefinition[],
+): { resources: ResourcePlacement[]; objects: ObjectPlacement[] } {
+  const resources: ResourcePlacement[] = [];
+  const objects: ObjectPlacement[] = [];
+
+  for (const [index, entry] of worldObjects.entries()) {
+    const worldObjectType = getWorldObjectTypeByIdFromList(worldObjectTypes, entry.objectTypeId);
+    const behavior = worldObjectType?.behavior ?? 'decorative';
+    const behaviorConfig = (worldObjectType?.behaviorConfig ?? {}) as Record<string, unknown>;
+
+    if (behavior === 'harvestable') {
+      const resourceId = normalizeText(
+        entry.resourceId
+          ?? String(behaviorConfig.resourceId ?? '').trim()
+          ?? worldObjectType?.id
+          ?? entry.objectTypeId,
+        entry.objectTypeId,
+      );
+      const configNodeType = String(behaviorConfig.nodeType ?? '').trim() === 'rock' ? 'rock' : 'tree';
+      const nodeType = entry.nodeType === 'rock' ? 'rock' : entry.nodeType === 'tree' ? 'tree' : configNodeType;
+      const configRespawnMs = Number(behaviorConfig.respawnMs ?? 5000);
+      const respawnMs = Math.max(
+        250,
+        Math.floor(Number(entry.respawnMs ?? (Number.isFinite(configRespawnMs) ? configRespawnMs : 5000))),
+      );
+
+      resources.push({
+        id: normalizeText(entry.id, `resource-${index + 1}`),
+        nodeType,
+        resourceId,
+        tileX: Math.floor(Number(entry.tileX ?? 0)),
+        tileY: Math.floor(Number(entry.tileY ?? 0)),
+        respawnMs,
+      });
+      continue;
+    }
+
+    if (behavior !== 'npc') {
+      objects.push({
+        id: normalizeText(entry.id, `object-${index + 1}`),
+        objectTypeId: entry.objectTypeId,
+        name: normalizeText(String(entry.name ?? worldObjectType?.name ?? ''), worldObjectType?.name ?? 'Object'),
+        tileX: Math.floor(Number(entry.tileX ?? 0)),
+        tileY: Math.floor(Number(entry.tileY ?? 0)),
+        blocksMovement:
+          entry.blocksMovement === undefined
+            ? Boolean(worldObjectType?.blocksMovement)
+            : Boolean(entry.blocksMovement),
+        examineText: normalizeText(
+          String(entry.examineText ?? worldObjectType?.examineText ?? ''),
+          worldObjectType?.examineText ?? "It's an object.",
+        ),
+      });
+    }
+  }
+
+  return { resources, objects };
+}
+
+function syncChunkLegacyPlacementsFromWorldObjects(chunk: EditorChunkData): void {
+  const legacyPlacements = mapWorldObjectsToLegacyPlacements(chunk.worldObjects, state.worldObjectTypes);
+  chunk.resources = legacyPlacements.resources;
+  chunk.objects = legacyPlacements.objects;
 }
 
 function resolveTileImageUrl(input: string): string {
@@ -975,6 +1393,41 @@ function refreshTileTypeSelectOptions(): void {
   selectionTerrainTypeSelect.value = String(state.selectedTileType);
 }
 
+function refreshWorldObjectTypeSelectOptions(): void {
+  const resourceOptions = getSelectableWorldObjectTypesForLayer('resources')
+    .map((entry) => `<option value="${entry.id}">${entry.name}</option>`)
+    .join('');
+  const objectOptions = getSelectableWorldObjectTypesForLayer('objects')
+    .map((entry) => `<option value="${entry.id}">${entry.name}</option>`)
+    .join('');
+
+  resourceTypeSelect.innerHTML = resourceOptions;
+  selectionResourceTypeSelect.innerHTML = resourceOptions;
+  objectTypeSelect.innerHTML = objectOptions;
+  selectionObjectTypeSelect.innerHTML = objectOptions;
+
+  const selectedResourceType = resolveSelectedWorldObjectTypeForLayer('resources');
+  const selectedObjectType = resolveSelectedWorldObjectTypeForLayer('objects');
+
+  if (selectedResourceType) {
+    if (resourceTypeSelect.options.length > 0) {
+      resourceTypeSelect.value = selectedResourceType.id;
+    }
+    if (selectionResourceTypeSelect.options.length > 0) {
+      selectionResourceTypeSelect.value = selectedResourceType.id;
+    }
+  }
+
+  if (selectedObjectType) {
+    if (objectTypeSelect.options.length > 0) {
+      objectTypeSelect.value = selectedObjectType.id;
+    }
+    if (selectionObjectTypeSelect.options.length > 0) {
+      selectionObjectTypeSelect.value = selectedObjectType.id;
+    }
+  }
+}
+
 async function loadTileTypesIfAvailable(): Promise<void> {
   try {
     const response = await fetch(TILE_TYPES_URL, { cache: 'no-store' });
@@ -1005,6 +1458,41 @@ async function loadTileTypesIfAvailable(): Promise<void> {
   } catch (error) {
     appendDebugLog('tile-types', `Exception: ${error instanceof Error ? error.message : String(error)}`);
     refreshTileTypeSelectOptions();
+  }
+}
+
+async function loadWorldObjectTypesIfAvailable(): Promise<void> {
+  try {
+    const response = await fetch(WORLD_OBJECT_TYPES_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      appendDebugLog('world-object-types', `Failed to fetch worldObjectTypes.json (${response.status}); using defaults.`);
+      refreshWorldObjectTypeSelectOptions();
+      return;
+    }
+
+    const parsed = normalizeWorldObjectTypes(await response.json());
+    if (!parsed.length) {
+      appendDebugLog('world-object-types', 'worldObjectTypes.json was empty or invalid; using defaults.');
+      refreshWorldObjectTypeSelectOptions();
+      return;
+    }
+
+    const signature = JSON.stringify(parsed);
+    if (signature === worldObjectTypesSyncSignature) {
+      return;
+    }
+
+    state.worldObjectTypes = parsed;
+    worldObjectTypesSyncSignature = signature;
+    appendDebugLog(
+      'world-object-types',
+      `Loaded world object types: ${parsed.length}`,
+    );
+    refreshWorldObjectTypeSelectOptions();
+    updateStatus();
+  } catch (error) {
+    appendDebugLog('world-object-types', `Exception: ${error instanceof Error ? error.message : String(error)}`);
+    refreshWorldObjectTypeSelectOptions();
   }
 }
 
@@ -1173,11 +1661,7 @@ function getObjectIcon(objectTypeId: string): HTMLCanvasElement {
   return getTintedEditorIcon('rock', '#9b9b9b');
 }
 
-function getNpcIcon(npcType: string): HTMLCanvasElement {
-  if (npcType === 'bank_chest') {
-    return getTintedEditorIcon('rock', '#b08b4f');
-  }
-
+function getNpcIcon(_npcType: string): HTMLCanvasElement {
   return getTintedEditorIcon('player', '#c9a4ff');
 }
 
@@ -1226,6 +1710,9 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
         id: 'bank_building-1', objectTypeId: 'bank_building', name: 'Bank building', tileX: 40, tileY: 36, blocksMovement: true, examineText: 'A sturdy building that houses the bank chest.'
       },
       {
+        id: 'bank_chest-1', objectTypeId: 'bank_chest', name: 'Bank chest', tileX: 41, tileY: 36, blocksMovement: true, examineText: 'A sturdy chest for secure item storage.'
+      },
+      {
         id: 'general_store_building-1', objectTypeId: 'general_store_building', name: 'General store building', tileX: 44, tileY: 36, blocksMovement: true, examineText: 'A simple shop building for local traders.'
       },
       {
@@ -1237,13 +1724,10 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
     ];
     npcs = [
       {
-        id: 'npc-shopkeeper-1', type: 'shopkeeper', name: 'Bob', tileX: 44, tileY: 36, examineText: 'A friendly general store shopkeeper.', talkText: 'Hello there! Need supplies or want to sell your goods?', questStartIds: []
+        id: 'npc-shopkeeper-1', type: 'shopkeeper', name: 'Bob', image: '/assets/npcs/shopkeeper.png', tileX: 44, tileY: 36, examineText: 'A friendly general store shopkeeper.', talkText: 'Hello there! Need supplies or want to sell your goods?', questStartIds: []
       },
       {
-        id: 'npc-bank_chest-1', type: 'bank_chest', name: 'Bank chest', tileX: 41, tileY: 36, examineText: 'A sturdy chest for secure item storage.', talkText: 'Your valuables are safe inside.', questStartIds: []
-      },
-      {
-        id: 'npc-villager-1', type: 'villager', name: 'Villager', tileX: 38, tileY: 38, examineText: 'A local villager going about their day.', talkText: "Lovely weather for skilling, isn't it?", questStartIds: []
+        id: 'npc-villager-1', type: 'villager', name: 'Villager', image: '/assets/npcs/villager.png', tileX: 38, tileY: 38, examineText: 'A local villager going about their day.', talkText: "Lovely weather for skilling, isn't it?", questStartIds: []
       },
     ];
     monsters = [
@@ -1259,18 +1743,8 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
     ];
   }
 
-  return {
-    version: WORLD_DATA_VERSION,
-    chunkX,
-    chunkY,
-    width: MAP_WIDTH_TILES,
-    height: MAP_HEIGHT_TILES,
-    terrain: defaultTerrain,
-    resources,
-    monsters,
-    objects,
-    npcs,
-  };
+  const worldObjects = mapLegacyPlacementsToWorldObjects(resources, objects);
+  const legacyPlacements = mapWorldObjectsToLegacyPlacements(worldObjects, DEFAULT_WORLD_OBJECT_TYPES);
 
   return {
     version: WORLD_DATA_VERSION,
@@ -1279,9 +1753,10 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
     width: MAP_WIDTH_TILES,
     height: MAP_HEIGHT_TILES,
     terrain: defaultTerrain,
-    resources: [],
-    monsters: [],
-    objects,
+    worldObjects,
+    resources: legacyPlacements.resources,
+    monsters,
+    objects: legacyPlacements.objects,
     npcs,
   };
 }
@@ -1304,6 +1779,7 @@ function ensureChunk(chunkX: number, chunkY: number): EditorChunkData {
 function cloneChunkSnapshot(snapshot: ChunkSnapshot): ChunkSnapshot {
   return {
     terrain: snapshot.terrain.map((row) => [...row]),
+    worldObjects: snapshot.worldObjects.map((entry) => ({ ...entry })),
     resources: snapshot.resources.map((entry) => ({ ...entry })),
     monsters: snapshot.monsters.map((entry) => ({ ...entry })),
     objects: snapshot.objects.map((entry) => ({ ...entry })),
@@ -1317,6 +1793,7 @@ function cloneChunkSnapshot(snapshot: ChunkSnapshot): ChunkSnapshot {
 function captureChunkSnapshot(chunk: EditorChunkData): ChunkSnapshot {
   return {
     terrain: chunk.terrain.map((row) => [...row]),
+    worldObjects: chunk.worldObjects.map((entry) => ({ ...entry })),
     resources: chunk.resources.map((entry) => ({ ...entry })),
     monsters: chunk.monsters.map((entry) => ({ ...entry })),
     objects: chunk.objects.map((entry) => ({ ...entry })),
@@ -1329,9 +1806,9 @@ function captureChunkSnapshot(chunk: EditorChunkData): ChunkSnapshot {
 
 function applyChunkSnapshot(chunk: EditorChunkData, snapshot: ChunkSnapshot): void {
   chunk.terrain = snapshot.terrain.map((row) => [...row]);
-  chunk.resources = snapshot.resources.map((entry) => ({ ...entry }));
+  chunk.worldObjects = snapshot.worldObjects.map((entry) => ({ ...entry }));
+  syncChunkLegacyPlacementsFromWorldObjects(chunk);
   chunk.monsters = snapshot.monsters.map((entry) => ({ ...entry }));
-  chunk.objects = snapshot.objects.map((entry) => ({ ...entry }));
   chunk.npcs = snapshot.npcs.map((entry) => ({
     ...entry,
     questStartIds: Array.isArray(entry.questStartIds) ? [...entry.questStartIds] : [],
@@ -1397,6 +1874,7 @@ function redoActiveChunk(): void {
 function mutateActiveChunk(mutator: () => void): void {
   const before = captureChunkSnapshot(state.data);
   mutator();
+  syncChunkLegacyPlacementsFromWorldObjects(state.data);
   const changed = commitHistoryFromSnapshot(before);
   if (changed) {
     addedChunkKeys.add(state.activeChunkKey);
@@ -2298,6 +2776,40 @@ function normalizeChunkFromParsed(
     throw new Error('Invalid terrain dimensions. Expected 80x80.');
   }
 
+  const rawWorldObjects = (parsed as Partial<EditorChunkData>).worldObjects;
+  if (!Array.isArray(rawWorldObjects)) {
+    throw new Error('Invalid chunk worldObjects. Legacy resources/objects chunk format is not supported.');
+  }
+
+  const worldObjects = (rawWorldObjects as unknown[])
+      .map((entry, index) => normalizeWorldObjectPlacement(entry, index))
+      .filter((entry): entry is WorldObjectPlacement => entry !== null)
+
+  const rawNpcs = Array.isArray((parsed as Partial<EditorChunkData>).npcs)
+    ? ((parsed as Partial<EditorChunkData>).npcs as NpcPlacement[])
+    : [];
+
+  for (const npc of rawNpcs) {
+    const npcTypeId = normalizeText(npc?.type, 'villager');
+    if (npcTypeId !== 'bank_chest') {
+      continue;
+    }
+
+    const tileX = Math.max(0, Math.min(MAP_WIDTH_TILES - 1, Math.floor(Number(npc?.tileX ?? 0))));
+    const tileY = Math.max(0, Math.min(MAP_HEIGHT_TILES - 1, Math.floor(Number(npc?.tileY ?? 0))));
+    worldObjects.push({
+      id: normalizeText(npc?.id, `bank-chest-${targetChunkX}-${targetChunkY}-${tileX}-${tileY}`).replace(/^npc-/, ''),
+      objectTypeId: 'bank_chest',
+      tileX,
+      tileY,
+      name: normalizeText(npc?.name, 'Bank chest'),
+      blocksMovement: true,
+      examineText: normalizeText(npc?.examineText, 'A sturdy chest for secure item storage.'),
+    });
+  }
+
+  const legacyPlacements = mapWorldObjectsToLegacyPlacements(worldObjects, state.worldObjectTypes);
+
   return {
     version: Number(parsed.version ?? WORLD_DATA_VERSION),
     chunkX: targetChunkX,
@@ -2305,23 +2817,27 @@ function normalizeChunkFromParsed(
     width: MAP_WIDTH_TILES,
     height: MAP_HEIGHT_TILES,
     terrain: parsed.terrain as number[][],
-    resources: Array.isArray(parsed.resources) ? parsed.resources as ResourcePlacement[] : [],
+    worldObjects,
+    resources: legacyPlacements.resources,
     monsters: Array.isArray(parsed.monsters) ? parsed.monsters as MonsterPlacement[] : [],
-    objects: Array.isArray((parsed as Partial<EditorChunkData>).objects)
-      ? (parsed as Partial<EditorChunkData>).objects as ObjectPlacement[]
-      : [],
-    npcs: Array.isArray((parsed as Partial<EditorChunkData>).npcs)
-      ? ((parsed as Partial<EditorChunkData>).npcs as NpcPlacement[]).map((npc, index) => ({
-        id: normalizeText(npc?.id, `npc-${targetChunkX}-${targetChunkY}-${index + 1}`),
-        type: normalizeText(npc?.type, 'villager'),
-        name: normalizeText(npc?.name, `NPC ${index + 1}`),
-        tileX: Math.max(0, Math.min(MAP_WIDTH_TILES - 1, Math.floor(Number(npc?.tileX ?? 0)))),
-        tileY: Math.max(0, Math.min(MAP_HEIGHT_TILES - 1, Math.floor(Number(npc?.tileY ?? 0)))),
-        examineText: normalizeText(npc?.examineText, 'A local villager.'),
-        talkText: normalizeText(npc?.talkText, 'Hello there.'),
-        questStartIds: normalizeQuestStartIds(npc?.questStartIds),
-      }))
-      : [],
+    objects: legacyPlacements.objects,
+    npcs: rawNpcs
+      .filter((npc) => normalizeText(npc?.type, 'villager') !== 'bank_chest')
+      .map((npc, index) => {
+        const npcTypeId = normalizeText(npc?.type, 'villager');
+        const npcType = NPC_TYPES.find((entry) => entry.id === npcTypeId);
+        return {
+          id: normalizeText(npc?.id, `npc-${targetChunkX}-${targetChunkY}-${index + 1}`),
+          type: npcTypeId,
+          name: normalizeText(npc?.name, `NPC ${index + 1}`),
+          image: normalizeText(String(npc?.image ?? ''), npcType?.image ?? ''),
+          tileX: Math.max(0, Math.min(MAP_WIDTH_TILES - 1, Math.floor(Number(npc?.tileX ?? 0)))),
+          tileY: Math.max(0, Math.min(MAP_HEIGHT_TILES - 1, Math.floor(Number(npc?.tileY ?? 0)))),
+          examineText: normalizeText(npc?.examineText, 'A local villager.'),
+          talkText: normalizeText(npc?.talkText, 'Hello there.'),
+          questStartIds: normalizeQuestStartIds(npc?.questStartIds),
+        };
+      }),
   };
 }
 
@@ -2482,11 +2998,14 @@ function updateSelectionPanel(): void {
     selectionResourceRow.style.display = 'block';
     if (resource) {
       selectionResourceTypeSelect.value = resource.resourceId;
+      state.selectedWorldObjectTypeId = resource.resourceId;
       selectionResourceRespawnInput.value = String(resource.respawnMs);
     } else {
-      selectionResourceTypeSelect.value = state.selectedResourceId;
-      const defaultResource = RESOURCE_TYPES.find((entry) => entry.id === state.selectedResourceId) ?? RESOURCE_TYPES[0];
-      selectionResourceRespawnInput.value = String(defaultResource.respawnMs);
+      const selectedType = resolveSelectedWorldObjectTypeForLayer('resources');
+      selectionResourceTypeSelect.value = selectedType?.id ?? '';
+      const behaviorConfig = (selectedType?.behaviorConfig ?? {}) as Record<string, unknown>;
+      const respawnRaw = Number(behaviorConfig.respawnMs ?? 5000);
+      selectionResourceRespawnInput.value = String(Number.isFinite(respawnRaw) ? Math.max(250, Math.floor(respawnRaw)) : 5000);
     }
   } else {
     selectionMonsterRow.style.display = 'none';
@@ -2505,7 +3024,10 @@ function updateSelectionPanel(): void {
     }
   } else if (state.layer === 'objects') {
     selectionObjectRow.style.display = 'block';
-    selectionObjectTypeSelect.value = object?.objectTypeId ?? state.selectedObjectTypeId;
+    selectionObjectTypeSelect.value = object?.objectTypeId ?? (resolveSelectedWorldObjectTypeForLayer('objects')?.id ?? '');
+    if (object?.objectTypeId) {
+      state.selectedWorldObjectTypeId = object.objectTypeId;
+    }
   } else if (state.layer === 'npcs') {
     selectionNpcRow.style.display = 'block';
     const selectionKey = `${mapped.chunkX},${mapped.chunkY}:${mapped.localTileX},${mapped.localTileY}`;
@@ -2973,9 +3495,15 @@ function getTileFromMouse(event: MouseEvent): { worldTileX: number; worldTileY: 
 }
 
 function removeResourceAt(tileX: number, tileY: number): void {
-  state.data.resources = state.data.resources.filter(
-    (entry) => entry.tileX !== tileX || entry.tileY !== tileY,
-  );
+  state.data.worldObjects = state.data.worldObjects.filter((entry) => {
+    if (entry.tileX !== tileX || entry.tileY !== tileY) {
+      return true;
+    }
+
+    const worldObjectType = getWorldObjectTypeById(entry.objectTypeId);
+    return worldObjectType?.behavior !== 'harvestable';
+  });
+  syncChunkLegacyPlacementsFromWorldObjects(state.data);
 }
 
 function removeMonsterAt(tileX: number, tileY: number): void {
@@ -2985,9 +3513,16 @@ function removeMonsterAt(tileX: number, tileY: number): void {
 }
 
 function removeObjectAt(tileX: number, tileY: number): void {
-  state.data.objects = state.data.objects.filter(
-    (entry) => entry.tileX !== tileX || entry.tileY !== tileY,
-  );
+  state.data.worldObjects = state.data.worldObjects.filter((entry) => {
+    if (entry.tileX !== tileX || entry.tileY !== tileY) {
+      return true;
+    }
+
+    const worldObjectType = getWorldObjectTypeById(entry.objectTypeId);
+    const behavior = worldObjectType?.behavior ?? 'decorative';
+    return behavior === 'harvestable' || behavior === 'npc';
+  });
+  syncChunkLegacyPlacementsFromWorldObjects(state.data);
 }
 
 function removeNpcAt(tileX: number, tileY: number): void {
@@ -2997,7 +3532,17 @@ function removeNpcAt(tileX: number, tileY: number): void {
 }
 
 function nextResourceId(resourceId: string): string {
-  const count = state.data.resources.filter((entry) => entry.resourceId === resourceId).length + 1;
+  const count = state.data.worldObjects.filter((entry) => {
+    const worldObjectType = getWorldObjectTypeById(entry.objectTypeId);
+    const behavior = worldObjectType?.behavior ?? 'decorative';
+    if (behavior !== 'harvestable') {
+      return false;
+    }
+
+    const behaviorConfig = (worldObjectType?.behaviorConfig ?? {}) as Record<string, unknown>;
+    const entryResourceId = String(entry.resourceId ?? behaviorConfig.resourceId ?? entry.objectTypeId).trim();
+    return entryResourceId === resourceId;
+  }).length + 1;
   return `${resourceId}-${count}`;
 }
 
@@ -3007,8 +3552,48 @@ function nextMonsterId(monsterId: string): string {
 }
 
 function nextObjectId(objectTypeId: string): string {
-  const count = state.data.objects.filter((entry) => entry.objectTypeId === objectTypeId).length + 1;
+  const count = state.data.worldObjects.filter((entry) => {
+    const worldObjectType = getWorldObjectTypeById(entry.objectTypeId);
+    const behavior = worldObjectType?.behavior ?? 'decorative';
+    if (behavior === 'harvestable' || behavior === 'npc') {
+      return false;
+    }
+
+    return entry.objectTypeId === objectTypeId;
+  }).length + 1;
   return `${objectTypeId}-${count}`;
+}
+
+function addResourceWorldObjectAt(tileX: number, tileY: number, selectedType: WorldObjectTypeDefinition, id?: string): void {
+  const behaviorConfig = (selectedType.behaviorConfig ?? {}) as Record<string, unknown>;
+  const resourceId = String(behaviorConfig.resourceId ?? selectedType.id).trim() || selectedType.id;
+  const nodeType: 'tree' | 'rock' = String(behaviorConfig.nodeType ?? '').trim() === 'rock' ? 'rock' : 'tree';
+  const respawnRaw = Number(behaviorConfig.respawnMs ?? 5000);
+  const respawnMs = Number.isFinite(respawnRaw) ? Math.max(250, Math.floor(respawnRaw)) : 5000;
+
+  state.data.worldObjects.push({
+    id: id ?? nextResourceId(resourceId),
+    objectTypeId: selectedType.id,
+    tileX,
+    tileY,
+    resourceId,
+    nodeType,
+    respawnMs,
+  });
+  syncChunkLegacyPlacementsFromWorldObjects(state.data);
+}
+
+function addObjectWorldObjectAt(tileX: number, tileY: number, objectType: WorldObjectTypeDefinition, id?: string): void {
+  state.data.worldObjects.push({
+    id: id ?? nextObjectId(objectType.id),
+    objectTypeId: objectType.id,
+    tileX,
+    tileY,
+    name: objectType.name,
+    blocksMovement: objectType.blocksMovement,
+    examineText: objectType.examineText,
+  });
+  syncChunkLegacyPlacementsFromWorldObjects(state.data);
 }
 
 function nextNpcId(npcTypeId: string): string {
@@ -3030,15 +3615,14 @@ function placeAt(tileX: number, tileY: number, erase: boolean): void {
   } else if (state.layer === 'resources') {
     removeResourceAt(localTileX, localTileY);
     if (!erase) {
-      const resourceDef = RESOURCE_TYPES.find((entry) => entry.id === state.selectedResourceId) ?? RESOURCE_TYPES[0];
-      state.data.resources.push({
-        id: nextResourceId(resourceDef.id),
-        nodeType: resourceDef.nodeType,
-        resourceId: resourceDef.id,
-        tileX: localTileX,
-        tileY: localTileY,
-        respawnMs: resourceDef.respawnMs,
-      });
+      const selectedType = resolveSelectedWorldObjectTypeForLayer('resources');
+      if (!selectedType) {
+        drawGrid();
+        updateStatus(tileX, tileY);
+        return;
+      }
+
+      addResourceWorldObjectAt(localTileX, localTileY, selectedType);
     }
   } else {
     if (state.layer === 'monsters') {
@@ -3055,16 +3639,14 @@ function placeAt(tileX: number, tileY: number, erase: boolean): void {
     } else if (state.layer === 'objects') {
       removeObjectAt(localTileX, localTileY);
       if (!erase) {
-        const objectType = OBJECT_TYPES.find((entry) => entry.id === state.selectedObjectTypeId) ?? OBJECT_TYPES[0];
-        state.data.objects.push({
-          id: nextObjectId(objectType.id),
-          objectTypeId: objectType.id,
-          name: objectType.name,
-          tileX: localTileX,
-          tileY: localTileY,
-          blocksMovement: objectType.blocksMovement,
-          examineText: objectType.examineText,
-        });
+        const objectType = resolveSelectedWorldObjectTypeForLayer('objects');
+        if (!objectType) {
+          drawGrid();
+          updateStatus(tileX, tileY);
+          return;
+        }
+
+        addObjectWorldObjectAt(localTileX, localTileY, objectType);
       }
     } else if (state.layer === 'npcs') {
       removeNpcAt(localTileX, localTileY);
@@ -3074,6 +3656,7 @@ function placeAt(tileX: number, tileY: number, erase: boolean): void {
           id: nextNpcId(npcType.id),
           type: npcType.id,
           name: npcType.defaultName,
+          image: npcType.image,
           tileX: localTileX,
           tileY: localTileY,
           examineText: npcType.examineText,
@@ -3342,6 +3925,10 @@ clearDebugLogButton.addEventListener('click', () => {
   debugLogElement.textContent = 'Debug log cleared.';
 });
 
+connectProjectFolderButton.addEventListener('click', () => {
+  void connectProjectFolder();
+});
+
 sidebarResizerElement.addEventListener('mousedown', (event) => {
   event.preventDefault();
   isSidebarResizing = true;
@@ -3387,7 +3974,7 @@ tileTypeSelect.addEventListener('change', () => {
 });
 
 resourceTypeSelect.addEventListener('change', () => {
-  state.selectedResourceId = resourceTypeSelect.value;
+  state.selectedWorldObjectTypeId = resourceTypeSelect.value;
 });
 
 monsterTypeSelect.addEventListener('change', () => {
@@ -3395,7 +3982,7 @@ monsterTypeSelect.addEventListener('change', () => {
 });
 
 objectTypeSelect.addEventListener('change', () => {
-  state.selectedObjectTypeId = objectTypeSelect.value;
+  state.selectedWorldObjectTypeId = objectTypeSelect.value;
 });
 
 npcTypeSelect.addEventListener('change', () => {
@@ -3427,9 +4014,9 @@ resetDefaultButton.addEventListener('click', () => {
 
 clearEntitiesButton.addEventListener('click', () => {
   mutateActiveChunk(() => {
-    state.data.resources = [];
+    state.data.worldObjects = [];
     state.data.monsters = [];
-    state.data.objects = [];
+    syncChunkLegacyPlacementsFromWorldObjects(state.data);
     state.data.npcs = [];
     drawGrid();
   });
@@ -3471,20 +4058,28 @@ selectionResourceUpdateButton.addEventListener('click', () => {
 
   const mapped = ensureChunkVisibleByWorldTile(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
   const existing = getResourceAt(mapped.localTileX, mapped.localTileY);
-  const resourceId = selectionResourceTypeSelect.value;
-  const resourceDef = RESOURCE_TYPES.find((entry) => entry.id === resourceId) ?? RESOURCE_TYPES[0];
-  const respawnMs = normalizePositiveInt(Number(selectionResourceRespawnInput.value), resourceDef.respawnMs);
+  const selectedType = getWorldObjectTypeById(selectionResourceTypeSelect.value)
+    ?? resolveSelectedWorldObjectTypeForLayer('resources');
+  if (!selectedType) {
+    return;
+  }
+
+  state.selectedWorldObjectTypeId = selectedType.id;
+  const behaviorConfig = (selectedType.behaviorConfig ?? {}) as Record<string, unknown>;
+  const resourceId = String(behaviorConfig.resourceId ?? selectedType.id).trim() || selectedType.id;
+  const defaultRespawnRaw = Number(behaviorConfig.respawnMs ?? 5000);
+  const defaultRespawnMs = Number.isFinite(defaultRespawnRaw) ? Math.max(250, Math.floor(defaultRespawnRaw)) : 5000;
+  const respawnMs = normalizePositiveInt(Number(selectionResourceRespawnInput.value), defaultRespawnMs);
+  const placementId = existing?.id ?? nextResourceId(resourceId);
 
   mutateActiveChunk(() => {
     removeResourceAt(mapped.localTileX, mapped.localTileY);
-    state.data.resources.push({
-      id: existing?.id ?? nextResourceId(resourceDef.id),
-      nodeType: resourceDef.nodeType,
-      resourceId: resourceDef.id,
-      tileX: mapped.localTileX,
-      tileY: mapped.localTileY,
-      respawnMs,
-    });
+    addResourceWorldObjectAt(mapped.localTileX, mapped.localTileY, selectedType, placementId);
+    const placedWorldObject = state.data.worldObjects.find((entry) => entry.id === placementId);
+    if (placedWorldObject) {
+      placedWorldObject.respawnMs = respawnMs;
+      syncChunkLegacyPlacementsFromWorldObjects(state.data);
+    }
     drawGrid();
   });
 });
@@ -3543,19 +4138,17 @@ selectionObjectUpdateButton.addEventListener('click', () => {
 
   const mapped = ensureChunkVisibleByWorldTile(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
   const existing = getObjectAt(mapped.localTileX, mapped.localTileY);
-  const objectType = OBJECT_TYPES.find((entry) => entry.id === selectionObjectTypeSelect.value) ?? OBJECT_TYPES[0];
+  const objectType = getWorldObjectTypeById(selectionObjectTypeSelect.value)
+    ?? resolveSelectedWorldObjectTypeForLayer('objects');
+  if (!objectType) {
+    return;
+  }
+
+  state.selectedWorldObjectTypeId = objectType.id;
 
   mutateActiveChunk(() => {
     removeObjectAt(mapped.localTileX, mapped.localTileY);
-    state.data.objects.push({
-      id: existing?.id ?? nextObjectId(objectType.id),
-      objectTypeId: objectType.id,
-      name: objectType.name,
-      tileX: mapped.localTileX,
-      tileY: mapped.localTileY,
-      blocksMovement: objectType.blocksMovement,
-      examineText: objectType.examineText,
-    });
+    addObjectWorldObjectAt(mapped.localTileX, mapped.localTileY, objectType, existing?.id ?? nextObjectId(objectType.id));
     drawGrid();
   });
 });
@@ -3588,10 +4181,14 @@ selectionNpcUpdateButton.addEventListener('click', () => {
 
   mutateActiveChunk(() => {
     removeNpcAt(mapped.localTileX, mapped.localTileY);
+    const nextNpcImage = npcType.id === existing?.type
+      ? normalizeText(String(existing?.image ?? ''), npcType.image)
+      : npcType.image;
     state.data.npcs.push({
       id: existingNpcId,
       type: npcType.id,
       name: npcName,
+      image: nextNpcImage,
       tileX: mapped.localTileX,
       tileY: mapped.localTileY,
       examineText: npcExamineText,
@@ -4054,12 +4651,17 @@ exportButton.addEventListener('click', async () => {
     chunks: chunkKeysToSave.map((key) => {
       const chunk = state.chunks.get(key);
       if (!chunk) return null;
+
+      const chunkWorldObjects = chunk.worldObjects;
       return {
-        ...chunk,
+        version: chunk.version,
+        chunkX: chunk.chunkX,
+        chunkY: chunk.chunkY,
+        width: chunk.width,
+        height: chunk.height,
         terrain: chunk.terrain.map((row) => [...row]),
-        resources: [...chunk.resources],
+        worldObjects: chunkWorldObjects.map((entry) => ({ ...entry })),
         monsters: [...chunk.monsters],
-        objects: [...chunk.objects],
         npcs: chunk.npcs.map((npc) => ({
           ...npc,
           questStartIds: Array.isArray(npc.questStartIds) ? [...npc.questStartIds] : [],
@@ -4068,6 +4670,18 @@ exportButton.addEventListener('click', async () => {
     }).filter(Boolean),
   };
   const payload = JSON.stringify(payloadMap, null, 2);
+
+  if (supportsFileSystemAccess()) {
+    try {
+      await writeProjectJsonFile(PROJECT_WORLD_MAP_RELATIVE_PATH, payloadMap);
+      updateProjectFolderStatusLabel();
+      window.alert(`Map saved to ${PROJECT_WORLD_MAP_RELATIVE_PATH}.`);
+      return;
+    } catch (error) {
+      appendDebugLog('map-save', `Local folder save failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   try {
     const response = await fetch(CANONICAL_WORLD_MAP_URL, {
       method: 'PUT',
@@ -4163,6 +4777,7 @@ window.addEventListener('keydown', (event) => {
 });
 
 refreshLayerRows();
+refreshWorldObjectTypeSelectOptions();
 loadSavedSidebarWidth();
 drawGrid();
 scheduleVisibleChunkLoading();
@@ -4171,18 +4786,22 @@ refreshZoneEditorOptions();
 setZoneEditorFormFromZone(null);
 void loadCanonicalWorldMapIfAvailable();
 void loadTileTypesIfAvailable();
+void loadWorldObjectTypesIfAvailable();
 void loadQuestIndexIfAvailable();
 
 window.addEventListener('focus', () => {
   void loadTileTypesIfAvailable();
+  void loadWorldObjectTypesIfAvailable();
 });
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     void loadTileTypesIfAvailable();
+    void loadWorldObjectTypesIfAvailable();
   }
 });
 
 window.setInterval(() => {
   void loadTileTypesIfAvailable();
+  void loadWorldObjectTypesIfAvailable();
 }, 4000);

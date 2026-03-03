@@ -33,6 +33,16 @@ body {
   align-items: center;
 }
 
+.toolbar-shortcuts {
+  margin-bottom: 2px;
+}
+
+.shortcut-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
 .folder-status {
   font-size: 12px;
   color: #b8c1d0;
