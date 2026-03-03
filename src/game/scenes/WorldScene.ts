@@ -702,7 +702,7 @@ export class WorldScene extends Phaser.Scene {
     imagePath: string | null | undefined,
     fallbackTextureKey: string,
   ): string {
-    const normalizedImagePath = String(imagePath ?? '').trim();
+    const normalizedImagePath = this.resolveRuntimeAssetUrl(String(imagePath ?? '').trim());
     if (!normalizedImagePath) {
       return fallbackTextureKey;
     }
@@ -710,6 +710,22 @@ export class WorldScene extends Phaser.Scene {
     const key = `${prefix}-${id}`;
     const loaded = this.ensureEntityTextureLoaded(key, normalizedImagePath);
     return loaded ? key : fallbackTextureKey;
+  }
+
+  private resolveRuntimeAssetUrl(rawPath: string): string {
+    const trimmed = String(rawPath ?? '').trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    if (/^(?:[a-z]+:)?\/\//i.test(trimmed) || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
+      return trimmed;
+    }
+
+    const normalizedAssetPath = trimmed.replace(/^\/+/, '');
+    const baseUrl = String(import.meta.env.BASE_URL ?? '/');
+    const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    return `${normalizedBaseUrl}${normalizedAssetPath}`;
   }
 
   private ensureEntityTextureLoaded(textureKey: string, imagePath: string): boolean {
@@ -1967,6 +1983,11 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private ensureGroundItemTextureLoaded(textureKey: string, imagePath: string): boolean {
+    const resolvedPath = this.resolveRuntimeAssetUrl(imagePath);
+    if (!resolvedPath) {
+      return false;
+    }
+
     if (this.textures.exists(textureKey)) {
       return true;
     }
@@ -1976,7 +1997,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.pendingGroundItemTextureLoads.add(textureKey);
-    this.load.image(textureKey, imagePath);
+    this.load.image(textureKey, resolvedPath);
     this.load.once(`filecomplete-image-${textureKey}`, () => {
       this.pendingGroundItemTextureLoads.delete(textureKey);
     });
@@ -4418,7 +4439,7 @@ export class WorldScene extends Phaser.Scene {
         this.bindItemTooltip(cell, slot.name, slot.gearStats ?? null);
 
         const icon = document.createElement('img');
-        icon.src = slot.image;
+        icon.src = this.resolveRuntimeAssetUrl(slot.image);
         icon.addEventListener('error', () => {
           icon.src = this.getInventoryItemIcon(slot.itemId);
         });
@@ -4620,7 +4641,7 @@ export class WorldScene extends Phaser.Scene {
 
       if (equipped) {
         const icon = document.createElement('img');
-        icon.src = equipped.image;
+        icon.src = this.resolveRuntimeAssetUrl(equipped.image);
         icon.alt = equipped.name;
         icon.width = 1;
         icon.height = 1;
@@ -4889,7 +4910,7 @@ export class WorldScene extends Phaser.Scene {
         this.bindItemTooltip(cell, slot.name, slot.gearStats ?? null);
 
         const icon = document.createElement('img');
-        icon.src = slot.image;
+        icon.src = this.resolveRuntimeAssetUrl(slot.image);
         icon.alt = slot.name;
         icon.width = 1;
         icon.height = 1;
