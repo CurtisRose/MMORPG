@@ -51,4 +51,23 @@ export function runInventorySystemTests() {
   assert.equal(ok, true);
   assert.equal(nonStackableContainer.slots.length, 3);
   assert.deepEqual(nonStackableContainer.slots.map((slot) => slot.quantity), [1, 1, 1]);
+
+  const bankLikeDestination = {
+    maxSlots: 28,
+    slots: [{ itemId: 'ore', quantity: 2, name: 'Copper Ore', stackable: true }],
+  };
+  const nonStackableSource = {
+    maxSlots: 28,
+    slots: [{ itemId: 'ore', quantity: 3, name: 'Copper Ore', stackable: false }],
+  };
+  const bankTransferResult = transferContainerSlot(nonStackableSource, bankLikeDestination, 0, 3, {
+    getItemDefinition: () => ({ id: 'ore', name: 'Copper Ore', stackable: false }),
+    createInventorySlot,
+    forceDestinationStacking: true,
+  });
+
+  assert.deepEqual(bankTransferResult, { quantity: 3, itemName: 'Copper Ore' });
+  assert.equal(nonStackableSource.slots.length, 0);
+  assert.equal(bankLikeDestination.slots.length, 1);
+  assert.equal(bankLikeDestination.slots[0].quantity, 5);
 }

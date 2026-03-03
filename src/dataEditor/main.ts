@@ -76,10 +76,12 @@ type WorldMapData = {
 
 type TileDefinition = {
   id: number;
-  label: string;
-  color: string;
+  label?: string;
+  color?: string;
   image?: string;
   walkable: boolean;
+  moveSpeedMultiplier: number;
+  damagePerSecond: number;
 };
 
 type WorldObjectTypeDefinition = {
@@ -1300,9 +1302,11 @@ function renderTilesTab(workspace: HTMLDivElement): void {
       </div>
       <div class="form-grid">
         <label class="form-field"><span>ID</span><input id="tile-id" type="number" value="${selected?.id ?? ''}" /></label>
-        <label class="form-field"><span>Label</span><input id="tile-label" value="${selected?.label ?? ''}" /></label>
-        <label class="form-field"><span>Color</span><input id="tile-color" value="${selected?.color ?? ''}" /></label>
+        <label class="form-field"><span>Label (optional)</span><input id="tile-label" value="${selected?.label ?? ''}" /></label>
+        <label class="form-field"><span>Color (optional)</span><input id="tile-color" value="${selected?.color ?? ''}" /></label>
         <label class="form-field"><span>Walkable</span><select id="tile-walkable"><option value="true">true</option><option value="false">false</option></select></label>
+        <label class="form-field"><span>Speed x</span><input id="tile-move-speed" type="number" min="0.1" max="3" step="0.05" value="${selected?.moveSpeedMultiplier ?? 1}" /></label>
+        <label class="form-field"><span>Damage/s</span><input id="tile-damage-per-second" type="number" min="0" max="100" step="0.1" value="${selected?.damagePerSecond ?? 0}" /></label>
         <label class="form-field full"><span>Image</span><input id="tile-image" value="${selected?.image ?? ''}" /></label>
       </div>
       <div class="form-actions">
@@ -1319,7 +1323,7 @@ function renderTilesTab(workspace: HTMLDivElement): void {
     for (const tile of sorted) {
       const button = document.createElement('button');
       button.className = `list-button${tile.id === state.selectedTileId ? ' selected' : ''}`;
-      button.textContent = `${tile.id} — ${tile.label}`;
+      button.textContent = `${tile.id} — ${String(tile.label ?? '').trim() || `Tile ${tile.id}`}`;
       button.addEventListener('click', () => {
         state.selectedTileId = tile.id;
         render();
@@ -1467,9 +1471,9 @@ function renderTilesTab(workspace: HTMLDivElement): void {
     const id = maxId + 1;
     state.tileTypes.push({
       id,
-      label: `Tile ${id}`,
-      color: '#4f8f4a',
       walkable: true,
+      moveSpeedMultiplier: 1,
+      damagePerSecond: 0,
     });
     state.selectedTileId = id;
     render();
@@ -1505,17 +1509,17 @@ function renderTilesTab(workspace: HTMLDivElement): void {
       const nextColor = String(document.querySelector<HTMLInputElement>('#tile-color')?.value ?? '').trim();
       const nextImage = String(document.querySelector<HTMLInputElement>('#tile-image')?.value ?? '').trim();
       const nextWalkable = document.querySelector<HTMLSelectElement>('#tile-walkable')?.value !== 'false';
+      const nextMoveSpeedRaw = Number(document.querySelector<HTMLInputElement>('#tile-move-speed')?.value ?? '1');
+      const nextDamageRaw = Number(document.querySelector<HTMLInputElement>('#tile-damage-per-second')?.value ?? '0');
+      const nextMoveSpeedMultiplier = Number.isFinite(nextMoveSpeedRaw)
+        ? Math.max(0.1, Math.min(3, nextMoveSpeedRaw))
+        : 1;
+      const nextDamagePerSecond = Number.isFinite(nextDamageRaw)
+        ? Math.max(0, Math.min(100, nextDamageRaw))
+        : 0;
 
       if (!Number.isFinite(nextId)) {
         throw new Error('Tile id must be a valid number.');
-      }
-
-      if (!nextLabel) {
-        throw new Error('Tile label is required.');
-      }
-
-      if (!nextColor) {
-        throw new Error('Tile color is required.');
       }
 
       const duplicate = state.tileTypes.find((entry) => entry.id === nextId && entry !== current);
@@ -1524,10 +1528,12 @@ function renderTilesTab(workspace: HTMLDivElement): void {
       }
 
       current.id = nextId;
-      current.label = nextLabel;
-      current.color = nextColor;
+      current.label = nextLabel || undefined;
+      current.color = nextColor || undefined;
       current.image = nextImage;
       current.walkable = nextWalkable;
+      current.moveSpeedMultiplier = nextMoveSpeedMultiplier;
+      current.damagePerSecond = nextDamagePerSecond;
 
       if (state.pendingTileImageImport && state.pendingTileImageImport.targetId === previousTileId) {
         await writeTileImageIntoTerrainTileset(state.pendingTileImageImport.file, current.id);
@@ -1545,7 +1551,7 @@ function renderTilesTab(workspace: HTMLDivElement): void {
       await writeProjectJsonFile('public/data/tileTypes.json', state.tileTypes);
 
       state.selectedTileId = current.id;
-      setStatus(`Updated tile '${current.label}' and saved to public/data/tileTypes.json.`);
+      setStatus(`Updated tile ${current.id} and saved to public/data/tileTypes.json.`);
       render();
     } catch (error) {
       debugError('Tile apply failed', error);
@@ -2631,12 +2637,18 @@ async function init(): Promise<void> {
       ? tileTypesRaw
         .map((entry) => ({
           id: Number(entry?.id ?? 0),
-          label: String(entry?.label ?? ''),
-          color: String(entry?.color ?? '#4f8f4a'),
-          image: String(entry?.image ?? ''),
+          label: String(entry?.label ?? '').trim() || undefined,
+          color: String(entry?.color ?? '').trim() || undefined,
+          image: String(entry?.image ?? '').trim() || undefined,
           walkable: typeof entry?.walkable === 'boolean' ? entry.walkable : Number(entry?.id ?? 0) !== 2,
+          moveSpeedMultiplier: Number.isFinite(Number(entry?.moveSpeedMultiplier))
+            ? Math.max(0.1, Math.min(3, Number(entry?.moveSpeedMultiplier)))
+            : 1,
+          damagePerSecond: Number.isFinite(Number(entry?.damagePerSecond))
+            ? Math.max(0, Math.min(100, Number(entry?.damagePerSecond)))
+            : 0,
         }))
-        .filter((entry) => Number.isFinite(entry.id) && entry.label.trim().length > 0)
+        .filter((entry) => Number.isFinite(entry.id))
       : [];
     state.worldObjectTypes = Array.isArray(worldObjectTypesRaw)
       ? worldObjectTypesRaw

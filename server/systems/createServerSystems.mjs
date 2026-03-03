@@ -19,6 +19,7 @@ export function createServerSystems(options) {
   const movementService = createGridMovementService({
     clamp: shared.clamp,
     isWalkableTile: shared.isWalkableTile,
+    getTileMoveSpeedMultiplier: shared.getTileMoveSpeedMultiplier,
     getWorldWidthTiles: world.getWorldWidthTiles,
     getWorldHeightTiles: world.getWorldHeightTiles,
     tileStepIntervalMs: movement.tileStepIntervalMs,

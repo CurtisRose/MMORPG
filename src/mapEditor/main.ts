@@ -4,6 +4,7 @@ import { generateTerrainData } from '../game/world/generateTerrainData';
 
 type LayerMode = 'terrain' | 'resources' | 'monsters' | 'objects' | 'npcs';
 type ToolMode = 'paint' | 'select';
+type EditorTab = 'paint' | 'quests';
 const WORLD_DATA_VERSION = 1;
 const MAX_HISTORY_STEPS = 100;
 const CANONICAL_WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
@@ -12,6 +13,7 @@ const WORLD_OBJECT_TYPES_URL = `${import.meta.env.BASE_URL}data/worldObjectTypes
 const TERRAIN_TILESET_URL = `${import.meta.env.BASE_URL}assets/terrain/terrain_tileset.png`;
 const QUEST_INDEX_URL = `${import.meta.env.BASE_URL}data/quests/index.json`;
 const PROJECT_WORLD_MAP_RELATIVE_PATH = 'public/data/worldMap.json';
+const PROJECT_TILE_TYPES_RELATIVE_PATH = 'public/data/tileTypes.json';
 const DEBUG_LOG_MAX_LINES = 160;
 const SIDEBAR_WIDTH_STORAGE_KEY = 'mapEditor.sidebarWidth';
 const SIDEBAR_MIN_WIDTH = 220;
@@ -140,9 +142,12 @@ type SelectedTile = {
 
 type TileTypeDefinition = {
   id: number;
-  label: string;
-  color: string;
-  image: string;
+  label?: string;
+  color?: string;
+  image?: string;
+  walkable: boolean;
+  moveSpeedMultiplier: number;
+  damagePerSecond: number;
 };
 
 type WorldObjectBehavior = 'decorative' | 'harvestable' | 'station' | 'bank' | 'shop' | 'npc';
@@ -185,10 +190,10 @@ type QuestPreviewContext = {
 };
 
 const DEFAULT_TILE_TYPES: TileTypeDefinition[] = [
-  { id: 0, label: 'Grass', color: '#4f8f4a', image: '' },
-  { id: 1, label: 'Dirt', color: '#7c6642', image: '' },
-  { id: 2, label: 'Water', color: '#355f9c', image: '' },
-  { id: 3, label: 'Sand', color: '#b9a56d', image: '' },
+  { id: 0, walkable: true, moveSpeedMultiplier: 1, damagePerSecond: 0 },
+  { id: 1, walkable: true, moveSpeedMultiplier: 1, damagePerSecond: 0 },
+  { id: 2, walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 },
+  { id: 3, walkable: true, moveSpeedMultiplier: 0.9, damagePerSecond: 0 },
 ];
 
 const DEFAULT_RESOURCE_TYPES: ResourceTypeDefinition[] = [
@@ -353,6 +358,9 @@ const state: {
   npcFormSelectionKey: string | null;
   projectDirectoryHandle: any | null;
   projectDirectoryName: string | null;
+  activeEditorTab: EditorTab;
+  terrainTilesetUrl: string;
+  terrainTilesetObjectUrl: string | null;
 } = {
   data: createChunkData(0, 0),
   chunks: new Map<string, EditorChunkData>(),
@@ -383,6 +391,9 @@ const state: {
   npcFormSelectionKey: null,
   projectDirectoryHandle: null,
   projectDirectoryName: null,
+  activeEditorTab: 'paint',
+  terrainTilesetUrl: TERRAIN_TILESET_URL,
+  terrainTilesetObjectUrl: null,
 };
 
 state.chunks.set(state.activeChunkKey, state.data);
@@ -404,18 +415,26 @@ const npcSelectOptions = NPC_TYPES.map(
   (entry) => `<option value="${entry.id}">${entry.label}</option>`,
 ).join('');
 const tileSelectOptions = state.tileTypes.map(
-  (entry) => `<option value="${entry.id}">${entry.label}</option>`,
+  (entry) => `<option value="${entry.id}">${entry.label?.trim() || `Tile ${entry.id}`}</option>`,
 ).join('');
 
 app.innerHTML = `
   <aside class="sidebar">
     <div class="panel">
+      <h3>Editor Tabs</h3>
+      <div class="row row-buttons editor-tab-buttons">
+        <button id="editorTabPaint" class="secondary editor-tab-button active" type="button">Map Painting</button>
+        <button id="editorTabQuests" class="secondary editor-tab-button" type="button">Quests / Zones</button>
+      </div>
+    </div>
+
+    <div class="panel" data-editor-tab="paint">
       <h3>Map Making</h3>
       <div class="row row-buttons"><button id="connectProjectFolder" class="secondary">Connect Project Folder</button></div>
       <div class="note" id="projectFolderStatus">No project folder connected</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>Chunk</h3>
       <div class="row">
         <label for="chunkX">Chunk X</label>
@@ -431,7 +450,7 @@ app.innerHTML = `
       <div class="note" id="chunkSummary"></div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>Layer</h3>
       <div class="row">
         <label for="toolMode">Tool</label>
@@ -450,9 +469,47 @@ app.innerHTML = `
           <option value="npcs">NPCs</option>
         </select>
       </div>
-      <div class="row" id="tileRow">
-        <label for="tileType">Tile Type</label>
-        <select id="tileType">${tileSelectOptions}</select>
+      <div id="tileRow" class="tileset-panel">
+        <div class="row">
+          <label for="tilesetFileInput">Tileset Image</label>
+          <input id="tilesetFileInput" type="file" accept="image/*" />
+        </div>
+        <div class="row">
+          <label for="tilesetUrlInput">Tileset URL</label>
+          <input id="tilesetUrlInput" type="text" placeholder="assets/terrain/terrain_tileset.png" />
+        </div>
+        <div class="row row-buttons tileset-actions">
+          <button id="tilesetLoadUrl" class="secondary" type="button">Load URL</button>
+          <button id="tilesetResetDefault" class="secondary" type="button">Use Default</button>
+        </div>
+        <div class="tileset-preview-wrap">
+          <canvas id="tilesetPaletteCanvas"></canvas>
+        </div>
+        <div class="note" id="tilesetSelectionSummary">Tile: 0</div>
+        <div class="row" style="margin-top:8px; margin-bottom:0;">
+          <label for="tileType">Tile ID</label>
+          <select id="tileType">${tileSelectOptions}</select>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <label for="tileWalkable">Walkable</label>
+          <select id="tileWalkable">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="tileMoveSpeedMultiplier">Speed x</label>
+          <input id="tileMoveSpeedMultiplier" type="number" min="0.1" max="3" step="0.05" value="1" />
+        </div>
+        <div class="row">
+          <label for="tileDamagePerSecond">Damage/s</label>
+          <input id="tileDamagePerSecond" type="number" min="0" max="100" step="0.1" value="0" />
+        </div>
+        <div class="row row-buttons tileset-actions">
+          <button id="tileBehaviorApply" class="secondary" type="button">Apply Tile Behavior</button>
+          <button id="tileBehaviorSave" class="secondary" type="button">Save Tile Types</button>
+        </div>
+        <div class="note" id="tileBehaviorSummary">Walkable: true · Speed: 1.00x · Damage: 0/s</div>
       </div>
       <div class="row" id="resourceRow" style="display:none;">
         <label for="resourceType">Resource</label>
@@ -477,7 +534,7 @@ app.innerHTML = `
       <div class="note">Paint mode: left click paints, right click erases. Select mode: click a tile to inspect and edit.</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>Selection</h3>
       <div class="note" id="selectionSummary">No tile selected.</div>
       <div id="selectionTerrainRow" style="display:none; margin-top:8px;">
@@ -573,7 +630,7 @@ app.innerHTML = `
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>View</h3>
       <div class="row">
         <label for="tileSize">Tile Size</label>
@@ -582,7 +639,7 @@ app.innerHTML = `
       <div class="note" id="tileSizeLabel">16 px</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>Data</h3>
       <div class="row row-buttons"><button id="undoAction" class="secondary">Undo</button></div>
       <div class="row row-buttons"><button id="redoAction" class="secondary">Redo</button></div>
@@ -591,7 +648,7 @@ app.innerHTML = `
       <div class="row"><button id="exportJson">Save Map</button></div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="quests" style="display:none;">
       <h3>Quests</h3>
       <div id="questEditorGui" class="quest-editor-gui">
         <div class="row">
@@ -733,7 +790,7 @@ app.innerHTML = `
       <div class="note">GUI quest editor: update fields, steps, objectives, rewards, requirements, and chain; then click <strong>Add/Update Quest</strong>.</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="quests" style="display:none;">
       <h3>Quest Zones</h3>
       <div class="row">
         <label for="zoneEditorSelect">Zone List</label>
@@ -769,13 +826,13 @@ app.innerHTML = `
       <div class="note">Zones save with the map via <strong>Save Map</strong>.</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>Status</h3>
       <div class="status" id="status"></div>
       <div class="note" id="hoverSummary">Hover: -</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-editor-tab="paint">
       <h3>Debug</h3>
       <div class="row row-buttons"><button id="clearDebugLog" class="secondary">Clear Debug Log</button></div>
       <div class="status" id="debugLog">Debug log ready.</div>
@@ -801,9 +858,23 @@ const chunkSummaryElement = requireElement<HTMLDivElement>('#chunkSummary', 'Chu
 const chunkXInput = requireElement<HTMLInputElement>('#chunkX', 'Chunk X input not found');
 const chunkYInput = requireElement<HTMLInputElement>('#chunkY', 'Chunk Y input not found');
 const loadChunkButton = requireElement<HTMLButtonElement>('#loadChunk', 'Load chunk button not found');
+const editorTabPaintButton = requireElement<HTMLButtonElement>('#editorTabPaint', 'Map painting tab button not found');
+const editorTabQuestsButton = requireElement<HTMLButtonElement>('#editorTabQuests', 'Quests tab button not found');
 const toolModeSelect = requireElement<HTMLSelectElement>('#toolMode', 'Tool mode select not found');
 const layerModeSelect = requireElement<HTMLSelectElement>('#layerMode', 'Layer mode select not found');
+const tilesetFileInput = requireElement<HTMLInputElement>('#tilesetFileInput', 'Tileset image file input not found');
+const tilesetUrlInput = requireElement<HTMLInputElement>('#tilesetUrlInput', 'Tileset URL input not found');
+const tilesetLoadUrlButton = requireElement<HTMLButtonElement>('#tilesetLoadUrl', 'Load tileset URL button not found');
+const tilesetResetDefaultButton = requireElement<HTMLButtonElement>('#tilesetResetDefault', 'Reset tileset button not found');
+const tilesetPaletteCanvas = requireElement<HTMLCanvasElement>('#tilesetPaletteCanvas', 'Tileset palette canvas not found');
+const tilesetSelectionSummary = requireElement<HTMLDivElement>('#tilesetSelectionSummary', 'Tileset selection summary not found');
 const tileTypeSelect = requireElement<HTMLSelectElement>('#tileType', 'Tile type select not found');
+const tileWalkableSelect = requireElement<HTMLSelectElement>('#tileWalkable', 'Tile walkable select not found');
+const tileMoveSpeedMultiplierInput = requireElement<HTMLInputElement>('#tileMoveSpeedMultiplier', 'Tile speed input not found');
+const tileDamagePerSecondInput = requireElement<HTMLInputElement>('#tileDamagePerSecond', 'Tile damage input not found');
+const tileBehaviorApplyButton = requireElement<HTMLButtonElement>('#tileBehaviorApply', 'Apply tile behavior button not found');
+const tileBehaviorSaveButton = requireElement<HTMLButtonElement>('#tileBehaviorSave', 'Save tile behavior button not found');
+const tileBehaviorSummary = requireElement<HTMLDivElement>('#tileBehaviorSummary', 'Tile behavior summary not found');
 const resourceTypeSelect = requireElement<HTMLSelectElement>('#resourceType', 'Resource type select not found');
 const monsterTypeSelect = requireElement<HTMLSelectElement>('#monsterType', 'Monster type select not found');
 const objectTypeSelect = requireElement<HTMLSelectElement>('#objectType', 'Object type select not found');
@@ -920,6 +991,9 @@ const hoverSummaryElement = requireElement<HTMLDivElement>('#hoverSummary', 'Hov
 const debugLogElement = requireElement<HTMLDivElement>('#debugLog', 'Debug log element not found');
 const clearDebugLogButton = requireElement<HTMLButtonElement>('#clearDebugLog', 'Clear debug log button not found');
 const tileImageCache = new Map<string, HTMLImageElement | null>();
+const tilesetPaletteContext = require2DContext(tilesetPaletteCanvas);
+const editorTabPanels = Array.from(document.querySelectorAll<HTMLElement>('[data-editor-tab]'));
+const TILESET_PALETTE_PREVIEW_SIZE = 24;
 
 let isMiddleMousePanning = false;
 let panStartClientX = 0;
@@ -1028,7 +1102,9 @@ async function connectProjectFolder(): Promise<boolean> {
     state.projectDirectoryHandle = handle;
     state.projectDirectoryName = String(handle?.name ?? 'project');
     updateProjectFolderStatusLabel();
-    window.alert(`Connected project folder '${state.projectDirectoryName}'. Save Map will now write to ${PROJECT_WORLD_MAP_RELATIVE_PATH}.`);
+    window.alert(
+      `Connected project folder '${state.projectDirectoryName}'. Save Map writes to ${PROJECT_WORLD_MAP_RELATIVE_PATH}, and tile behavior changes write to ${PROJECT_TILE_TYPES_RELATIVE_PATH}.`,
+    );
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1093,22 +1169,32 @@ function normalizeTileTypes(input: unknown): TileTypeDefinition[] {
   }
 
   return input
-    .map((entry) => {
+    .map((entry): TileTypeDefinition | null => {
       const candidate = entry as Record<string, unknown>;
       const id = Number(candidate?.id ?? NaN);
-      const label = String(candidate?.label ?? '').trim();
-      const color = String(candidate?.color ?? '').trim();
       const image = String(candidate?.image ?? '').trim();
-      if (!Number.isFinite(id) || !label || !color) {
+      const walkable = typeof candidate?.walkable === 'boolean' ? candidate.walkable : id !== 2;
+      const moveSpeedMultiplierRaw = Number(candidate?.moveSpeedMultiplier ?? 1);
+      const moveSpeedMultiplier = Number.isFinite(moveSpeedMultiplierRaw)
+        ? Math.max(0.1, Math.min(3, moveSpeedMultiplierRaw))
+        : 1;
+      const damagePerSecondRaw = Number(candidate?.damagePerSecond ?? 0);
+      const damagePerSecond = Number.isFinite(damagePerSecondRaw)
+        ? Math.max(0, Math.min(100, damagePerSecondRaw))
+        : 0;
+      if (!Number.isFinite(id)) {
         return null;
       }
 
       return {
         id,
-        label,
-        color,
-        image,
-      };
+        label: String(candidate?.label ?? '').trim() || undefined,
+        color: String(candidate?.color ?? '').trim() || undefined,
+        image: image || undefined,
+        walkable,
+        moveSpeedMultiplier,
+        damagePerSecond,
+      } as TileTypeDefinition;
     })
     .filter((entry): entry is TileTypeDefinition => entry !== null)
     .sort((a, b) => a.id - b.id);
@@ -1329,6 +1415,50 @@ function resolveTileImageUrl(input: string): string {
   return `${import.meta.env.BASE_URL}${normalized}`;
 }
 
+function refreshEditorTabPanels(): void {
+  for (const panel of editorTabPanels) {
+    const panelTab = panel.dataset.editorTab as EditorTab | undefined;
+    panel.style.display = panelTab === state.activeEditorTab ? '' : 'none';
+  }
+
+  editorTabPaintButton.classList.toggle('active', state.activeEditorTab === 'paint');
+  editorTabQuestsButton.classList.toggle('active', state.activeEditorTab === 'quests');
+}
+
+function setActiveEditorTab(nextTab: EditorTab): void {
+  if (state.activeEditorTab === nextTab) {
+    return;
+  }
+
+  state.activeEditorTab = nextTab;
+  refreshEditorTabPanels();
+}
+
+function revokeCurrentObjectTilesetUrl(): void {
+  if (!state.terrainTilesetObjectUrl) {
+    return;
+  }
+
+  try {
+    URL.revokeObjectURL(state.terrainTilesetObjectUrl);
+  } catch {
+    return;
+  } finally {
+    state.terrainTilesetObjectUrl = null;
+  }
+}
+
+function setTerrainTilesetUrl(nextUrl: string, objectUrl: string | null = null): void {
+  state.terrainTilesetUrl = nextUrl;
+  state.terrainTilesetObjectUrl = objectUrl;
+  drawTilesetPalette();
+  drawGrid();
+}
+
+function getTerrainTilesetCacheKey(): string {
+  return state.terrainTilesetUrl;
+}
+
 function getTileImageForTileId(tileId: number): HTMLImageElement | null {
   const tile = state.tileTypes.find((entry) => entry.id === tileId);
   const imagePath = String(tile?.image ?? '').trim();
@@ -1357,7 +1487,8 @@ function getTileImageForTileId(tileId: number): HTMLImageElement | null {
 }
 
 function getSharedTerrainTilesetImage(): HTMLImageElement | null {
-  const cached = tileImageCache.get(TERRAIN_TILESET_URL);
+  const cacheKey = getTerrainTilesetCacheKey();
+  const cached = tileImageCache.get(cacheKey);
   if (typeof cached !== 'undefined') {
     return cached;
   }
@@ -1365,20 +1496,158 @@ function getSharedTerrainTilesetImage(): HTMLImageElement | null {
   const image = new Image();
   image.decoding = 'async';
   image.onload = () => {
-    tileImageCache.set(TERRAIN_TILESET_URL, image);
+    tileImageCache.set(cacheKey, image);
+    drawTilesetPalette();
     drawGrid();
   };
   image.onerror = () => {
-    tileImageCache.set(TERRAIN_TILESET_URL, null);
+    tileImageCache.set(cacheKey, null);
+    drawTilesetPalette();
   };
-  tileImageCache.set(TERRAIN_TILESET_URL, null);
-  image.src = TERRAIN_TILESET_URL;
+  tileImageCache.set(cacheKey, null);
+  image.src = cacheKey;
   return null;
+}
+
+function ensureTileTypeOptionExists(tileId: number): void {
+  if (!Number.isFinite(tileId)) {
+    return;
+  }
+
+  const stringValue = String(Math.floor(tileId));
+  if (tileTypeSelect.querySelector(`option[value="${stringValue}"]`)) {
+    return;
+  }
+
+  const label = `Tile ${stringValue}`;
+  const mapOption = document.createElement('option');
+  mapOption.value = stringValue;
+  mapOption.textContent = label;
+  tileTypeSelect.appendChild(mapOption);
+
+  const selectionOption = document.createElement('option');
+  selectionOption.value = stringValue;
+  selectionOption.textContent = label;
+  selectionTerrainTypeSelect.appendChild(selectionOption);
+}
+
+function ensureTileTypeDefinitionExists(tileId: number): TileTypeDefinition {
+  const normalizedId = Math.max(0, Math.floor(Number(tileId ?? 0)));
+  const existing = state.tileTypes.find((entry) => entry.id === normalizedId);
+  if (existing) {
+    return existing;
+  }
+
+  const created: TileTypeDefinition = {
+    id: normalizedId,
+    walkable: normalizedId !== 2,
+    moveSpeedMultiplier: 1,
+    damagePerSecond: 0,
+  };
+
+  state.tileTypes.push(created);
+  state.tileTypes.sort((a, b) => a.id - b.id);
+  refreshTileTypeSelectOptions();
+  return created;
+}
+
+function syncSelectedTerrainTile(tileId: number, updateSelectionControl = true): void {
+  if (!Number.isFinite(tileId)) {
+    return;
+  }
+
+  state.selectedTileType = Math.max(0, Math.floor(tileId));
+  ensureTileTypeOptionExists(state.selectedTileType);
+  ensureTileTypeDefinitionExists(state.selectedTileType);
+  tileTypeSelect.value = String(state.selectedTileType);
+  if (updateSelectionControl) {
+    selectionTerrainTypeSelect.value = String(state.selectedTileType);
+  }
+  tilesetSelectionSummary.textContent = `Tile: ${state.selectedTileType}`;
+  syncTileBehaviorInputsFromSelection();
+  drawTilesetPalette();
+}
+
+function getTileTypeById(tileId: number): TileTypeDefinition | null {
+  return state.tileTypes.find((entry) => entry.id === tileId) ?? null;
+}
+
+function syncTileBehaviorInputsFromSelection(): void {
+  const selected = getTileTypeById(state.selectedTileType);
+  const fallbackWalkable = state.selectedTileType !== 2;
+  const walkable = selected?.walkable ?? fallbackWalkable;
+  const moveSpeedMultiplier = selected?.moveSpeedMultiplier ?? 1;
+  const damagePerSecond = selected?.damagePerSecond ?? 0;
+
+  tileWalkableSelect.value = walkable ? 'true' : 'false';
+  tileMoveSpeedMultiplierInput.value = moveSpeedMultiplier.toFixed(2);
+  tileDamagePerSecondInput.value = damagePerSecond.toFixed(1);
+  tileBehaviorSummary.textContent = `Walkable: ${walkable ? 'true' : 'false'} · Speed: ${moveSpeedMultiplier.toFixed(2)}x · Damage: ${damagePerSecond.toFixed(1)}/s`;
+}
+
+function drawTilesetPalette(): void {
+  const previewSize = TILESET_PALETTE_PREVIEW_SIZE;
+  const tileset = getSharedTerrainTilesetImage();
+
+  if (!tileset || !tileset.complete || tileset.naturalWidth < TILE_SIZE || tileset.naturalHeight < TILE_SIZE) {
+    tilesetPaletteCanvas.width = previewSize * 6;
+    tilesetPaletteCanvas.height = previewSize * 4;
+    tilesetPaletteContext.fillStyle = '#0f141c';
+    tilesetPaletteContext.fillRect(0, 0, tilesetPaletteCanvas.width, tilesetPaletteCanvas.height);
+    tilesetPaletteContext.fillStyle = '#9aa7bc';
+    tilesetPaletteContext.font = '12px Segoe UI';
+    tilesetPaletteContext.textAlign = 'center';
+    tilesetPaletteContext.textBaseline = 'middle';
+    tilesetPaletteContext.fillText('Tileset not loaded', tilesetPaletteCanvas.width / 2, tilesetPaletteCanvas.height / 2);
+    return;
+  }
+
+  const columns = Math.max(1, Math.floor(tileset.naturalWidth / TILE_SIZE));
+  const rows = Math.max(1, Math.floor(tileset.naturalHeight / TILE_SIZE));
+  tilesetPaletteCanvas.width = columns * previewSize;
+  tilesetPaletteCanvas.height = rows * previewSize;
+  tilesetPaletteContext.imageSmoothingEnabled = false;
+  tilesetPaletteContext.clearRect(0, 0, tilesetPaletteCanvas.width, tilesetPaletteCanvas.height);
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const destinationX = column * previewSize;
+      const destinationY = row * previewSize;
+      tilesetPaletteContext.drawImage(
+        tileset,
+        column * TILE_SIZE,
+        row * TILE_SIZE,
+        TILE_SIZE,
+        TILE_SIZE,
+        destinationX,
+        destinationY,
+        previewSize,
+        previewSize,
+      );
+      tilesetPaletteContext.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+      tilesetPaletteContext.lineWidth = 1;
+      tilesetPaletteContext.strokeRect(destinationX + 0.5, destinationY + 0.5, previewSize - 1, previewSize - 1);
+    }
+  }
+
+  const selectedTileId = state.selectedTileType;
+  const selectedColumn = selectedTileId % columns;
+  const selectedRow = Math.floor(selectedTileId / columns);
+  if (selectedRow >= 0 && selectedRow < rows) {
+    tilesetPaletteContext.strokeStyle = 'rgba(255, 223, 122, 0.98)';
+    tilesetPaletteContext.lineWidth = 2;
+    tilesetPaletteContext.strokeRect(
+      selectedColumn * previewSize + 1,
+      selectedRow * previewSize + 1,
+      Math.max(1, previewSize - 2),
+      Math.max(1, previewSize - 2),
+    );
+  }
 }
 
 function refreshTileTypeSelectOptions(): void {
   const optionsMarkup = state.tileTypes
-    .map((entry) => `<option value="${entry.id}">${entry.label}</option>`)
+    .map((entry) => `<option value="${entry.id}">${entry.label?.trim() || `Tile ${entry.id}`}</option>`)
     .join('');
 
   tileTypeSelect.innerHTML = optionsMarkup;
@@ -1389,8 +1658,8 @@ function refreshTileTypeSelectOptions(): void {
     state.selectedTileType = state.tileTypes[0]?.id ?? 0;
   }
 
-  tileTypeSelect.value = String(state.selectedTileType);
-  selectionTerrainTypeSelect.value = String(state.selectedTileType);
+  ensureTileTypeOptionExists(state.selectedTileType);
+  syncSelectedTerrainTile(state.selectedTileType);
 }
 
 function refreshWorldObjectTypeSelectOptions(): void {
@@ -1493,6 +1762,74 @@ async function loadWorldObjectTypesIfAvailable(): Promise<void> {
   } catch (error) {
     appendDebugLog('world-object-types', `Exception: ${error instanceof Error ? error.message : String(error)}`);
     refreshWorldObjectTypeSelectOptions();
+  }
+}
+
+async function persistTileTypes(options: { notifySuccess?: boolean } = {}): Promise<void> {
+  const notifySuccess = options.notifySuccess !== false;
+  const payload = state.tileTypes
+    .map((entry) => ({
+      id: Math.floor(entry.id),
+      walkable: entry.walkable !== false,
+      moveSpeedMultiplier: Number((entry.moveSpeedMultiplier ?? 1).toFixed(3)),
+      damagePerSecond: Number((entry.damagePerSecond ?? 0).toFixed(3)),
+    }))
+    .sort((a, b) => a.id - b.id);
+
+  if (supportsFileSystemAccess()) {
+    try {
+      await writeProjectJsonFile(PROJECT_TILE_TYPES_RELATIVE_PATH, payload);
+      updateProjectFolderStatusLabel();
+      if (notifySuccess) {
+        window.alert(`Tile types saved to ${PROJECT_TILE_TYPES_RELATIVE_PATH}.`);
+      }
+      return;
+    } catch (error) {
+      appendDebugLog('tile-types-save', `Local folder save failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const body = JSON.stringify(payload, null, 2);
+
+  try {
+    const response = await fetch(TILE_TYPES_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+
+    if (response.ok) {
+      if (notifySuccess) {
+        window.alert('Tile types saved to tileTypes.json!');
+      }
+      return;
+    }
+
+    const postResponse = await fetch(TILE_TYPES_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+
+    if (postResponse.ok) {
+      if (notifySuccess) {
+        window.alert('Tile types saved to tileTypes.json!');
+      }
+      return;
+    }
+
+    throw new Error('Server did not accept PUT/POST');
+  } catch {
+    const blob = new Blob([body], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'tileTypes.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    window.alert(`Could not save directly to server. Downloaded tileTypes.json instead. Upload it manually to ${TILE_TYPES_URL}.`);
   }
 }
 
@@ -3209,14 +3546,18 @@ function drawGrid(): void {
         const tilesetHasFrame = Boolean(
           sharedTileset
           && sharedTileset.complete
-          && sharedTileset.naturalWidth >= (tileId + 1) * TILE_SIZE
+          && sharedTileset.naturalWidth >= TILE_SIZE
           && sharedTileset.naturalHeight >= TILE_SIZE,
         );
         if (tilesetHasFrame && sharedTileset) {
+          const tilesPerRow = Math.max(1, Math.floor(sharedTileset.naturalWidth / TILE_SIZE));
+          const tileRows = Math.max(1, Math.floor(sharedTileset.naturalHeight / TILE_SIZE));
+          const tileCount = tilesPerRow * tileRows;
+          const boundedTileId = tileId >= 0 && tileId < tileCount ? tileId : 0;
           context.drawImage(
             sharedTileset,
-            tileId * TILE_SIZE,
-            0,
+            (boundedTileId % tilesPerRow) * TILE_SIZE,
+            Math.floor(boundedTileId / tilesPerRow) * TILE_SIZE,
             TILE_SIZE,
             TILE_SIZE,
             pixelX,
@@ -3427,7 +3768,7 @@ function drawGrid(): void {
 }
 
 function refreshLayerRows(): void {
-  tileRow.style.display = state.layer === 'terrain' ? 'flex' : 'none';
+  tileRow.style.display = state.layer === 'terrain' ? 'block' : 'none';
   resourceRow.style.display = state.layer === 'resources' ? 'flex' : 'none';
   monsterRow.style.display = state.layer === 'monsters' ? 'flex' : 'none';
   objectRow.style.display = state.layer === 'objects' ? 'flex' : 'none';
@@ -3963,6 +4304,14 @@ toolModeSelect.addEventListener('change', () => {
   updateStatus();
 });
 
+editorTabPaintButton.addEventListener('click', () => {
+  setActiveEditorTab('paint');
+});
+
+editorTabQuestsButton.addEventListener('click', () => {
+  setActiveEditorTab('quests');
+});
+
 layerModeSelect.addEventListener('change', () => {
   state.layer = layerModeSelect.value as LayerMode;
   refreshLayerRows();
@@ -3970,7 +4319,84 @@ layerModeSelect.addEventListener('change', () => {
 });
 
 tileTypeSelect.addEventListener('change', () => {
-  state.selectedTileType = Number(tileTypeSelect.value);
+  syncSelectedTerrainTile(Number(tileTypeSelect.value), false);
+});
+
+tileBehaviorApplyButton.addEventListener('click', () => {
+  const selected = ensureTileTypeDefinitionExists(state.selectedTileType);
+
+  const walkable = tileWalkableSelect.value !== 'false';
+  const moveSpeedMultiplierRaw = Number(tileMoveSpeedMultiplierInput.value);
+  const damagePerSecondRaw = Number(tileDamagePerSecondInput.value);
+  const moveSpeedMultiplier = Number.isFinite(moveSpeedMultiplierRaw)
+    ? Math.max(0.1, Math.min(3, moveSpeedMultiplierRaw))
+    : 1;
+  const damagePerSecond = Number.isFinite(damagePerSecondRaw)
+    ? Math.max(0, Math.min(100, damagePerSecondRaw))
+    : 0;
+
+  selected.walkable = walkable;
+  selected.moveSpeedMultiplier = moveSpeedMultiplier;
+  selected.damagePerSecond = damagePerSecond;
+  syncTileBehaviorInputsFromSelection();
+  updateStatus();
+  void persistTileTypes({ notifySuccess: false });
+});
+
+tileBehaviorSaveButton.addEventListener('click', () => {
+  void persistTileTypes({ notifySuccess: true });
+});
+
+tilesetPaletteCanvas.addEventListener('click', (event) => {
+  const tileset = getSharedTerrainTilesetImage();
+  if (!tileset || !tileset.complete || tileset.naturalWidth < TILE_SIZE || tileset.naturalHeight < TILE_SIZE) {
+    return;
+  }
+
+  const columns = Math.max(1, Math.floor(tileset.naturalWidth / TILE_SIZE));
+  const rows = Math.max(1, Math.floor(tileset.naturalHeight / TILE_SIZE));
+  const paletteRect = tilesetPaletteCanvas.getBoundingClientRect();
+  const clickX = event.clientX - paletteRect.left;
+  const clickY = event.clientY - paletteRect.top;
+  const tileColumn = Math.floor(clickX / TILESET_PALETTE_PREVIEW_SIZE);
+  const tileRow = Math.floor(clickY / TILESET_PALETTE_PREVIEW_SIZE);
+
+  if (tileColumn < 0 || tileRow < 0 || tileColumn >= columns || tileRow >= rows) {
+    return;
+  }
+
+  const tileId = tileRow * columns + tileColumn;
+  syncSelectedTerrainTile(tileId);
+});
+
+tilesetLoadUrlButton.addEventListener('click', () => {
+  const rawUrl = normalizeText(tilesetUrlInput.value);
+  if (!rawUrl) {
+    return;
+  }
+
+  const resolvedUrl = resolveTileImageUrl(rawUrl);
+  revokeCurrentObjectTilesetUrl();
+  setTerrainTilesetUrl(resolvedUrl, null);
+});
+
+tilesetResetDefaultButton.addEventListener('click', () => {
+  revokeCurrentObjectTilesetUrl();
+  tilesetFileInput.value = '';
+  tilesetUrlInput.value = TERRAIN_TILESET_URL;
+  setTerrainTilesetUrl(TERRAIN_TILESET_URL, null);
+});
+
+tilesetFileInput.addEventListener('change', () => {
+  const selectedFile = tilesetFileInput.files?.[0];
+  if (!selectedFile) {
+    return;
+  }
+
+  revokeCurrentObjectTilesetUrl();
+  const objectUrl = URL.createObjectURL(selectedFile);
+  tilesetUrlInput.value = selectedFile.name;
+  setTerrainTilesetUrl(objectUrl, objectUrl);
 });
 
 resourceTypeSelect.addEventListener('change', () => {
@@ -4778,8 +5204,12 @@ window.addEventListener('keydown', (event) => {
 
 refreshLayerRows();
 refreshWorldObjectTypeSelectOptions();
+refreshEditorTabPanels();
+tilesetUrlInput.value = TERRAIN_TILESET_URL;
+syncSelectedTerrainTile(state.selectedTileType);
 loadSavedSidebarWidth();
 drawGrid();
+drawTilesetPalette();
 scheduleVisibleChunkLoading();
 updateStatus();
 refreshZoneEditorOptions();
@@ -4792,6 +5222,10 @@ void loadQuestIndexIfAvailable();
 window.addEventListener('focus', () => {
   void loadTileTypesIfAvailable();
   void loadWorldObjectTypesIfAvailable();
+});
+
+window.addEventListener('beforeunload', () => {
+  revokeCurrentObjectTilesetUrl();
 });
 
 document.addEventListener('visibilitychange', () => {

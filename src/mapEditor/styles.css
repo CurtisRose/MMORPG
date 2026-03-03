@@ -72,6 +72,18 @@ body.sidebar-resizing {
   width: 100%;
 }
 
+.editor-tab-buttons {
+  gap: 6px;
+}
+
+.editor-tab-buttons .editor-tab-button {
+  width: 50%;
+}
+
+.editor-tab-button.active {
+  background: #3a77ea;
+}
+
 .row label {
   font-size: 12px;
   color: #b8c1d0;
@@ -157,6 +169,33 @@ button.secondary {
   font-size: 12px;
   color: #9aa7bc;
   line-height: 1.4;
+}
+
+.tileset-panel {
+  border: 1px solid #303848;
+  border-radius: 6px;
+  padding: 8px;
+  background: #10151e;
+}
+
+.tileset-actions button {
+  width: 50%;
+}
+
+.tileset-preview-wrap {
+  width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #303848;
+  border-radius: 6px;
+  background: #0b1017;
+  padding: 6px;
+}
+
+#tilesetPaletteCanvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: pointer;
 }
 
 .status {

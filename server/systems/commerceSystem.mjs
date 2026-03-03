@@ -33,7 +33,15 @@ export function transferBankItem(player, message, deps) {
 
   const sourceContainer = from === 'bank' ? player.bank : player.inventory;
   const destinationContainer = to === 'bank' ? player.bank : player.inventory;
-  const transferResult = deps.transferContainerSlot(sourceContainer, destinationContainer, slotIndex, quantity);
+  const transferResult = deps.transferContainerSlot(
+    sourceContainer,
+    destinationContainer,
+    slotIndex,
+    quantity,
+    {
+      forceDestinationStacking: to === 'bank',
+    },
+  );
 
   if (!transferResult) {
     return { ok: false, reason: '[Bank] Could not move that item.' };

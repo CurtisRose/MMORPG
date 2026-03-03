@@ -1,9 +1,10 @@
-export function canAddItemToContainer(container, itemDefinition, quantity) {
+export function canAddItemToContainer(container, itemDefinition, quantity, options = {}) {
+  const forceStacking = options?.forceStacking === true;
   if (quantity <= 0) {
     return false;
   }
 
-  if (itemDefinition.stackable) {
+  if (itemDefinition.stackable || forceStacking) {
     const existingSlot = container.slots.find((slot) => slot.itemId === itemDefinition.id);
     if (existingSlot) {
       return true;
@@ -20,19 +21,26 @@ export function addItemToContainer(
   itemDefinition,
   quantity,
   deps,
+  options = {},
 ) {
-  if (!canAddItemToContainer(container, itemDefinition, quantity)) {
+  const forceStacking = options?.forceStacking === true;
+
+  if (!canAddItemToContainer(container, itemDefinition, quantity, { forceStacking })) {
     return false;
   }
 
-  if (itemDefinition.stackable) {
+  if (itemDefinition.stackable || forceStacking) {
     const existingSlot = container.slots.find((slot) => slot.itemId === itemDefinition.id);
     if (existingSlot) {
       existingSlot.quantity += quantity;
       return true;
     }
 
-    container.slots.push(deps.createInventorySlot(itemDefinition, quantity));
+    const createdSlot = deps.createInventorySlot(itemDefinition, quantity);
+    if (forceStacking) {
+      createdSlot.stackable = true;
+    }
+    container.slots.push(createdSlot);
     return true;
   }
 
@@ -62,7 +70,9 @@ export function transferContainerSlot(source, destination, slotIndex, quantity, 
   const requestedQuantity = Math.max(1, Math.floor(Number(quantity ?? 1)));
   const transferQuantity = Math.min(requestedQuantity, sourceSlot.quantity);
 
-  if (!canAddItemToContainer(destination, itemDefinition, transferQuantity)) {
+  const forceDestinationStacking = deps?.forceDestinationStacking === true;
+
+  if (!canAddItemToContainer(destination, itemDefinition, transferQuantity, { forceStacking: forceDestinationStacking })) {
     return null;
   }
 
@@ -73,6 +83,8 @@ export function transferContainerSlot(source, destination, slotIndex, quantity, 
 
   const moved = addItemToContainer(destination, itemDefinition, transferQuantity, {
     createInventorySlot: deps.createInventorySlot,
+  }, {
+    forceStacking: forceDestinationStacking,
   });
   if (!moved) {
     return null;

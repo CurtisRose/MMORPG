@@ -124,6 +124,7 @@ const CONTENT_DATA_DIR = path.join(DATA_DIR, 'content');
 const QUEST_DATA_DIR = path.join(DATA_DIR, 'quests');
 const WORLD_MAP_PATH = path.join(PUBLIC_DIR, 'data', 'worldMap.json');
 const WORLD_OBJECT_TYPES_PATH = path.join(PUBLIC_DIR, 'data', 'worldObjectTypes.json');
+const TILE_TYPES_PATH = path.join(PUBLIC_DIR, 'data', 'tileTypes.json');
 const ITEM_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'items.json');
 const RESOURCE_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'resources.json');
 const GEAR_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'gear.json');
@@ -998,6 +999,52 @@ function loadWorldMapData() {
   return normalizeWorldMapData(raw);
 }
 
+function normalizeTileBehaviorEntry(entry, index) {
+  const tileId = Number(entry?.id);
+  if (!Number.isFinite(tileId)) {
+    throw new Error(`Tile types entry ${index} is missing a valid numeric id`);
+  }
+
+  const walkable = typeof entry?.walkable === 'boolean' ? entry.walkable : Math.floor(tileId) !== WATER_TILE_ID;
+  const moveSpeedMultiplierRaw = Number(entry?.moveSpeedMultiplier ?? 1);
+  const damagePerSecondRaw = Number(entry?.damagePerSecond ?? 0);
+
+  return {
+    id: Math.floor(tileId),
+    walkable,
+    moveSpeedMultiplier: Number.isFinite(moveSpeedMultiplierRaw)
+      ? Math.max(0.1, Math.min(3, moveSpeedMultiplierRaw))
+      : 1,
+    damagePerSecond: Number.isFinite(damagePerSecondRaw)
+      ? Math.max(0, Math.min(100, damagePerSecondRaw))
+      : 0,
+  };
+}
+
+function loadTileBehaviorDefinitions() {
+  if (!existsSync(TILE_TYPES_PATH)) {
+    return new Map([[WATER_TILE_ID, { id: WATER_TILE_ID, walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 }]]);
+  }
+
+  const raw = loadRequiredJsonFile(TILE_TYPES_PATH);
+  if (!Array.isArray(raw)) {
+    throw new Error(`Tile types must be an array: ${TILE_TYPES_PATH}`);
+  }
+
+  const definitions = new Map();
+
+  for (const [index, entry] of raw.entries()) {
+    const normalized = normalizeTileBehaviorEntry(entry, index);
+    definitions.set(normalized.id, normalized);
+  }
+
+  if (!definitions.size) {
+    definitions.set(WATER_TILE_ID, { id: WATER_TILE_ID, walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 });
+  }
+
+  return definitions;
+}
+
 function normalizeWorldObjectBehavior(value) {
   const behavior = String(value ?? '').trim().toLowerCase();
   if (
@@ -1053,9 +1100,30 @@ function loadWorldObjectTypeDefinitions() {
 }
 
 const WORLD_OBJECT_TYPE_DEFINITIONS = loadWorldObjectTypeDefinitions();
+const TILE_BEHAVIOR_DEFINITIONS = loadTileBehaviorDefinitions();
 
 function getWorldObjectTypeDefinition(objectTypeId) {
   return WORLD_OBJECT_TYPE_DEFINITIONS[String(objectTypeId ?? '')] ?? null;
+}
+
+function getTileBehaviorForTileId(tileId) {
+  const normalizedTileId = Math.max(0, Math.floor(Number(tileId) || 0));
+  const behavior = TILE_BEHAVIOR_DEFINITIONS.get(normalizedTileId);
+  if (behavior) {
+    return behavior;
+  }
+
+  return {
+    id: normalizedTileId,
+    walkable: normalizedTileId !== WATER_TILE_ID,
+    moveSpeedMultiplier: 1,
+    damagePerSecond: 0,
+  };
+}
+
+function getTileBehaviorAt(tileX, tileY) {
+  const tileId = WORLD_MAP_DATA.terrain[tileY]?.[tileX];
+  return getTileBehaviorForTileId(tileId);
 }
 
 const WORLD_MAP_DATA = loadWorldMapData();
@@ -3039,10 +3107,11 @@ function addItemToContainer(container, itemDefinition, quantity) {
   });
 }
 
-function transferContainerSlot(source, destination, slotIndex, quantity) {
+function transferContainerSlot(source, destination, slotIndex, quantity, options = {}) {
   return transferContainerSlotFromSystem(source, destination, slotIndex, quantity, {
     getItemDefinition,
     createInventorySlot,
+    forceDestinationStacking: options?.forceDestinationStacking === true,
   });
 }
 
@@ -3217,6 +3286,7 @@ function createPlayer(id) {
     nextInteractionAt: 0,
     nextCombatAt: 0,
     nextHpRegenAt: Date.now() + PLAYER_HP_REGEN_INTERVAL_MS,
+    terrainDamageCarry: 0,
     hp: PLAYER_BASE_HP,
     maxHp: PLAYER_BASE_HP,
     combatTargetEnemyId: null,
@@ -3295,6 +3365,73 @@ function canReceiveCraftingRecipeOutputs(player, recipe) {
   }
 
   return true;
+}
+
+function getMaxCraftableCountForRecipe(player, recipe, requestedCount = 1) {
+  const maxAttempts = Math.max(1, Math.min(28, Math.floor(Number(requestedCount ?? 1))));
+  const projectedInventory = cloneInventory(player.inventory, INVENTORY_MAX_SLOTS);
+  let craftableCount = 0;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let hasAllInputs = true;
+
+    for (const input of Array.isArray(recipe?.inputs) ? recipe.inputs : []) {
+      let remaining = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
+
+      for (let index = projectedInventory.slots.length - 1; index >= 0 && remaining > 0; index -= 1) {
+        const slot = projectedInventory.slots[index];
+        if (slot.itemId !== input.itemId) {
+          continue;
+        }
+
+        const available = Math.max(0, Math.floor(Number(slot.quantity ?? 0)));
+        if (available <= 0) {
+          continue;
+        }
+
+        const consumed = Math.min(available, remaining);
+        slot.quantity -= consumed;
+        remaining -= consumed;
+
+        if (slot.quantity <= 0) {
+          projectedInventory.slots.splice(index, 1);
+        }
+      }
+
+      if (remaining > 0) {
+        hasAllInputs = false;
+        break;
+      }
+    }
+
+    if (!hasAllInputs) {
+      break;
+    }
+
+    let canReceiveAllOutputs = true;
+    for (const output of Array.isArray(recipe?.outputs) ? recipe.outputs : []) {
+      const itemDefinition = getItemDefinition(output.itemId);
+      if (!itemDefinition) {
+        return craftableCount;
+      }
+
+      const outputQuantity = Math.max(1, Math.floor(Number(output.quantity ?? 1)));
+      if (!canAddItemToContainer(projectedInventory, itemDefinition, outputQuantity)) {
+        canReceiveAllOutputs = false;
+        break;
+      }
+
+      addItemToContainer(projectedInventory, itemDefinition, outputQuantity);
+    }
+
+    if (!canReceiveAllOutputs) {
+      break;
+    }
+
+    craftableCount += 1;
+  }
+
+  return craftableCount;
 }
 
 function resolveCraftingRequest(stationType, recipeId) {
@@ -3526,7 +3663,8 @@ function createRouteId() {
   return routeId;
 }
 
-function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS) {
+function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS, options = {}) {
+  const forceStacking = options?.forceStacking === true;
   const maxSlots = Number(inventory?.maxSlots);
   const slots = Array.isArray(inventory?.slots) ? inventory.slots : [];
   const maxAllowedSlots = Math.max(defaultMaxSlots, BANK_MAX_SLOTS);
@@ -3547,7 +3685,9 @@ function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS) {
     }
 
     const quantity = Math.max(1, Math.floor(Number(slot?.quantity ?? 1)));
-    const stackable = itemDefinition?.stackable ?? Boolean(slot?.stackable);
+    const stackable = forceStacking
+      ? true
+      : (itemDefinition?.stackable ?? Boolean(slot?.stackable));
     const normalizedSlot = {
       itemId,
       quantity: 1,
@@ -3591,7 +3731,7 @@ function cloneInventory(inventory, defaultMaxSlots = INVENTORY_MAX_SLOTS) {
 
 function normalizePlayerContainersForCurrentItems(player) {
   player.inventory = cloneInventory(player.inventory, INVENTORY_MAX_SLOTS);
-  player.bank = cloneInventory(player.bank, BANK_MAX_SLOTS);
+  player.bank = cloneInventory(player.bank, BANK_MAX_SLOTS, { forceStacking: true });
   applyPlayerMaxHpFromConstitution(player, true);
 }
 
@@ -3775,7 +3915,7 @@ function sanitizeQuestProgress(rawQuestProgress) {
 
 function sanitizePlayerProfile(rawProfile) {
   const inventory = cloneInventory(rawProfile?.inventory);
-  const bank = cloneInventory(rawProfile?.bank, BANK_MAX_SLOTS);
+  const bank = cloneInventory(rawProfile?.bank, BANK_MAX_SLOTS, { forceStacking: true });
   const equipment = cloneEquipment(rawProfile?.equipment);
   const skills = cloneSkills(rawProfile?.skills);
   skills.woodcutting.level = getLevelForXp(skills.woodcutting.xp);
@@ -4123,7 +4263,7 @@ function applyPersistedProfile(player, profile) {
   player.hp = safeProfile.hp;
   player.maxHp = safeProfile.maxHp;
   player.inventory = cloneInventory(safeProfile.inventory);
-  player.bank = cloneInventory(safeProfile.bank, BANK_MAX_SLOTS);
+  player.bank = cloneInventory(safeProfile.bank, BANK_MAX_SLOTS, { forceStacking: true });
   player.equipment = cloneEquipment(safeProfile.equipment);
   player.skills = cloneSkills(safeProfile.skills);
   player.quests = sanitizeQuestProgress(safeProfile.quests);
@@ -4415,7 +4555,20 @@ function isBaseWalkableTile(tileX, tileY) {
     return false;
   }
 
-  return !isWaterTile(tileX, tileY);
+  const behavior = getTileBehaviorAt(tileX, tileY);
+  return behavior.walkable !== false;
+}
+
+function getTileMoveSpeedMultiplier(tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= WORLD_WIDTH_TILES || tileY >= WORLD_HEIGHT_TILES) {
+    return 1;
+  }
+
+  const behavior = getTileBehaviorAt(tileX, tileY);
+  const multiplierRaw = Number(behavior?.moveSpeedMultiplier ?? 1);
+  return Number.isFinite(multiplierRaw)
+    ? Math.max(0.1, Math.min(3, multiplierRaw))
+    : 1;
 }
 
 function isNodeBlockingTile(tileX, tileY) {
@@ -4490,6 +4643,7 @@ const {
   shared: {
     clamp,
     isWalkableTile,
+    getTileMoveSpeedMultiplier,
     getCombatHitChance,
     randomIntBetween,
     addSkillXp,
@@ -4828,6 +4982,36 @@ function processPlayerHealthRegeneration(player, nowMs) {
 
   player.hp = Math.min(player.maxHp, player.hp + regenAmount);
   player.nextHpRegenAt = nowMs + PLAYER_HP_REGEN_INTERVAL_MS;
+}
+
+function processPlayerTerrainEffects(player, dtMs) {
+  if (!Number.isFinite(dtMs) || dtMs <= 0) {
+    return;
+  }
+
+  const behavior = getTileBehaviorAt(player.tileX, player.tileY);
+  const damagePerSecondRaw = Number(behavior?.damagePerSecond ?? 0);
+  const damagePerSecond = Number.isFinite(damagePerSecondRaw)
+    ? Math.max(0, Math.min(100, damagePerSecondRaw))
+    : 0;
+
+  if (damagePerSecond <= 0) {
+    player.terrainDamageCarry = 0;
+    return;
+  }
+
+  const previousCarry = Number(player.terrainDamageCarry ?? 0);
+  const carry = Number.isFinite(previousCarry) ? previousCarry : 0;
+  const accumulated = carry + (damagePerSecond * (dtMs / 1000));
+  const damage = Math.floor(accumulated);
+  player.terrainDamageCarry = accumulated - damage;
+
+  if (damage <= 0) {
+    return;
+  }
+
+  player.hp = Math.max(1, Math.floor(player.hp - damage));
+  player.lastActionText = `The ground burns you for ${damage}.`;
 }
 
 function randomIntBetween(minValue, maxValue) {
@@ -6337,6 +6521,7 @@ setInterval(() => {
     }
     processInteraction(client.player, now);
     processPlayerCombat(client.player, now);
+    processPlayerTerrainEffects(client.player, dtMs);
     processPlayerHealthRegeneration(client.player, now);
     processActiveCrafting(client.player, now);
   }
@@ -7089,6 +7274,12 @@ wss.on('connection', (socket) => {
           return;
         }
 
+        const craftableQuantity = getMaxCraftableCountForRecipe(player, resolvedRecipe.recipe, quantity);
+        if (craftableQuantity <= 0) {
+          sendChatToSocket(socket, '[Crafting] You do not have the required materials.');
+          return;
+        }
+
         const now = Date.now();
         player.activeCraftingJob = {
           objectId: objectEntry.id,
@@ -7096,7 +7287,7 @@ wss.on('connection', (socket) => {
           recipeId: resolvedRecipe.snapshot.id,
           recipeName: resolvedRecipe.snapshot.name,
           durationMs: Math.max(100, Math.floor(Number(resolvedRecipe.snapshot.durationMs ?? 1000))),
-          totalCount: quantity,
+          totalCount: craftableQuantity,
           completedCount: 0,
           startedAt: now,
           currentCraftStartedAt: now,
@@ -7108,7 +7299,7 @@ wss.on('connection', (socket) => {
         player.lastActionText = `Crafting ${resolvedRecipe.snapshot.name}`;
         sendChatToSocket(
           socket,
-          `[Crafting] Started crafting ${resolvedRecipe.snapshot.name} x${quantity} (${(player.activeCraftingJob.durationMs / 1000).toFixed(1)}s per item).`,
+          `[Crafting] Started crafting ${resolvedRecipe.snapshot.name} x${craftableQuantity} (${(player.activeCraftingJob.durationMs / 1000).toFixed(1)}s per item).`,
         );
         sendCraftingDebugToPlayer(
           player,

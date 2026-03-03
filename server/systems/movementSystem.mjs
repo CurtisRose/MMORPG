@@ -2,6 +2,7 @@ export class GridMovementService {
   constructor({
     clamp,
     isWalkableTile,
+    getTileMoveSpeedMultiplier,
     getWorldWidthTiles,
     getWorldHeightTiles,
     tileStepIntervalMs,
@@ -11,6 +12,9 @@ export class GridMovementService {
   }) {
     this.clamp = clamp;
     this.isWalkableTile = isWalkableTile;
+    this.getTileMoveSpeedMultiplier = typeof getTileMoveSpeedMultiplier === 'function'
+      ? getTileMoveSpeedMultiplier
+      : () => 1;
     this.getWorldWidthTiles = getWorldWidthTiles;
     this.getWorldHeightTiles = getWorldHeightTiles;
     this.tileStepIntervalMs = tileStepIntervalMs;
@@ -32,6 +36,18 @@ export class GridMovementService {
     player.tileX = nextTileX;
     player.tileY = nextTileY;
     return true;
+  }
+
+  getMoveDelayMsForTile(tileX, tileY, isDiagonalStep) {
+    const multiplierRaw = Number(this.getTileMoveSpeedMultiplier(tileX, tileY));
+    const multiplier = Number.isFinite(multiplierRaw)
+      ? Math.max(0.25, Math.min(4, multiplierRaw))
+      : 1;
+
+    const baseDelay = isDiagonalStep
+      ? Math.round(this.tileStepIntervalMs * this.diagonalStepMultiplier)
+      : this.tileStepIntervalMs;
+    return Math.max(1, Math.round(baseDelay / multiplier));
   }
 
   hasReachedTarget(entity) {
@@ -95,9 +111,7 @@ export class GridMovementService {
     entity.tileY = nextStep.tileY;
     entity.targetPath.shift();
     const moved = true;
-    const moveDelayMs = isDiagonalStep
-      ? Math.round(this.tileStepIntervalMs * this.diagonalStepMultiplier)
-      : this.tileStepIntervalMs;
+    const moveDelayMs = this.getMoveDelayMsForTile(entity.tileX, entity.tileY, isDiagonalStep);
 
     if (this.hasReachedTarget(entity)) {
       entity.targetTileX = null;
@@ -120,9 +134,7 @@ export class GridMovementService {
 
     const isDiagonalStep =
       Math.abs(player.directionX) === 1 && Math.abs(player.directionY) === 1;
-    return isDiagonalStep
-      ? Math.round(this.tileStepIntervalMs * this.diagonalStepMultiplier)
-      : this.tileStepIntervalMs;
+    return this.getMoveDelayMsForTile(player.tileX, player.tileY, isDiagonalStep);
   }
 
   stepPlayerIfPossible(player, nowMs) {

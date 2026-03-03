@@ -99,6 +99,14 @@ const PLAYER_APPEARANCE_URL = `${import.meta.env.BASE_URL}data/playerAppearance.
 type TerrainTileDefinition = {
   id?: unknown;
   walkable?: unknown;
+  moveSpeedMultiplier?: unknown;
+  damagePerSecond?: unknown;
+};
+
+type TerrainTileBehavior = {
+  walkable: boolean;
+  moveSpeedMultiplier: number;
+  damagePerSecond: number;
 };
 
 type PlayerAppearanceConfig = {
@@ -491,13 +499,20 @@ export class WorldScene extends Phaser.Scene {
     this.sceneReady = false;
     this.input.mouse?.disableContextMenu();
 
-    const [terrainData, blockedTerrainTileIds, playerAppearance] = await Promise.all([
+    const [terrainData, terrainTileBehaviors, playerAppearance] = await Promise.all([
       this.loadTerrainData(),
-      this.loadBlockedTerrainTileIds(),
+      this.loadTerrainTileBehaviors(),
       this.loadPlayerAppearanceConfig(),
     ]);
     this.terrainData = terrainData;
-    this.blockedTerrainTileIds = blockedTerrainTileIds;
+    this.blockedTerrainTileIds = new Set<number>(
+      Array.from(terrainTileBehaviors.entries())
+        .filter(([, behavior]) => behavior.walkable === false)
+        .map(([tileId]) => tileId),
+    );
+    if (!this.blockedTerrainTileIds.size) {
+      this.blockedTerrainTileIds.add(WATER_TILE_ID);
+    }
     this.playerAppearance = playerAppearance;
     this.worldHeightTiles = this.terrainData.length;
     this.worldWidthTiles = this.terrainData[0]?.length ?? MAP_WIDTH_TILES;
@@ -622,38 +637,46 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
-  private async loadBlockedTerrainTileIds(): Promise<Set<number>> {
+  private async loadTerrainTileBehaviors(): Promise<Map<number, TerrainTileBehavior>> {
     try {
       const response = await fetch(TILE_TYPES_URL, { cache: 'no-store' });
       if (!response.ok) {
-        return new Set<number>([WATER_TILE_ID]);
+        return new Map<number, TerrainTileBehavior>([[WATER_TILE_ID, { walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 }]]);
       }
 
       const raw = await response.json() as unknown;
       if (!Array.isArray(raw)) {
-        return new Set<number>([WATER_TILE_ID]);
+        return new Map<number, TerrainTileBehavior>([[WATER_TILE_ID, { walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 }]]);
       }
 
-      const blocked = new Set<number>();
+      const behaviors = new Map<number, TerrainTileBehavior>();
       for (const entry of raw as TerrainTileDefinition[]) {
         const tileId = Number(entry?.id);
         if (!Number.isFinite(tileId)) {
           continue;
         }
 
-        const walkable = entry?.walkable;
-        if (walkable === false) {
-          blocked.add(tileId);
-        }
+        const walkable = typeof entry?.walkable === 'boolean' ? entry.walkable : tileId !== WATER_TILE_ID;
+        const moveSpeedMultiplierRaw = Number(entry?.moveSpeedMultiplier ?? 1);
+        const damagePerSecondRaw = Number(entry?.damagePerSecond ?? 0);
+        behaviors.set(Math.floor(tileId), {
+          walkable,
+          moveSpeedMultiplier: Number.isFinite(moveSpeedMultiplierRaw)
+            ? Math.max(0.1, Math.min(3, moveSpeedMultiplierRaw))
+            : 1,
+          damagePerSecond: Number.isFinite(damagePerSecondRaw)
+            ? Math.max(0, Math.min(100, damagePerSecondRaw))
+            : 0,
+        });
       }
 
-      if (!blocked.size) {
-        blocked.add(WATER_TILE_ID);
+      if (!behaviors.size) {
+        behaviors.set(WATER_TILE_ID, { walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 });
       }
 
-      return blocked;
+      return behaviors;
     } catch {
-      return new Set<number>([WATER_TILE_ID]);
+      return new Map<number, TerrainTileBehavior>([[WATER_TILE_ID, { walkable: false, moveSpeedMultiplier: 1, damagePerSecond: 0 }]]);
     }
   }
 
@@ -3961,24 +3984,11 @@ export class WorldScene extends Phaser.Scene {
 
   private getTileTypeName(tileX: number, tileY: number): string {
     const tileId = this.terrainData[tileY]?.[tileX];
-
-    if (tileId === 0) {
-      return 'Grass';
+    if (!Number.isFinite(tileId)) {
+      return 'Unknown';
     }
 
-    if (tileId === 1) {
-      return 'Dirt';
-    }
-
-    if (tileId === 2) {
-      return 'Water';
-    }
-
-    if (tileId === 3) {
-      return 'Sand';
-    }
-
-    return 'Unknown';
+    return `Tile ${Math.floor(tileId)}`;
   }
 
   private getPlayersAtTile(

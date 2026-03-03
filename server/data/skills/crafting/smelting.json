@@ -3,29 +3,46 @@
   "recipes": [
     {
       "id": "bronze_bar",
+      "name": "Bronze bar",
       "requiredLevel": 1,
       "durationMs": 1600,
       "successChance": 1,
-      "xp": 6,
+      "xp": 15,
       "inputs": [
-        { "itemId": "copper_ore", "quantity": 1 },
-        { "itemId": "tin_ore", "quantity": 1 }
+        {
+          "itemId": "copper_ore",
+          "quantity": 1
+        },
+        {
+          "itemId": "tin_ore",
+          "quantity": 1
+        }
       ],
       "outputs": [
-        { "itemId": "bronze_bar", "quantity": 1 }
+        {
+          "itemId": "bronze_bar",
+          "quantity": 1
+        }
       ]
     },
     {
       "id": "iron_bar",
+      "name": "Iron bar",
       "requiredLevel": 10,
       "durationMs": 1900,
       "successChance": 1,
-      "xp": 10,
+      "xp": 25,
       "inputs": [
-        { "itemId": "iron_ore", "quantity": 1 }
+        {
+          "itemId": "iron_ore",
+          "quantity": 1
+        }
       ],
       "outputs": [
-        { "itemId": "iron_bar", "quantity": 1 }
+        {
+          "itemId": "iron_bar",
+          "quantity": 1
+        }
       ]
     }
   ],

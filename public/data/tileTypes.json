@@ -3,35 +3,50 @@
     "id": 0,
     "label": "Grass",
     "color": "#4f8f4a",
-    "image": "",
-    "walkable": true
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
   },
   {
     "id": 1,
     "label": "Dirt",
     "color": "#7c6642",
-    "image": "",
-    "walkable": true
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
   },
   {
     "id": 2,
     "label": "Water",
     "color": "#355f9c",
-    "image": "",
-    "walkable": false
+    "walkable": false,
+    "moveSpeedMultiplier": 0.35,
+    "damagePerSecond": 0
   },
   {
     "id": 3,
     "label": "Sand",
     "color": "#b9a56d",
-    "image": "",
-    "walkable": true
+    "walkable": true,
+    "moveSpeedMultiplier": 0.85,
+    "damagePerSecond": 0
   },
   {
     "id": 4,
     "label": "Stone",
     "color": "#4f8f4a",
     "image": "/assets/terrain/terrain_tileset.png",
-    "walkable": true
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 1
+  },
+  {
+    "id": 5,
+    "label": "Stone Brick",
+    "color": "#222833",
+    "image": "",
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
   }
 ]

@@ -3,28 +3,42 @@
   "recipes": [
     {
       "id": "wooden_arrows",
+      "name": "Wooden arrows",
       "requiredLevel": 1,
       "durationMs": 1400,
       "successChance": 1,
       "xp": 5,
       "inputs": [
-        { "itemId": "birch_logs", "quantity": 1 }
+        {
+          "itemId": "birch_logs",
+          "quantity": 1
+        }
       ],
       "outputs": [
-        { "itemId": "wooden_arrows", "quantity": 10 }
+        {
+          "itemId": "wooden_arrows",
+          "quantity": 10
+        }
       ]
     },
     {
       "id": "wooden_shortbow",
+      "name": "Wooden shortbow",
       "requiredLevel": 3,
       "durationMs": 1800,
       "successChance": 1,
       "xp": 9,
       "inputs": [
-        { "itemId": "oak_logs", "quantity": 1 }
+        {
+          "itemId": "oak_logs",
+          "quantity": 1
+        }
       ],
       "outputs": [
-        { "itemId": "wooden_shortbow", "quantity": 1 }
+        {
+          "itemId": "wooden_shortbow",
+          "quantity": 1
+        }
       ]
     }
   ],
