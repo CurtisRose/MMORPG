@@ -43,7 +43,7 @@ export interface ExecuteInteractionTargetDeps {
   executeNodeHarvest: (targetId: string) => void;
   executeNpcTalk: (targetId: string) => void;
   executeNpcTrade: (targetId: string) => void;
-  executeNpcBank: (targetId: string) => void;
+  executeObjectBank: (targetId: string) => void;
   executeEnemyAttack: (targetId: string) => void;
   executeGroundPickup: (targetId: string) => void;
   executeObjectCrafting: (targetId: string) => void;
@@ -52,6 +52,10 @@ export interface ExecuteInteractionTargetDeps {
 
 export class InteractionTargetRuntime {
   resolveObjectInteractionType(objectTypeId: string): InteractionTargetType {
+    if (objectTypeId === 'bank_chest' || objectTypeId === 'bank_building') {
+      return 'object-bank';
+    }
+
     if (
       objectTypeId === 'smelting_station'
       || objectTypeId === 'smithing_station'
@@ -81,7 +85,7 @@ export class InteractionTargetRuntime {
       };
     }
 
-    if (target.type === 'npc-talk' || target.type === 'npc-trade' || target.type === 'npc-bank') {
+    if (target.type === 'npc-talk' || target.type === 'npc-trade') {
       const npc = deps.getNpcById(target.id);
       if (!npc) {
         return null;
@@ -152,8 +156,8 @@ export class InteractionTargetRuntime {
       return;
     }
 
-    if (target.type === 'npc-bank') {
-      deps.executeNpcBank(target.id);
+    if (target.type === 'object-bank') {
+      deps.executeObjectBank(target.id);
       return;
     }
 

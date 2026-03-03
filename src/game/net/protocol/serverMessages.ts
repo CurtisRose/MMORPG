@@ -54,6 +54,22 @@ export interface CraftingOpenMessage {
   recipes: CraftingRecipeState[];
 }
 
+export interface CraftingProgressMessage {
+  type: 'craftingProgress';
+  active: boolean;
+  objectId?: string;
+  stationType?: string;
+  recipeId?: string;
+  recipeName?: string;
+  durationMs?: number;
+  totalCount?: number;
+  completedCount?: number;
+  cycleStartedAt?: number;
+  cycleEndsAt?: number;
+  cycleRemainingMs?: number;
+  cycleProgress?: number;
+}
+
 export interface PlayerJoinedMessage {
   type: 'playerJoined';
   player: RemotePlayerState;
@@ -183,6 +199,7 @@ export type ServerMessage =
   | ShopOpenMessage
   | BankOpenMessage
   | CraftingOpenMessage
+  | CraftingProgressMessage
   | AuthRequiredMessage
   | AuthOkMessage
   | AuthErrorMessage;

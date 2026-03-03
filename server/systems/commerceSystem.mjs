@@ -1,10 +1,10 @@
-export function openBankForPlayer(player, npcId, deps) {
-  const bankNpc = deps.getBankNpcById(String(npcId ?? ''));
-  if (!bankNpc || !deps.isWithinNpcRange(player, bankNpc)) {
+export function openBankForPlayer(player, objectId, deps) {
+  const bankObject = deps.getBankObjectById(String(objectId ?? ''));
+  if (!bankObject || !deps.isWithinObjectRange(player, bankObject)) {
     return { ok: false, reason: '[Bank] You are too far away.' };
   }
 
-  player.activeBankNpcId = bankNpc.id;
+  player.activeBankObjectId = bankObject.id;
   player.activeCraftingObjectId = null;
   player.activeCraftingStationType = null;
   return { ok: true };
@@ -23,11 +23,11 @@ export function transferBankItem(player, message, deps) {
     return { ok: false, skipped: true };
   }
 
-  const activeBankNpc = player.activeBankNpcId
-    ? deps.getBankNpcById(player.activeBankNpcId)
+  const activeBankObject = player.activeBankObjectId
+    ? deps.getBankObjectById(player.activeBankObjectId)
     : null;
-  if (!activeBankNpc || !deps.isWithinNpcRange(player, activeBankNpc)) {
-    player.activeBankNpcId = null;
+  if (!activeBankObject || !deps.isWithinObjectRange(player, activeBankObject)) {
+    player.activeBankObjectId = null;
     return { ok: false, reason: '[Bank] Move closer to the bank chest.' };
   }
 

@@ -26,6 +26,7 @@ export function syncEnemyVisuals(params: {
   createEnemyHealthBar: () => Phaser.GameObjects.Graphics;
   showFloatingText: (worldX: number, worldY: number, text: string, color: string) => void;
   enemyTextureKey: string;
+  styleEnemySprite?: (sprite: Phaser.GameObjects.Sprite, enemyState: EnemyState) => void;
   healthBarVisibleMs: number;
   tileSize: number;
 }): void {
@@ -56,6 +57,7 @@ export function syncEnemyVisuals(params: {
       existingEnemy.sprite.setPosition(position.x, position.y);
       existingEnemy.sprite.setVisible(!enemyState.isDead);
       existingEnemy.sprite.setAlpha(enemyState.isDead ? 0.35 : 1);
+      params.styleEnemySprite?.(existingEnemy.sprite, enemyState);
 
       if (hpChanged) {
         existingEnemy.healthBarVisibleUntil = Date.now() + params.healthBarVisibleMs;
@@ -74,10 +76,10 @@ export function syncEnemyVisuals(params: {
 
     const enemySprite = params
       .createEnemySprite(position.x, position.y, params.enemyTextureKey)
-      .setTint(0xff8a8a)
       .setDepth(2)
       .setVisible(!enemyState.isDead)
       .setAlpha(enemyState.isDead ? 0.35 : 1);
+    params.styleEnemySprite?.(enemySprite, enemyState);
     const healthBar = params.createEnemyHealthBar().setDepth(60);
     healthBar.setVisible(false);
 

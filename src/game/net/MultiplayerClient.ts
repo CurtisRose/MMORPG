@@ -104,6 +104,7 @@ export interface WorldNodeState {
   type: 'tree' | 'rock';
   resourceId: string;
   resourceName: string;
+  resourceImage?: string;
   resourceExamineText: string;
   resourceActionLabel: string;
   tileX: number;
@@ -126,6 +127,7 @@ export interface WorldObjectState {
   id: string;
   objectTypeId: string;
   name: string;
+  image?: string;
   tileX: number;
   tileY: number;
   blocksMovement: boolean;
@@ -145,8 +147,10 @@ export interface GroundItemState {
 
 export interface EnemyState {
   id: string;
+  minionTypeId?: string;
   type: 'goblin';
   name: string;
+  image?: string;
   tileX: number;
   tileY: number;
   targetTileX: number | null;
@@ -164,8 +168,9 @@ export interface EnemyState {
 
 export interface NpcState {
   id: string;
-  type: 'shopkeeper' | 'bank_chest' | 'villager' | string;
+  type: 'shopkeeper' | 'villager' | string;
   name: string;
+  image?: string;
   tileX: number;
   tileY: number;
   examineText: string;
@@ -209,6 +214,21 @@ export interface CraftingOpenState {
   objectId: string;
   inventory: InventoryState;
   recipes: CraftingRecipeState[];
+}
+
+export interface CraftingProgressState {
+  active: boolean;
+  objectId: string | null;
+  stationType: string | null;
+  recipeId: string | null;
+  recipeName: string | null;
+  durationMs: number;
+  totalCount: number;
+  completedCount: number;
+  cycleStartedAt: number;
+  cycleEndsAt: number;
+  cycleRemainingMs: number;
+  cycleProgress: number;
 }
 
 export interface ChatMessageState {
@@ -337,6 +357,7 @@ export class MultiplayerClient {
     private readonly onShopOpen: (shopId: string) => void,
     private readonly onBankOpen: (inventory: InventoryState, bank: InventoryState) => void,
     private readonly onCraftingOpen: (state: CraftingOpenState) => void,
+    private readonly onCraftingProgress: (state: CraftingProgressState) => void,
     private readonly onAuthFailure: (reason: string) => void,
   ) {}
 
@@ -493,6 +514,24 @@ export class MultiplayerClient {
           objectId: message.objectId,
           inventory: message.inventory,
           recipes: message.recipes,
+        });
+        return;
+      }
+
+      if (message.type === 'craftingProgress') {
+        this.onCraftingProgress({
+          active: Boolean(message.active),
+          objectId: message.objectId ? String(message.objectId) : null,
+          stationType: message.stationType ? String(message.stationType) : null,
+          recipeId: message.recipeId ? String(message.recipeId) : null,
+          recipeName: message.recipeName ? String(message.recipeName) : null,
+          durationMs: Math.max(1, Math.floor(Number(message.durationMs ?? 1))),
+          totalCount: Math.max(0, Math.floor(Number(message.totalCount ?? 0))),
+          completedCount: Math.max(0, Math.floor(Number(message.completedCount ?? 0))),
+          cycleStartedAt: Math.max(0, Math.floor(Number(message.cycleStartedAt ?? 0))),
+          cycleEndsAt: Math.max(0, Math.floor(Number(message.cycleEndsAt ?? 0))),
+          cycleRemainingMs: Math.max(0, Math.floor(Number(message.cycleRemainingMs ?? 0))),
+          cycleProgress: Math.max(0, Math.min(1, Number(message.cycleProgress ?? 0))),
         });
       }
     });
@@ -758,7 +797,7 @@ export class MultiplayerClient {
     );
   }
 
-  sendBankOpen(npcId: string): void {
+  sendBankOpen(objectId: string): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -767,7 +806,7 @@ export class MultiplayerClient {
     this.socket.send(
       JSON.stringify({
         type: 'bankOpen',
-        npcId,
+        objectId,
       }),
     );
   }
@@ -819,6 +858,20 @@ export class MultiplayerClient {
         type: 'craftingMake',
         recipeId,
         quantity,
+        objectId,
+      }),
+    );
+  }
+
+  sendCraftingCancel(objectId?: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.stats.messagesSent += 1;
+    this.socket.send(
+      JSON.stringify({
+        type: 'craftingCancel',
         objectId,
       }),
     );

@@ -1,0 +1,183 @@
+[
+  {
+    "id": "bank_building",
+    "name": "Bank Building",
+    "behavior": "bank",
+    "blocksMovement": true,
+    "image": "/assets/world-objects/tinderbox.png",
+    "examineText": "A sturdy building that houses the bank chest.",
+    "tags": [
+      "town",
+      "service"
+    ],
+    "behaviorConfig": {}
+  },
+  {
+    "id": "bank_chest",
+    "name": "Bank Chest",
+    "behavior": "bank",
+    "blocksMovement": true,
+    "image": "/assets/objects/bank_chest.png",
+    "examineText": "A secure chest for storing valuables.",
+    "tags": [
+      "town",
+      "service"
+    ],
+    "behaviorConfig": {}
+  },
+  {
+    "id": "birch_tree",
+    "name": "Birch Tree",
+    "behavior": "harvestable",
+    "blocksMovement": true,
+    "image": "/assets/world-objects/birch_tree.png",
+    "examineText": "A healthy birch tree.",
+    "tags": [
+      "nature",
+      "woodcutting"
+    ],
+    "behaviorConfig": {
+      "resourceId": "birch_tree",
+      "nodeType": "tree",
+      "respawnMs": 5000
+    }
+  },
+  {
+    "id": "copper_rock",
+    "name": "Copper Rock",
+    "behavior": "harvestable",
+    "blocksMovement": true,
+    "image": "/assets/world-objects/copper_rock.png",
+    "examineText": "A rock with copper ore veins.",
+    "tags": [
+      "nature",
+      "mining"
+    ],
+    "behaviorConfig": {
+      "resourceId": "copper_rock",
+      "nodeType": "rock",
+      "respawnMs": 6500
+    }
+  },
+  {
+    "id": "fletching_station",
+    "name": "Fletching Station",
+    "behavior": "station",
+    "blocksMovement": true,
+    "image": "/assets/objects/fletching_station.png",
+    "examineText": "A crafting bench for carving logs into bows and arrows.",
+    "tags": [
+      "crafting",
+      "town"
+    ],
+    "behaviorConfig": {
+      "stationType": "fletching"
+    }
+  },
+  {
+    "id": "flower_patch",
+    "name": "Flower Patch",
+    "behavior": "decorative",
+    "blocksMovement": false,
+    "image": "/assets/objects/flower_patch.png",
+    "examineText": "A patch of colorful flowers.",
+    "tags": [
+      "nature",
+      "decoration"
+    ],
+    "behaviorConfig": {}
+  },
+  {
+    "id": "iron_rock",
+    "name": "Iron Rock",
+    "behavior": "harvestable",
+    "blocksMovement": true,
+    "image": "/assets/world-objects/iron_rock.png",
+    "examineText": "A dense rock with iron ore.",
+    "tags": [
+      "nature",
+      "mining"
+    ],
+    "behaviorConfig": {
+      "resourceId": "iron_rock",
+      "nodeType": "rock",
+      "respawnMs": 7500
+    }
+  },
+  {
+    "id": "oak_tree",
+    "name": "Oak Tree",
+    "behavior": "harvestable",
+    "blocksMovement": true,
+    "image": "/assets/world-objects/oak_tree.png",
+    "examineText": "A sturdy oak tree.",
+    "tags": [
+      "nature",
+      "woodcutting"
+    ],
+    "behaviorConfig": {
+      "resourceId": "oak_tree",
+      "nodeType": "tree",
+      "respawnMs": 6500
+    }
+  },
+  {
+    "id": "smelting_station",
+    "name": "Smelting Station",
+    "behavior": "station",
+    "blocksMovement": true,
+    "image": "/assets/objects/smelting_station.png",
+    "examineText": "A blazing furnace used to smelt ores into bars.",
+    "tags": [
+      "crafting",
+      "town"
+    ],
+    "behaviorConfig": {
+      "stationType": "smelting"
+    }
+  },
+  {
+    "id": "smithing_station",
+    "name": "Smithing Station",
+    "behavior": "station",
+    "blocksMovement": true,
+    "image": "/assets/objects/smithing_station.png",
+    "examineText": "A sturdy anvil for shaping bars into equipment.",
+    "tags": [
+      "crafting",
+      "town"
+    ],
+    "behaviorConfig": {
+      "stationType": "smithing"
+    }
+  },
+  {
+    "id": "stone_wall",
+    "name": "Stone Wall",
+    "behavior": "decorative",
+    "blocksMovement": true,
+    "image": "/assets/objects/stone_wall.png",
+    "examineText": "A solid wall of stone.",
+    "tags": [
+      "structure"
+    ],
+    "behaviorConfig": {}
+  },
+  {
+    "id": "tin_rock",
+    "name": "Tin Rock",
+    "behavior": "harvestable",
+    "blocksMovement": true,
+    "image": "/assets/world-objects/tin_rock.png",
+    "examineText": "A rock with tin ore deposits.",
+    "tags": [
+      "nature",
+      "mining"
+    ],
+    "behaviorConfig": {
+      "resourceId": "tin_rock",
+      "nodeType": "rock",
+      "respawnMs": 6500
+    }
+  }
+]

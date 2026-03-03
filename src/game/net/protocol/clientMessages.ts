@@ -25,8 +25,14 @@ export interface RouteArrivedRequest {
   tileY: number;
 }
 
+export interface CraftingCancelRequest {
+  type: 'craftingCancel';
+  objectId?: string;
+}
+
 export type ClientMessage =
   | QuestDialogueActionRequest
   | QuestJournalSelectRequest
   | MoveToRequest
-  | RouteArrivedRequest;
+  | RouteArrivedRequest
+  | CraftingCancelRequest;

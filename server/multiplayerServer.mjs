@@ -27,6 +27,7 @@ import { processInteraction as processInteractionFromSystem } from './systems/ha
 import {
   performCraftingAtStation as performCraftingAtStationFromSystem,
   sendCraftingOpenToSocket as sendCraftingOpenToSocketFromSystem,
+  toCraftingRecipeSnapshot as toCraftingRecipeSnapshotFromSystem,
 } from './systems/craftingSystem.mjs';
 import {
   buyFromShop,
@@ -92,6 +93,9 @@ const ENEMY_MAX_CHASE_DISTANCE_TILES = 12;
 const ENEMY_HP_REGEN_INTERVAL_MS = 2500;
 const ENEMY_HP_REGEN_AMOUNT = 1;
 const PROFILE_AUTOSAVE_INTERVAL_MS = 5000;
+const CRAFTING_PROGRESS_UPDATE_INTERVAL_MS = 120;
+const DEBUG_CRAFTING_TRACE =
+  String(process.env.DEBUG_CRAFTING_TRACE ?? 'true').toLowerCase() === 'true';
 const COMBAT_PLAYER_BASE_AFFINITY_PCT = 55;
 const COMBAT_ENEMY_BASE_AFFINITY_PCT = 55;
 const COMBAT_PLAYER_HIT_MODIFIER_PCT = 0;
@@ -119,6 +123,7 @@ const COMBAT_SKILL_DATA_DIR = path.join(SKILL_DATA_DIR, 'combat');
 const CONTENT_DATA_DIR = path.join(DATA_DIR, 'content');
 const QUEST_DATA_DIR = path.join(DATA_DIR, 'quests');
 const WORLD_MAP_PATH = path.join(PUBLIC_DIR, 'data', 'worldMap.json');
+const WORLD_OBJECT_TYPES_PATH = path.join(PUBLIC_DIR, 'data', 'worldObjectTypes.json');
 const ITEM_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'items.json');
 const RESOURCE_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'resources.json');
 const GEAR_CONTENT_PATH = path.join(CONTENT_DATA_DIR, 'gear.json');
@@ -204,15 +209,6 @@ const DEFAULT_NPC_DEFINITIONS = [
     examineText: 'A friendly general store shopkeeper.',
     talkText: 'Hello there! Need supplies or want to sell your goods?',
   },
-  {
-    id: 'npc-bank-chest',
-    type: 'bank_chest',
-    name: 'Bank chest',
-    tileX: 42,
-    tileY: 38,
-    examineText: 'A sturdy chest for secure item storage.',
-    talkText: 'Your valuables are safe inside.',
-  },
 ];
 
 const DEFAULT_OBJECT_DEFINITIONS = [
@@ -224,6 +220,15 @@ const DEFAULT_OBJECT_DEFINITIONS = [
     tileY: 37,
     blocksMovement: true,
     examineText: 'A sturdy building that houses the bank chest.',
+  },
+  {
+    id: 'obj-bank-chest',
+    objectTypeId: 'bank_chest',
+    name: 'Bank chest',
+    tileX: 42,
+    tileY: 38,
+    blocksMovement: true,
+    examineText: 'A sturdy chest for secure item storage.',
   },
   {
     id: 'obj-smelting-station',
@@ -711,227 +716,270 @@ function normalizeQuestZones(
     .filter((zone) => zone !== null);
 }
 
+function normalizeWorldResourceEntry(entry, index, width, height, tileX, tileY) {
+  const nodeType = String(entry?.nodeType ?? '').trim();
+  const normalizedNodeType = nodeType === 'rock' ? 'rock' : 'tree';
+  const resourceId = String(entry?.resourceId ?? '').trim();
+
+  return {
+    id: String(entry?.id ?? `resource-${index + 1}`),
+    nodeType: normalizedNodeType,
+    resourceId,
+    image: String(entry?.image ?? '').trim(),
+    tileX: clamp(Math.floor(Number(tileX ?? entry?.tileX ?? 0)), 0, width - 1),
+    tileY: clamp(Math.floor(Number(tileY ?? entry?.tileY ?? 0)), 0, height - 1),
+    respawnMs: Math.max(250, Math.floor(Number(entry?.respawnMs ?? 5000))),
+  };
+}
+
+function normalizeWorldObjectEntry(entry, index, width, height, tileX, tileY) {
+  const objectTypeId = String(entry?.objectTypeId ?? 'object');
+
+  return {
+    id: String(entry?.id ?? `object-${index + 1}`),
+    objectTypeId,
+    name: String(entry?.name ?? `Object ${index + 1}`),
+    tileX: clamp(Math.floor(Number(tileX ?? entry?.tileX ?? 0)), 0, width - 1),
+    tileY: clamp(Math.floor(Number(tileY ?? entry?.tileY ?? 0)), 0, height - 1),
+    blocksMovement: Boolean(entry?.blocksMovement),
+    examineText: String(entry?.examineText ?? "It's an object."),
+  };
+}
+
+function normalizeChunkWorldObjectEntry(entry, index, width, height, tileX, tileY) {
+  const normalizedObject = normalizeWorldObjectEntry(entry, index, width, height, tileX, tileY);
+  const nodeTypeRaw = String(entry?.nodeType ?? '').trim().toLowerCase();
+
+  return {
+    ...normalizedObject,
+    resourceId: String(entry?.resourceId ?? '').trim(),
+    nodeType: nodeTypeRaw === 'rock' ? 'rock' : 'tree',
+    respawnMs: Math.max(250, Math.floor(Number(entry?.respawnMs ?? 5000))),
+  };
+}
+
 function normalizeWorldMapData(raw) {
-  const fallback = createDefaultWorldMapData();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('World map must be an object. Expected map-editor worldMap.json format.');
+  }
+
+  if (!Array.isArray(raw?.chunks) || raw.chunks.length === 0) {
+    throw new Error('World map must include a non-empty chunks array. Legacy map format is not supported.');
+  }
+
   const rawChunkWidth = Math.floor(Number(raw?.chunkWidth ?? DEFAULT_WORLD_WIDTH_TILES));
   const rawChunkHeight = Math.floor(Number(raw?.chunkHeight ?? DEFAULT_WORLD_HEIGHT_TILES));
   const chunkWidth = Math.max(1, Number.isFinite(rawChunkWidth) ? rawChunkWidth : DEFAULT_WORLD_WIDTH_TILES);
   const chunkHeight = Math.max(1, Number.isFinite(rawChunkHeight) ? rawChunkHeight : DEFAULT_WORLD_HEIGHT_TILES);
+  const validChunks = raw.chunks
+    .map((entry) => {
+      const chunkX = Number(entry?.chunkX);
+      const chunkY = Number(entry?.chunkY);
+      const terrain = entry?.terrain;
+      const isTerrainValid =
+        Array.isArray(terrain)
+        && terrain.length === chunkHeight
+        && terrain.every((row) => Array.isArray(row) && row.length === chunkWidth);
 
-  if (Array.isArray(raw?.chunks) && raw.chunks.length > 0) {
-    const validChunks = raw.chunks
-      .map((entry) => {
-        const chunkX = Number(entry?.chunkX);
-        const chunkY = Number(entry?.chunkY);
-        const terrain = entry?.terrain;
-        const isTerrainValid =
-          Array.isArray(terrain)
-          && terrain.length === chunkHeight
-          && terrain.every((row) => Array.isArray(row) && row.length === chunkWidth);
-
-        if (!Number.isFinite(chunkX) || !Number.isFinite(chunkY) || !isTerrainValid) {
-          return null;
-        }
-
-        return {
-          chunkX: Math.trunc(chunkX),
-          chunkY: Math.trunc(chunkY),
-          terrain,
-          resources: Array.isArray(entry?.resources) ? entry.resources : [],
-          monsters: Array.isArray(entry?.monsters) ? entry.monsters : [],
-          npcs: Array.isArray(entry?.npcs) ? entry.npcs : [],
-          objects: Array.isArray(entry?.objects) ? entry.objects : [],
-        };
-      })
-      .filter((entry) => entry !== null);
-
-    if (validChunks.length > 0) {
-      const minChunkX = Math.min(...validChunks.map((entry) => entry.chunkX));
-      const maxChunkX = Math.max(...validChunks.map((entry) => entry.chunkX));
-      const minChunkY = Math.min(...validChunks.map((entry) => entry.chunkY));
-      const maxChunkY = Math.max(...validChunks.map((entry) => entry.chunkY));
-      const worldWidthTiles = (maxChunkX - minChunkX + 1) * chunkWidth;
-      const worldHeightTiles = (maxChunkY - minChunkY + 1) * chunkHeight;
-      const chunkZeroOriginTileX = (0 - minChunkX) * chunkWidth;
-      const chunkZeroOriginTileY = (0 - minChunkY) * chunkHeight;
-      const terrain = createFilledTerrainGrid(worldWidthTiles, worldHeightTiles, 0);
-
-      const resources = [];
-      const monsters = [];
-      const npcs = [];
-      const objects = [];
-
-      for (const chunk of validChunks) {
-        const chunkOriginTileX = (chunk.chunkX - minChunkX) * chunkWidth;
-        const chunkOriginTileY = (chunk.chunkY - minChunkY) * chunkHeight;
-
-        for (let localY = 0; localY < chunkHeight; localY += 1) {
-          for (let localX = 0; localX < chunkWidth; localX += 1) {
-            terrain[chunkOriginTileY + localY][chunkOriginTileX + localX] = Math.max(
-              0,
-              Math.floor(Number(chunk.terrain[localY][localX]) || 0),
-            );
-          }
-        }
-
-        for (const entry of chunk.resources) {
-          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
-          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
-          resources.push({
-            id: String(entry?.id ?? `resource-${resources.length + 1}`),
-            nodeType: String(entry?.nodeType ?? 'tree'),
-            resourceId: String(entry?.resourceId ?? ''),
-            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
-            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
-            respawnMs: Math.max(250, Math.floor(Number(entry?.respawnMs ?? 5000))),
-          });
-        }
-
-        for (const entry of chunk.monsters) {
-          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
-          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
-          monsters.push({
-            id: String(entry?.id ?? `enemy-${monsters.length + 1}`),
-            minionTypeId: String(entry?.minionTypeId ?? ''),
-            tier: Math.max(1, Math.floor(Number(entry?.tier ?? 1))),
-            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
-            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
-          });
-        }
-
-        for (const entry of chunk.npcs) {
-          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
-          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
-          const npcId = String(entry?.id ?? `npc-${npcs.length + 1}`);
-          npcs.push({
-            id: npcId,
-            type: String(entry?.type ?? 'villager'),
-            name: String(entry?.name ?? `NPC ${npcs.length + 1}`),
-            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
-            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
-            examineText: String(entry?.examineText ?? "It's someone."),
-            talkText: String(entry?.talkText ?? 'Hello there.'),
-            questStartIds: normalizeQuestStringList(entry?.questStartIds),
-          });
-        }
-
-        for (const entry of chunk.objects) {
-          const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
-          const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
-          objects.push({
-            id: String(entry?.id ?? `object-${objects.length + 1}`),
-            objectTypeId: String(entry?.objectTypeId ?? 'object'),
-            name: String(entry?.name ?? `Object ${objects.length + 1}`),
-            tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
-            tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
-            blocksMovement: Boolean(entry?.blocksMovement),
-            examineText: String(entry?.examineText ?? "It's an object."),
-          });
-        }
+      if (!Number.isFinite(chunkX) || !Number.isFinite(chunkY) || !isTerrainValid) {
+        return null;
       }
 
-      const questZones = normalizeQuestZones(raw?.questZones, worldWidthTiles, worldHeightTiles, {
-        chunkWidth,
-        chunkHeight,
-        chunkZeroOriginTileX,
-        chunkZeroOriginTileY,
-      });
-
       return {
-        version: Math.max(1, Math.floor(Number(raw?.version ?? 1))),
-        chunkX: 0,
-        chunkY: 0,
-        chunkWidth,
-        chunkHeight,
-        chunkZeroOriginTileX,
-        chunkZeroOriginTileY,
-        width: worldWidthTiles,
-        height: worldHeightTiles,
+        chunkX: Math.trunc(chunkX),
+        chunkY: Math.trunc(chunkY),
         terrain,
-        resources,
-        monsters,
-        npcs,
-        objects,
-        questZones,
+        worldObjects: Array.isArray(entry?.worldObjects) ? entry.worldObjects : null,
+        monsters: Array.isArray(entry?.monsters) ? entry.monsters : [],
+        npcs: Array.isArray(entry?.npcs) ? entry.npcs : [],
       };
-    }
+    })
+    .filter((entry) => entry !== null);
+
+  if (validChunks.some((entry) => !Array.isArray(entry.worldObjects))) {
+    throw new Error('World map chunks must include worldObjects arrays. Legacy resources/objects chunk format is not supported.');
   }
 
-  const source = raw;
+  if (validChunks.length === 0) {
+    throw new Error('World map chunks are invalid. Ensure chunks contain chunkX, chunkY, and full terrain grids.');
+  }
 
-  const isTerrainValid =
-    Array.isArray(source?.terrain)
-    && source.terrain.length > 0
-    && source.terrain.every((row) => Array.isArray(row) && row.length === source.terrain[0].length);
+  const minChunkX = Math.min(...validChunks.map((entry) => entry.chunkX));
+  const maxChunkX = Math.max(...validChunks.map((entry) => entry.chunkX));
+  const minChunkY = Math.min(...validChunks.map((entry) => entry.chunkY));
+  const maxChunkY = Math.max(...validChunks.map((entry) => entry.chunkY));
+  const worldWidthTiles = (maxChunkX - minChunkX + 1) * chunkWidth;
+  const worldHeightTiles = (maxChunkY - minChunkY + 1) * chunkHeight;
+  const chunkZeroOriginTileX = (0 - minChunkX) * chunkWidth;
+  const chunkZeroOriginTileY = (0 - minChunkY) * chunkHeight;
+  const terrain = createFilledTerrainGrid(worldWidthTiles, worldHeightTiles, 0);
 
-  const width = isTerrainValid ? source.terrain[0].length : fallback.width;
-  const height = isTerrainValid ? source.terrain.length : fallback.height;
+  const resources = [];
+  const monsters = [];
+  const npcs = [];
+  const objects = [];
 
-  const terrain = isTerrainValid
-    ? source.terrain.map((row) => row.map((tileId) => Math.max(0, Math.floor(Number(tileId) || 0))))
-    : fallback.terrain;
+  for (const chunk of validChunks) {
+    const chunkOriginTileX = (chunk.chunkX - minChunkX) * chunkWidth;
+    const chunkOriginTileY = (chunk.chunkY - minChunkY) * chunkHeight;
 
-  const resources = Array.isArray(source?.resources)
-    ? source.resources.map((entry, index) => ({
-      id: String(entry?.id ?? `resource-${index + 1}`),
-      nodeType: String(entry?.nodeType ?? 'tree'),
-      resourceId: String(entry?.resourceId ?? ''),
-      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
-      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
-      respawnMs: Math.max(250, Math.floor(Number(entry?.respawnMs ?? 5000))),
-    }))
-    : fallback.resources;
+    for (let localY = 0; localY < chunkHeight; localY += 1) {
+      for (let localX = 0; localX < chunkWidth; localX += 1) {
+        terrain[chunkOriginTileY + localY][chunkOriginTileX + localX] = Math.max(
+          0,
+          Math.floor(Number(chunk.terrain[localY][localX]) || 0),
+        );
+      }
+    }
 
-  const monsters = Array.isArray(source?.monsters)
-    ? source.monsters.map((entry, index) => ({
-      id: String(entry?.id ?? `enemy-${index + 1}`),
-      minionTypeId: String(entry?.minionTypeId ?? ''),
-      tier: Math.max(1, Math.floor(Number(entry?.tier ?? 1))),
-      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
-      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
-    }))
-    : fallback.monsters;
+    const chunkWorldObjects = Array.isArray(chunk.worldObjects) ? chunk.worldObjects : [];
 
-  const npcs = Array.isArray(source?.npcs)
-    ? source.npcs.map((entry, index) => {
-      const npcId = String(entry?.id ?? `npc-${index + 1}`);
-      return {
+    for (const entry of chunkWorldObjects) {
+      const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+      const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+      const worldObjectEntry = normalizeChunkWorldObjectEntry(
+        entry,
+        resources.length + objects.length,
+        worldWidthTiles,
+        worldHeightTiles,
+        globalTileX,
+        globalTileY,
+      );
+      const definition = getWorldObjectTypeDefinition(worldObjectEntry.objectTypeId);
+      const behavior = definition?.behavior ?? 'decorative';
+      const behaviorConfig =
+        definition?.behaviorConfig && typeof definition.behaviorConfig === 'object' && !Array.isArray(definition.behaviorConfig)
+          ? definition.behaviorConfig
+          : {};
+
+      if (behavior === 'harvestable') {
+        const configResourceId = String(behaviorConfig.resourceId ?? '').trim();
+        const resourceId = worldObjectEntry.resourceId || configResourceId || worldObjectEntry.objectTypeId;
+        const configNodeType = String(behaviorConfig.nodeType ?? '').trim().toLowerCase() === 'rock' ? 'rock' : 'tree';
+        const nodeType = String(worldObjectEntry.nodeType ?? '').trim().toLowerCase() === 'rock' ? 'rock' : configNodeType;
+        const configRespawnMs = Number(behaviorConfig.respawnMs ?? 5000);
+
+        resources.push(
+          normalizeWorldResourceEntry(
+            {
+              id: worldObjectEntry.id,
+              resourceId,
+              nodeType,
+              image: String(definition?.image ?? '').trim() || String(entry?.image ?? '').trim(),
+              respawnMs: Number.isFinite(configRespawnMs) ? configRespawnMs : worldObjectEntry.respawnMs,
+              tileX: worldObjectEntry.tileX,
+              tileY: worldObjectEntry.tileY,
+            },
+            resources.length,
+            worldWidthTiles,
+            worldHeightTiles,
+            worldObjectEntry.tileX,
+            worldObjectEntry.tileY,
+          ),
+        );
+        continue;
+      }
+
+      if (behavior !== 'npc') {
+        objects.push(
+          normalizeWorldObjectEntry(
+            {
+              id: worldObjectEntry.id,
+              objectTypeId: worldObjectEntry.objectTypeId,
+              name: worldObjectEntry.name || definition?.name || worldObjectEntry.objectTypeId,
+              tileX: worldObjectEntry.tileX,
+              tileY: worldObjectEntry.tileY,
+              blocksMovement:
+                typeof worldObjectEntry.blocksMovement === 'boolean'
+                  ? worldObjectEntry.blocksMovement
+                  : Boolean(definition?.blocksMovement),
+              examineText: worldObjectEntry.examineText || definition?.examineText || "It's an object.",
+            },
+            objects.length,
+            worldWidthTiles,
+            worldHeightTiles,
+            worldObjectEntry.tileX,
+            worldObjectEntry.tileY,
+          ),
+        );
+      }
+    }
+
+    for (const entry of chunk.monsters) {
+      const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+      const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+      monsters.push({
+        id: String(entry?.id ?? `enemy-${monsters.length + 1}`),
+        minionTypeId: String(entry?.minionTypeId ?? ''),
+        tier: Math.max(1, Math.floor(Number(entry?.tier ?? 1))),
+        tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+        tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
+      });
+    }
+
+    for (const entry of chunk.npcs) {
+      const globalTileX = chunkOriginTileX + Math.floor(Number(entry?.tileX ?? 0));
+      const globalTileY = chunkOriginTileY + Math.floor(Number(entry?.tileY ?? 0));
+      const npcId = String(entry?.id ?? `npc-${npcs.length + 1}`);
+      const npcType = String(entry?.type ?? 'villager');
+      if (npcType === 'bank_chest') {
+        const bankObjectIdSource = npcId || `bank-chest-${objects.length + 1}`;
+        const bankObjectId = bankObjectIdSource.startsWith('obj-')
+          ? bankObjectIdSource
+          : `obj-${bankObjectIdSource.replace(/^npc-/, '')}`;
+        objects.push(
+          normalizeWorldObjectEntry(
+            {
+              id: bankObjectId,
+              objectTypeId: 'bank_chest',
+              name: String(entry?.name ?? 'Bank chest'),
+              tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+              tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
+              blocksMovement: true,
+              examineText: String(entry?.examineText ?? 'A sturdy chest for secure item storage.'),
+            },
+            objects.length,
+            worldWidthTiles,
+            worldHeightTiles,
+            globalTileX,
+            globalTileY,
+          ),
+        );
+        continue;
+      }
+
+      npcs.push({
         id: npcId,
-        type: String(entry?.type ?? 'villager'),
-        name: String(entry?.name ?? `NPC ${index + 1}`),
-        tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
-        tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
+        type: npcType,
+        name: String(entry?.name ?? `NPC ${npcs.length + 1}`),
+        image: String(entry?.image ?? '').trim(),
+        tileX: clamp(globalTileX, 0, worldWidthTiles - 1),
+        tileY: clamp(globalTileY, 0, worldHeightTiles - 1),
         examineText: String(entry?.examineText ?? "It's someone."),
         talkText: String(entry?.talkText ?? 'Hello there.'),
         questStartIds: normalizeQuestStringList(entry?.questStartIds),
-      };
-    })
-    : fallback.npcs;
+      });
+    }
 
-  const objects = Array.isArray(source?.objects)
-    ? source.objects.map((entry, index) => ({
-      id: String(entry?.id ?? `object-${index + 1}`),
-      objectTypeId: String(entry?.objectTypeId ?? 'object'),
-      name: String(entry?.name ?? `Object ${index + 1}`),
-      tileX: clamp(Math.floor(Number(entry?.tileX ?? 0)), 0, width - 1),
-      tileY: clamp(Math.floor(Number(entry?.tileY ?? 0)), 0, height - 1),
-      blocksMovement: Boolean(entry?.blocksMovement),
-      examineText: String(entry?.examineText ?? "It's an object."),
-    }))
-    : fallback.objects;
+  }
 
-  const questZones = normalizeQuestZones(source?.questZones, width, height);
+  const questZones = normalizeQuestZones(raw?.questZones, worldWidthTiles, worldHeightTiles, {
+    chunkWidth,
+    chunkHeight,
+    chunkZeroOriginTileX,
+    chunkZeroOriginTileY,
+  });
 
   return {
-    version: Math.max(1, Math.floor(Number(raw?.version ?? source?.version ?? 1))),
-    chunkX: Math.floor(Number(source?.chunkX ?? 0)),
-    chunkY: Math.floor(Number(source?.chunkY ?? 0)),
-    chunkWidth: width,
-    chunkHeight: height,
-    chunkZeroOriginTileX: 0,
-    chunkZeroOriginTileY: 0,
-    width,
-    height,
+    version: Math.max(1, Math.floor(Number(raw?.version ?? 1))),
+    chunkX: 0,
+    chunkY: 0,
+    chunkWidth,
+    chunkHeight,
+    chunkZeroOriginTileX,
+    chunkZeroOriginTileY,
+    width: worldWidthTiles,
+    height: worldHeightTiles,
     terrain,
     resources,
     monsters,
@@ -943,12 +991,71 @@ function normalizeWorldMapData(raw) {
 
 function loadWorldMapData() {
   if (!existsSync(WORLD_MAP_PATH)) {
-    mkdirSync(path.dirname(WORLD_MAP_PATH), { recursive: true });
-    writeFileSync(WORLD_MAP_PATH, `${JSON.stringify(createDefaultWorldMapData(), null, 2)}\n`, 'utf8');
+    throw new Error(`World map file is required and must be created by the map editor: ${WORLD_MAP_PATH}`);
   }
 
   const raw = loadRequiredJsonFile(WORLD_MAP_PATH);
   return normalizeWorldMapData(raw);
+}
+
+function normalizeWorldObjectBehavior(value) {
+  const behavior = String(value ?? '').trim().toLowerCase();
+  if (
+    behavior === 'harvestable'
+    || behavior === 'station'
+    || behavior === 'bank'
+    || behavior === 'shop'
+    || behavior === 'npc'
+  ) {
+    return behavior;
+  }
+
+  return 'decorative';
+}
+
+function loadWorldObjectTypeDefinitions() {
+  if (!existsSync(WORLD_OBJECT_TYPES_PATH)) {
+    return {};
+  }
+
+  const raw = loadRequiredJsonFile(WORLD_OBJECT_TYPES_PATH);
+  if (!Array.isArray(raw)) {
+    throw new Error(`World object types must be an array: ${WORLD_OBJECT_TYPES_PATH}`);
+  }
+
+  const definitions = {};
+
+  for (const [index, entry] of raw.entries()) {
+    const id = String(entry?.id ?? '').trim();
+    if (!id) {
+      throw new Error(`World object types entry ${index} is missing a valid id`);
+    }
+
+    if (definitions[id]) {
+      throw new Error(`World object types has duplicate id '${id}'`);
+    }
+
+    definitions[id] = {
+      id,
+      name: String(entry?.name ?? id).trim() || id,
+      behavior: normalizeWorldObjectBehavior(entry?.behavior),
+      blocksMovement: Boolean(entry?.blocksMovement),
+      image: String(entry?.image ?? '').trim(),
+      examineText: String(entry?.examineText ?? '').trim(),
+      behaviorConfig:
+        entry?.behaviorConfig && typeof entry.behaviorConfig === 'object' && !Array.isArray(entry.behaviorConfig)
+          ? { ...entry.behaviorConfig }
+          : {},
+    };
+  }
+
+  return definitions;
+}
+
+const WORLD_OBJECT_TYPE_DEFINITIONS = loadWorldObjectTypeDefinitions();
+
+function getWorldObjectTypeDefinition(objectTypeId) {
+  return WORLD_OBJECT_TYPE_DEFINITIONS[String(objectTypeId ?? '')] ?? null;
 }
 
 const WORLD_MAP_DATA = loadWorldMapData();
@@ -1389,6 +1496,7 @@ function loadMinionDefinitions() {
       id,
       type,
       name,
+      image: String(entry?.image ?? '').trim(),
       maxHp,
       attackDamageMin,
       attackDamageMax,
@@ -1755,7 +1863,20 @@ const CRAFTING_STATIONS = {
 };
 
 function getCraftingStationByObjectType(objectTypeId) {
-  const key = String(objectTypeId ?? '');
+  const key = String(objectTypeId ?? '').trim();
+  const worldObjectType = getWorldObjectTypeDefinition(key);
+  const behavior = worldObjectType?.behavior;
+
+  if (behavior === 'station') {
+    const configuredStationType = String(worldObjectType?.behaviorConfig?.stationType ?? '').trim();
+    const candidateKeys = [configuredStationType, `${configuredStationType}_station`, key];
+    for (const candidateKey of candidateKeys) {
+      if (candidateKey && CRAFTING_STATIONS[candidateKey]) {
+        return CRAFTING_STATIONS[candidateKey];
+      }
+    }
+  }
+
   return CRAFTING_STATIONS[key] ?? null;
 }
 
@@ -3099,9 +3220,10 @@ function createPlayer(id) {
     hp: PLAYER_BASE_HP,
     maxHp: PLAYER_BASE_HP,
     combatTargetEnemyId: null,
-    activeBankNpcId: null,
+    activeBankObjectId: null,
     activeCraftingObjectId: null,
     activeCraftingStationType: null,
+    activeCraftingJob: null,
     inventory: createInventory(),
     bank: createInventory(BANK_MAX_SLOTS),
     equipment: createEquipment(),
@@ -3114,6 +3236,284 @@ function createPlayer(id) {
 
   addPlayerGold(player, STARTING_GOLD);
   return player;
+}
+
+function hasRequiredItemsForCraftingRecipe(player, recipe) {
+  for (const input of Array.isArray(recipe?.inputs) ? recipe.inputs : []) {
+    const quantity = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
+    if (getInventoryItemCount(player, input.itemId) < quantity) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function canReceiveCraftingRecipeOutputs(player, recipe) {
+  const projectedInventory = cloneInventory(player.inventory, INVENTORY_MAX_SLOTS);
+
+  for (const input of Array.isArray(recipe?.inputs) ? recipe.inputs : []) {
+    let remaining = Math.max(1, Math.floor(Number(input.quantity ?? 1)));
+
+    for (let index = projectedInventory.slots.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      const slot = projectedInventory.slots[index];
+      if (slot.itemId !== input.itemId) {
+        continue;
+      }
+
+      const available = Math.max(0, Math.floor(Number(slot.quantity ?? 0)));
+      if (available <= 0) {
+        continue;
+      }
+
+      const consumed = Math.min(available, remaining);
+      slot.quantity -= consumed;
+      remaining -= consumed;
+
+      if (slot.quantity <= 0) {
+        projectedInventory.slots.splice(index, 1);
+      }
+    }
+
+    if (remaining > 0) {
+      return false;
+    }
+  }
+
+  for (const output of Array.isArray(recipe?.outputs) ? recipe.outputs : []) {
+    const itemDefinition = getItemDefinition(output.itemId);
+    if (!itemDefinition) {
+      return false;
+    }
+
+    const quantity = Math.max(1, Math.floor(Number(output.quantity ?? 1)));
+    if (!canAddItemToContainer(projectedInventory, itemDefinition, quantity)) {
+      return false;
+    }
+
+    addItemToContainer(projectedInventory, itemDefinition, quantity);
+  }
+
+  return true;
+}
+
+function resolveCraftingRequest(stationType, recipeId) {
+  const station = CRAFTING_STATIONS[String(stationType ?? '')] ?? null;
+  if (!station) {
+    return null;
+  }
+
+  const config = CRAFTING_SKILL_CONFIGS[station.recipeSkill];
+  if (!config || !Array.isArray(config.recipes)) {
+    return null;
+  }
+
+  const recipe = config.recipes.find((entry) => String(entry.id) === String(recipeId ?? '')) ?? null;
+  if (!recipe) {
+    return null;
+  }
+
+  return {
+    station,
+    recipe,
+    snapshot: toCraftingRecipeSnapshotFromSystem(recipe, {
+      clamp01,
+      getItemDefinition,
+    }),
+  };
+}
+
+function sendCraftingProgressToPlayer(player) {
+  const client = clients.get(player.id);
+  if (!client || client.socket.readyState !== 1) {
+    return;
+  }
+
+  const job = player.activeCraftingJob;
+  if (!job) {
+    client.socket.send(
+      JSON.stringify({
+        type: 'craftingProgress',
+        active: false,
+      }),
+    );
+    return;
+  }
+
+  const now = Date.now();
+  const durationMs = Math.max(1, Math.floor(Number(job.durationMs ?? 1000)));
+  const cycleRemainingMs = Math.max(0, Math.floor(Number(job.currentCraftEndsAt ?? now) - now));
+  const cycleProgress = 1 - cycleRemainingMs / durationMs;
+
+  client.socket.send(
+    JSON.stringify({
+      type: 'craftingProgress',
+      active: true,
+      objectId: job.objectId,
+      stationType: job.stationType,
+      recipeId: job.recipeId,
+      recipeName: job.recipeName,
+      durationMs,
+      totalCount: job.totalCount,
+      completedCount: job.completedCount,
+      cycleStartedAt: job.currentCraftStartedAt,
+      cycleEndsAt: job.currentCraftEndsAt,
+      cycleRemainingMs,
+      cycleProgress: clamp01(cycleProgress, 0),
+    }),
+  );
+}
+
+function sendCraftingDebugToPlayer(player, text) {
+  if (!DEBUG_CRAFTING_TRACE) {
+    return;
+  }
+
+  const message = String(text ?? '').trim();
+  if (!message) {
+    return;
+  }
+
+  console.log(
+    JSON.stringify({
+      scope: 'crafting-debug',
+      playerId: String(player?.id ?? ''),
+      message,
+      at: new Date().toISOString(),
+    }),
+  );
+}
+
+function clearActiveCraftingJob(player) {
+  if (!player.activeCraftingJob) {
+    return;
+  }
+
+  player.activeCraftingJob = null;
+  sendCraftingProgressToPlayer(player);
+}
+
+function clearActiveCraftingContext(player) {
+  player.activeCraftingObjectId = null;
+  player.activeCraftingStationType = null;
+  clearActiveCraftingJob(player);
+}
+
+function processActiveCrafting(player, now) {
+  const job = player.activeCraftingJob;
+  if (!job) {
+    return;
+  }
+
+  const client = clients.get(player.id);
+  const socket = client?.socket;
+  if (!socket || socket.readyState !== 1) {
+    clearActiveCraftingJob(player);
+    return;
+  }
+
+  const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === job.objectId) ?? null;
+  if (!objectEntry) {
+    sendChatToSocket(socket, '[Crafting] That workstation could not be found.');
+    clearActiveCraftingJob(player);
+    return;
+  }
+
+  if (!isWithinRange(player.tileX, player.tileY, objectEntry.tileX, objectEntry.tileY, INTERACTION_RANGE_TILES)) {
+    sendChatToSocket(socket, '[Crafting] Crafting stopped. Move closer to the workstation.');
+    clearActiveCraftingJob(player);
+    return;
+  }
+
+  if (now < Number(job.currentCraftEndsAt ?? 0)) {
+    const remainingMs = Math.max(0, Number(job.currentCraftEndsAt ?? now) - now);
+    if (now >= Number(job.nextDebugAt ?? 0)) {
+      job.nextDebugAt = now + 500;
+      sendCraftingDebugToPlayer(
+        player,
+        `waiting recipe=${job.recipeId} durationMs=${job.durationMs} startedAt=${job.currentCraftStartedAt} endsAt=${job.currentCraftEndsAt} now=${now} remainingMs=${remainingMs}`,
+      );
+    }
+
+    if (now >= Number(job.nextProgressAt ?? 0)) {
+      job.nextProgressAt = now + CRAFTING_PROGRESS_UPDATE_INTERVAL_MS;
+      sendCraftingProgressToPlayer(player);
+    }
+    return;
+  }
+
+  sendCraftingDebugToPlayer(
+    player,
+    `executing recipe=${job.recipeId} now=${now} endsAt=${job.currentCraftEndsAt} elapsedMs=${Math.max(0, now - Number(job.currentCraftStartedAt ?? now))}`,
+  );
+
+  const craftResult = performCraftingAtStation(player, job.stationType, job.recipeId, 1);
+  if (!craftResult.ok || Number(craftResult.craftedCount ?? 0) <= 0) {
+    const reason = String(craftResult.reason ?? 'You do not have the required materials.');
+    const completedCount = Math.max(0, Math.floor(Number(job.completedCount ?? 0)));
+    if (completedCount > 0) {
+      sendChatToSocket(
+        socket,
+        `[Crafting] Crafted ${job.recipeName} x${completedCount}, then stopped: ${reason}`,
+      );
+      player.lastActionText = `Crafted ${job.recipeName}`;
+    } else {
+      sendChatToSocket(socket, `[Crafting] ${reason}`);
+    }
+
+    sendCraftingDebugToPlayer(
+      player,
+      `stopped ok=${Boolean(craftResult.ok)} craftedCount=${Number(craftResult.craftedCount ?? 0)} reason=${reason}`,
+    );
+
+    clearActiveCraftingJob(player);
+    return;
+  }
+
+  job.completedCount += 1;
+
+  applyQuestProgressEvent(player, {
+    type: 'interact_object',
+    objectId: objectEntry.id,
+    objectTypeId: objectEntry.objectTypeId,
+    tileX: player.tileX,
+    tileY: player.tileY,
+    amount: 1,
+  });
+
+  if (job.completedCount >= job.totalCount) {
+    player.lastActionText = `Crafted ${job.recipeName}`;
+    const station = getCraftingStationByObjectType(objectEntry.objectTypeId);
+    if (station) {
+      sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
+    }
+    const totalElapsedMs = Math.max(0, now - Number(job.startedAt ?? job.currentCraftStartedAt ?? now));
+    sendChatToSocket(
+      socket,
+      `[Crafting] Crafted ${job.recipeName} x${job.completedCount} in ${(totalElapsedMs / 1000).toFixed(1)}s.`,
+    );
+    sendCraftingDebugToPlayer(
+      player,
+      `complete recipe=${job.recipeId} completed=${job.completedCount}/${job.totalCount} totalElapsedMs=${totalElapsedMs}`,
+    );
+    clearActiveCraftingJob(player);
+    return;
+  }
+
+  const station = getCraftingStationByObjectType(objectEntry.objectTypeId);
+  if (station) {
+    sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
+  }
+
+  job.currentCraftStartedAt = now;
+  job.currentCraftEndsAt = now + job.durationMs;
+  job.nextProgressAt = now;
+  job.nextDebugAt = now;
+  sendCraftingDebugToPlayer(
+    player,
+    `next-cycle recipe=${job.recipeId} completed=${job.completedCount}/${job.totalCount} nextEndsAt=${job.currentCraftEndsAt} durationMs=${job.durationMs}`,
+  );
+  sendCraftingProgressToPlayer(player);
 }
 
 function createRouteId() {
@@ -3788,6 +4188,7 @@ function createWorldEnemies() {
     enemies.set(spawnDefinition.id, {
       ...minionDefinition,
       id: spawnDefinition.id,
+      minionTypeId: spawnDefinition.minionTypeId,
       tier,
       maxHp: Math.max(1, Math.floor(minionDefinition.maxHp * statMultiplier)),
       attackDamageMin: Math.max(1, Math.floor(minionDefinition.attackDamageMin * statMultiplier)),
@@ -3829,6 +4230,7 @@ function createWorldNodes() {
     id: entry.id,
     type: entry.nodeType,
     resourceId: entry.resourceId,
+    image: String(entry.image ?? '').trim(),
     tileX: entry.tileX,
     tileY: entry.tileY,
     respawnMs: entry.respawnMs,
@@ -4477,6 +4879,7 @@ function getNpcSnapshot(viewerPlayer = null) {
       id: npc.id,
       type: npc.type,
       name: npc.name,
+      image: String(npc.image ?? ''),
       tileX: npc.tileX,
       tileY: npc.tileY,
       examineText: npc.examineText,
@@ -4511,9 +4914,18 @@ function getShopByNpcId(npcId) {
   return Object.values(SHOP_DEFINITIONS).find((shop) => shop.npcId === npcId) ?? null;
 }
 
-function getBankNpcById(npcId) {
-  const npc = getNpcById(npcId);
-  return npc?.type === 'bank_chest' ? npc : null;
+function getBankObjectById(objectId) {
+  const safeObjectId = String(objectId ?? '').trim();
+  if (!safeObjectId) {
+    return null;
+  }
+
+  const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === safeObjectId) ?? null;
+  if (!objectEntry) {
+    return null;
+  }
+
+  return objectEntry.objectTypeId === 'bank_chest' ? objectEntry : null;
 }
 
 function sendBankSnapshotToSocket(socket, player) {
@@ -4526,17 +4938,17 @@ function sendBankSnapshotToSocket(socket, player) {
   );
 }
 
-function handleBankOpen(player, npcId) {
-  return openBankForPlayer(player, npcId, {
-    getBankNpcById,
-    isWithinNpcRange,
+function handleBankOpen(player, objectId) {
+  return openBankForPlayer(player, objectId, {
+    getBankObjectById,
+    isWithinObjectRange,
   });
 }
 
 function handleBankTransfer(player, message) {
   return transferBankItem(player, message, {
-    getBankNpcById,
-    isWithinNpcRange,
+    getBankObjectById,
+    isWithinObjectRange,
     transferContainerSlot,
   });
 }
@@ -4607,8 +5019,10 @@ function getEnemySnapshot(now) {
     const isDead = enemy.deadUntil > now;
     enemies[enemy.id] = {
       id: enemy.id,
+      minionTypeId: String(enemy.minionTypeId ?? ''),
       type: enemy.type,
       name: enemy.name,
+      image: String(enemy.image ?? ''),
       tileX: enemy.tileX,
       tileY: enemy.tileY,
       targetTileX: enemy.targetTileX,
@@ -4630,6 +5044,11 @@ function getEnemySnapshot(now) {
 
 function isWithinNpcRange(player, npc) {
   const manhattanDistance = Math.abs(player.tileX - npc.tileX) + Math.abs(player.tileY - npc.tileY);
+  return manhattanDistance <= INTERACTION_RANGE_TILES;
+}
+
+function isWithinObjectRange(player, objectEntry) {
+  const manhattanDistance = Math.abs(player.tileX - objectEntry.tileX) + Math.abs(player.tileY - objectEntry.tileY);
   return manhattanDistance <= INTERACTION_RANGE_TILES;
 }
 
@@ -5658,11 +6077,17 @@ function getNodeSnapshot(now) {
   for (const [id, node] of worldNodes.entries()) {
     const isDepleted = node.depletedUntil > now;
     const resourceDefinition = getResourceDefinition(node.resourceId);
+    const worldObjectTypeDefinition = getWorldObjectTypeDefinition(node.resourceId);
+    const hasWorldObjectTypeDefinition = Boolean(worldObjectTypeDefinition);
+    const resourceImage = hasWorldObjectTypeDefinition
+      ? String(worldObjectTypeDefinition?.image ?? '').trim()
+      : (String(node.image ?? '').trim() || resourceDefinition?.image || '');
     nodes[id] = {
       id,
       type: node.type,
       resourceId: node.resourceId,
       resourceName: resourceDefinition?.name ?? node.resourceId,
+      resourceImage,
       resourceExamineText: resourceDefinition?.examineText ?? `It's a ${node.type}.`,
       resourceActionLabel:
         resourceDefinition?.actionLabel ?? (node.type === 'tree' ? 'Chop Tree' : 'Mine Rock'),
@@ -5703,10 +6128,12 @@ function getObjectSnapshot() {
   const objects = {};
 
   for (const object of WORLD_MAP_DATA.objects) {
+    const definition = getWorldObjectTypeDefinition(object.objectTypeId);
     objects[object.id] = {
       id: object.id,
       objectTypeId: object.objectTypeId,
       name: object.name,
+      image: String(definition?.image ?? ''),
       tileX: object.tileX,
       tileY: object.tileY,
       blocksMovement: object.blocksMovement,
@@ -5911,6 +6338,7 @@ setInterval(() => {
     processInteraction(client.player, now);
     processPlayerCombat(client.player, now);
     processPlayerHealthRegeneration(client.player, now);
+    processActiveCrafting(client.player, now);
   }
 
   processEnemyAi(now);
@@ -6134,9 +6562,8 @@ wss.on('connection', (socket) => {
         player.routeDestinationTileX = null;
         player.routeDestinationTileY = null;
         player.combatTargetEnemyId = null;
-        player.activeBankNpcId = null;
-        player.activeCraftingObjectId = null;
-        player.activeCraftingStationType = null;
+        player.activeBankObjectId = null;
+        clearActiveCraftingContext(player);
 
         if (length === 0) {
           player.directionX = 0;
@@ -6200,9 +6627,8 @@ wss.on('connection', (socket) => {
         player.routeDestinationTileY = player.targetTileY;
 
         player.combatTargetEnemyId = null;
-        player.activeBankNpcId = null;
-        player.activeCraftingObjectId = null;
-        player.activeCraftingStationType = null;
+        player.activeBankObjectId = null;
+        clearActiveCraftingContext(player);
 
         stepPlayerIfPossible(player, Date.now());
 
@@ -6292,9 +6718,8 @@ wss.on('connection', (socket) => {
         player.activeInteractionNodeId = nodeId;
         player.nextInteractionAt = 0;
         player.combatTargetEnemyId = null;
-        player.activeBankNpcId = null;
-        player.activeCraftingObjectId = null;
-        player.activeCraftingStationType = null;
+        player.activeBankObjectId = null;
+        clearActiveCraftingContext(player);
 
         if (!isWithinInteractionRange(player, node)) {
           const adjacentTile = findBestAdjacentTile(player, node);
@@ -6333,9 +6758,8 @@ wss.on('connection', (socket) => {
         }
 
         player.activeInteractionNodeId = null;
-        player.activeBankNpcId = null;
-        player.activeCraftingObjectId = null;
-        player.activeCraftingStationType = null;
+        player.activeBankObjectId = null;
+        clearActiveCraftingContext(player);
         beginPlayerCombatTarget(player, enemy.id, nowMs);
 
         log('player_combat_attack', {
@@ -6523,7 +6947,7 @@ wss.on('connection', (socket) => {
       }
 
       if (message.type === 'bankOpen') {
-        const result = handleBankOpen(player, message.npcId);
+        const result = handleBankOpen(player, message.objectId);
         if (!result.ok) {
           sendChatToSocket(socket, result.reason);
           return;
@@ -6588,7 +7012,7 @@ wss.on('connection', (socket) => {
           return;
         }
 
-        player.activeBankNpcId = null;
+        player.activeBankObjectId = null;
         player.activeCraftingObjectId = objectEntry.id;
         player.activeCraftingStationType = station.stationType;
 
@@ -6608,10 +7032,16 @@ wss.on('connection', (socket) => {
         });
 
         sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
+        sendCraftingProgressToPlayer(player);
         return;
       }
 
       if (message.type === 'craftingMake') {
+        if (player.activeCraftingJob) {
+          sendChatToSocket(socket, '[Crafting] You are already crafting.');
+          return;
+        }
+
         const objectId = String(message.objectId ?? player.activeCraftingObjectId ?? '');
         const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === objectId) ?? null;
         if (!objectEntry) {
@@ -6630,37 +7060,89 @@ wss.on('connection', (socket) => {
           return;
         }
 
-        player.activeBankNpcId = null;
+        player.activeBankObjectId = null;
         player.activeCraftingObjectId = objectEntry.id;
         player.activeCraftingStationType = station.stationType;
 
         const quantity = Math.max(1, Math.min(28, Math.floor(Number(message.quantity ?? 1))));
-        const result = performCraftingAtStation(player, station.stationType, message.recipeId, quantity);
-        if (!result.ok) {
-          sendChatToSocket(socket, `[Crafting] ${result.reason}`);
+
+        const resolvedRecipe = resolveCraftingRequest(station.stationType, message.recipeId);
+        if (!resolvedRecipe) {
+          sendChatToSocket(socket, '[Crafting] Unknown recipe.');
           return;
         }
 
-        const outputSummary = result.recipe.outputs
-          .map((entry) => `${entry.name}${entry.quantity > 1 ? ` x${entry.quantity}` : ''}`)
-          .join(', ');
+        const skillState = player.skills?.[resolvedRecipe.station.xpSkill] ?? { level: 1 };
+        const requiredLevel = Math.max(1, Math.floor(Number(resolvedRecipe.recipe.requiredLevel ?? 1)));
+        if (Math.max(1, Math.floor(Number(skillState.level ?? 1))) < requiredLevel) {
+          sendChatToSocket(socket, `[Crafting] Requires ${resolvedRecipe.station.xpSkill} level ${requiredLevel}.`);
+          return;
+        }
 
-        player.lastActionText = `Crafted ${result.recipe.name}`;
+        if (!hasRequiredItemsForCraftingRecipe(player, resolvedRecipe.recipe)) {
+          sendChatToSocket(socket, '[Crafting] You do not have the required materials.');
+          return;
+        }
+
+        if (!canReceiveCraftingRecipeOutputs(player, resolvedRecipe.recipe)) {
+          sendChatToSocket(socket, '[Crafting] Not enough inventory space.');
+          return;
+        }
+
+        const now = Date.now();
+        player.activeCraftingJob = {
+          objectId: objectEntry.id,
+          stationType: station.stationType,
+          recipeId: resolvedRecipe.snapshot.id,
+          recipeName: resolvedRecipe.snapshot.name,
+          durationMs: Math.max(100, Math.floor(Number(resolvedRecipe.snapshot.durationMs ?? 1000))),
+          totalCount: quantity,
+          completedCount: 0,
+          startedAt: now,
+          currentCraftStartedAt: now,
+          currentCraftEndsAt: now + Math.max(100, Math.floor(Number(resolvedRecipe.snapshot.durationMs ?? 1000))),
+          nextProgressAt: now,
+          nextDebugAt: now,
+        };
+
+        player.lastActionText = `Crafting ${resolvedRecipe.snapshot.name}`;
         sendChatToSocket(
           socket,
-          `[Crafting] Crafted ${result.recipe.name} x${result.craftedCount}${result.partial ? ' (stopped early)' : ''}. Outputs: ${outputSummary}.`,
+          `[Crafting] Started crafting ${resolvedRecipe.snapshot.name} x${quantity} (${(player.activeCraftingJob.durationMs / 1000).toFixed(1)}s per item).`,
+        );
+        sendCraftingDebugToPlayer(
+          player,
+          `start station=${station.stationType} object=${objectEntry.id} recipe=${resolvedRecipe.snapshot.id} durationMs=${player.activeCraftingJob.durationMs} startedAt=${now} endsAt=${player.activeCraftingJob.currentCraftEndsAt}`,
         );
 
-        applyQuestProgressEvent(player, {
-          type: 'interact_object',
-          objectId: objectEntry.id,
-          objectTypeId: objectEntry.objectTypeId,
-          tileX: player.tileX,
-          tileY: player.tileY,
-          amount: Math.max(1, Math.floor(Number(result.craftedCount ?? 1))),
-        });
-
         sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
+        sendCraftingProgressToPlayer(player);
+        return;
+      }
+
+      if (message.type === 'craftingCancel') {
+        const requestedObjectId = String(message.objectId ?? '').trim();
+        if (!player.activeCraftingJob) {
+          sendCraftingProgressToPlayer(player);
+          return;
+        }
+
+        if (requestedObjectId && requestedObjectId !== String(player.activeCraftingJob.objectId ?? '')) {
+          return;
+        }
+
+        clearActiveCraftingJob(player);
+        player.lastActionText = 'Crafting cancelled';
+        sendChatToSocket(socket, '[Crafting] Crafting cancelled.');
+
+        const objectId = String(player.activeCraftingObjectId ?? requestedObjectId ?? '').trim();
+        const objectEntry = WORLD_MAP_DATA.objects.find((entry) => entry.id === objectId) ?? null;
+        if (objectEntry) {
+          const station = getCraftingStationByObjectType(objectEntry.objectTypeId);
+          if (station) {
+            sendCraftingOpenToSocket(socket, player, station, objectEntry.id);
+          }
+        }
         return;
       }
 
