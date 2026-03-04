@@ -37,6 +37,15 @@ type NpcPlacement = {
   questStartIds: string[];
   chunkX: number;
   chunkY: number;
+  shop?: {
+    id: string;
+    name: string;
+    listings: Array<{
+      itemId: string;
+      buyPrice: number;
+      sellPrice: number;
+    }>;
+  };
 };
 
 type MinionDefinition = {
@@ -89,11 +98,17 @@ type WorldObjectTypeDefinition = {
   name: string;
   behavior: WorldObjectBehavior;
   blocksMovement: boolean;
+  renderLayer?: 'entity' | 'foreground';
   image?: string;
   examineText: string;
   tags: string[];
   behaviorConfig: Record<string, unknown>;
 };
+
+function normalizeWorldObjectRenderLayer(value: unknown): 'entity' | 'foreground' {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === 'foreground' ? 'foreground' : 'entity';
+}
 
 type PlayerAppearanceConfig = {
   image: string;
@@ -102,6 +117,7 @@ type PlayerAppearanceConfig = {
 type CraftingSkillId = 'smelting' | 'smithing' | 'fletching';
 
 type CraftingStationType = 'smelting_station' | 'smithing_station' | 'fletching_station';
+type RecipeSortMode = 'name' | 'requiredLevel';
 
 type RecipeItemStack = {
   itemId: string;
@@ -215,6 +231,7 @@ const state: {
   selectedWorldObjectTypeId: string | null;
   selectedRecipeSkill: CraftingSkillId;
   selectedRecipeIdBySkill: Partial<Record<CraftingSkillId, string>>;
+  recipeSortMode: RecipeSortMode;
 } = {
   tab: 'items',
   items: [],
@@ -246,6 +263,7 @@ const state: {
   selectedWorldObjectTypeId: null,
   selectedRecipeSkill: 'smelting',
   selectedRecipeIdBySkill: {},
+  recipeSortMode: 'name',
 };
 
 function setStatus(message: string): void {
@@ -844,6 +862,7 @@ function buildWorldMapWithNpcChanges(): WorldMapData {
           examineText: npc.examineText,
           talkText: npc.talkText,
           questStartIds: npc.questStartIds,
+          shop: npc.shop,
         })),
       };
     }),
@@ -1098,6 +1117,12 @@ function renderWorldObjectsTab(workspace: HTMLDivElement): void {
             <option value="false">false</option>
           </select>
         </label>
+        <label class="form-field"><span>Render Layer</span>
+          <select id="world-object-render-layer">
+            <option value="entity">entity</option>
+            <option value="foreground">foreground</option>
+          </select>
+        </label>
         <label class="form-field full"><span>Image</span><input id="world-object-image" value="${selected?.image ?? ''}" /></label>
         <label class="form-field full"><span>Examine Text</span><textarea id="world-object-examine">${selected?.examineText ?? ''}</textarea></label>
         <label class="form-field full"><span>Tags (comma-separated)</span><input id="world-object-tags" value="${(selected?.tags ?? []).join(', ')}" /></label>
@@ -1113,11 +1138,15 @@ function renderWorldObjectsTab(workspace: HTMLDivElement): void {
 
   const behaviorSelect = document.querySelector<HTMLSelectElement>('#world-object-behavior');
   const blocksMovementSelect = document.querySelector<HTMLSelectElement>('#world-object-blocks-movement');
+  const renderLayerSelect = document.querySelector<HTMLSelectElement>('#world-object-render-layer');
   if (behaviorSelect) {
     behaviorSelect.value = normalizeWorldObjectBehavior(selected?.behavior);
   }
   if (blocksMovementSelect) {
     blocksMovementSelect.value = selected?.blocksMovement === false ? 'false' : 'true';
+  }
+  if (renderLayerSelect) {
+    renderLayerSelect.value = normalizeWorldObjectRenderLayer(selected?.renderLayer);
   }
 
   const listRoot = document.querySelector<HTMLDivElement>('#world-object-list');
@@ -1177,6 +1206,7 @@ function renderWorldObjectsTab(workspace: HTMLDivElement): void {
       name: 'New World Object',
       behavior: 'decorative',
       blocksMovement: false,
+      renderLayer: 'entity',
       image: '/assets/world-objects/new_world_object.png',
       examineText: 'A world object.',
       tags: [],
@@ -1208,6 +1238,7 @@ function renderWorldObjectsTab(workspace: HTMLDivElement): void {
       const nextName = String(document.querySelector<HTMLInputElement>('#world-object-name')?.value ?? '').trim();
       const nextBehavior = normalizeWorldObjectBehavior(document.querySelector<HTMLSelectElement>('#world-object-behavior')?.value ?? 'decorative');
       const nextBlocksMovement = document.querySelector<HTMLSelectElement>('#world-object-blocks-movement')?.value !== 'false';
+      const nextRenderLayer = normalizeWorldObjectRenderLayer(document.querySelector<HTMLSelectElement>('#world-object-render-layer')?.value ?? 'entity');
       const nextImage = String(document.querySelector<HTMLInputElement>('#world-object-image')?.value ?? '').trim();
       const nextExamineText = String(document.querySelector<HTMLTextAreaElement>('#world-object-examine')?.value ?? '').trim();
       const nextTags = String(document.querySelector<HTMLInputElement>('#world-object-tags')?.value ?? '')
@@ -1232,6 +1263,7 @@ function renderWorldObjectsTab(workspace: HTMLDivElement): void {
       current.name = nextName;
       current.behavior = nextBehavior;
       current.blocksMovement = nextBlocksMovement;
+      current.renderLayer = nextRenderLayer;
       current.image = nextImage;
       current.examineText = nextExamineText;
       current.tags = nextTags;
@@ -1825,6 +1857,15 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
         <label class="form-field full"><span>Examine</span><textarea id="npc-examine">${selected?.examineText ?? ''}</textarea></label>
         <label class="form-field full"><span>Talk Text</span><textarea id="npc-talk">${selected?.talkText ?? ''}</textarea></label>
         <label class="form-field full"><span>Quest Start IDs (comma-separated)</span><input id="npc-quests" value="${(selected?.questStartIds ?? []).join(', ')}" /></label>
+        <label class="form-field"><span>Shop ID</span><input id="npc-shop-id" value="${selected?.shop?.id ?? ''}" /></label>
+        <label class="form-field"><span>Shop Name</span><input id="npc-shop-name" value="${selected?.shop?.name ?? ''}" /></label>
+        <div class="form-field full">
+          <span>Shop Listings</span>
+          <div id="npc-shop-listings-rows" style="display:flex; flex-direction:column; gap:6px;"></div>
+          <div class="form-actions" style="margin-top:6px;">
+            <button id="npc-shop-add-listing" class="action-button" type="button">Add Listing</button>
+          </div>
+        </div>
       </div>
       <div class="form-actions">
         <button id="npc-save-row" class="action-button">Apply Changes</button>
@@ -1901,6 +1942,88 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
     render();
   });
 
+  const renderNpcShopListingRows = (): void => {
+    const rowsRoot = document.querySelector<HTMLDivElement>('#npc-shop-listings-rows');
+    const activeNpc = getSelectedNpc();
+    if (!rowsRoot || !activeNpc) {
+      return;
+    }
+
+    rowsRoot.innerHTML = '';
+    const listings = activeNpc.shop?.listings ?? [];
+
+    if (!listings.length) {
+      const emptyHint = document.createElement('div');
+      emptyHint.textContent = 'No listings yet.';
+      emptyHint.style.opacity = '0.75';
+      rowsRoot.appendChild(emptyHint);
+      return;
+    }
+
+    listings.forEach((listing, index) => {
+      const row = document.createElement('div');
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '1.2fr 0.6fr 0.6fr auto';
+      row.style.gap = '6px';
+      row.style.alignItems = 'center';
+
+      const itemIdInput = document.createElement('input');
+      itemIdInput.value = listing.itemId;
+      itemIdInput.placeholder = 'itemId';
+      itemIdInput.dataset.field = 'itemId';
+      itemIdInput.dataset.index = String(index);
+
+      const buyPriceInput = document.createElement('input');
+      buyPriceInput.value = String(listing.buyPrice ?? 0);
+      buyPriceInput.placeholder = 'buyPrice';
+      buyPriceInput.dataset.field = 'buyPrice';
+      buyPriceInput.dataset.index = String(index);
+
+      const sellPriceInput = document.createElement('input');
+      sellPriceInput.value = String(listing.sellPrice ?? 0);
+      sellPriceInput.placeholder = 'sellPrice';
+      sellPriceInput.dataset.field = 'sellPrice';
+      sellPriceInput.dataset.index = String(index);
+
+      const removeButton = document.createElement('button');
+      removeButton.textContent = 'Remove';
+      removeButton.className = 'action-button';
+      removeButton.type = 'button';
+      removeButton.addEventListener('click', () => {
+        if (!activeNpc.shop) {
+          return;
+        }
+        activeNpc.shop.listings = activeNpc.shop.listings.filter((_, listingIndex) => listingIndex !== index);
+        renderNpcShopListingRows();
+      });
+
+      row.append(itemIdInput, buyPriceInput, sellPriceInput, removeButton);
+      rowsRoot.appendChild(row);
+    });
+  };
+
+  document.querySelector<HTMLButtonElement>('#npc-shop-add-listing')?.addEventListener('click', () => {
+    const activeNpc = getSelectedNpc();
+    if (!activeNpc) {
+      return;
+    }
+
+    if (!activeNpc.shop) {
+      activeNpc.shop = {
+        id: `shop-${activeNpc.id}`,
+        name: `${activeNpc.name}'s Shop`,
+        listings: [],
+      };
+    }
+
+    activeNpc.shop.listings.push({
+      itemId: '',
+      buyPrice: 0,
+      sellPrice: 0,
+    });
+    renderNpcShopListingRows();
+  });
+
   document.querySelector<HTMLButtonElement>('#npc-save-row')?.addEventListener('click', async () => {
     const current = getSelectedNpc();
     if (!current) {
@@ -1930,6 +2053,35 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
         .map((entry) => entry.trim())
         .filter(Boolean);
 
+      const shopId = String(document.querySelector<HTMLInputElement>('#npc-shop-id')?.value ?? '').trim();
+      const shopName = String(document.querySelector<HTMLInputElement>('#npc-shop-name')?.value ?? '').trim();
+      const listingRows = Array.from(document.querySelectorAll<HTMLDivElement>('#npc-shop-listings-rows > div'));
+      const listings = listingRows
+        .map((row) => {
+          const inputs = row.querySelectorAll<HTMLInputElement>('input');
+          const itemId = String(inputs[0]?.value ?? '').trim();
+          const buyPrice = Math.max(0, Math.floor(forceNumber(String(inputs[1]?.value ?? '0'), 0)));
+          const sellPrice = Math.max(0, Math.floor(forceNumber(String(inputs[2]?.value ?? '0'), 0)));
+          return {
+            itemId,
+            buyPrice,
+            sellPrice,
+          };
+        })
+        .filter((entry) => entry.itemId.length > 0);
+
+      const hasShopInput = Boolean(shopId || shopName || listings.length > 0);
+
+      if (hasShopInput) {
+        current.shop = {
+          id: shopId || `shop-${current.id}`,
+          name: shopName || `${current.name}'s Shop`,
+          listings,
+        };
+      } else {
+        delete current.shop;
+      }
+
       if (state.pendingNpcImageImport && state.pendingNpcImageImport.targetId === previousNpcId) {
         const imagePath = await copyLocalImageToAssets(state.pendingNpcImageImport.file, 'npcs');
         current.image = imagePath;
@@ -1953,6 +2105,8 @@ function renderNpcsTab(workspace: HTMLDivElement): void {
       setStatus((error as Error).message);
     }
   });
+
+  renderNpcShopListingRows();
 
   document.querySelector<HTMLButtonElement>('#npc-export')?.addEventListener('click', async () => {
     if (!state.worldMap) {
@@ -2263,6 +2417,13 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
           ${CRAFTING_SKILL_ORDER.map((entry) => `<option value="${entry}">${entry}</option>`).join('')}
         </select>
       </div>
+      <div class="row">
+        <label for="recipe-sort-select">Sort</label>
+        <select id="recipe-sort-select">
+          <option value="name">Name</option>
+          <option value="requiredLevel">Required Level</option>
+        </select>
+      </div>
       <div class="form-actions">
         <button id="recipe-add" class="action-button">Add Recipe</button>
         <button id="recipe-delete" class="action-button">Delete</button>
@@ -2285,8 +2446,20 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
             <option value="fletching_station">fletching_station</option>
           </select>
         </label>
-        <label class="form-field full"><span>Inputs JSON (itemId + quantity)</span><textarea id="recipe-inputs">${toPrettyJson(selected?.inputs ?? [])}</textarea></label>
-        <label class="form-field full"><span>Outputs JSON (itemId + quantity)</span><textarea id="recipe-outputs">${toPrettyJson(selected?.outputs ?? [])}</textarea></label>
+        <div class="form-field full">
+          <span>Inputs</span>
+          <div id="recipe-inputs-rows" style="display:flex; flex-direction:column; gap:6px;"></div>
+          <div class="form-actions" style="margin-top:6px;">
+            <button id="recipe-inputs-add" class="action-button" type="button">Add Input</button>
+          </div>
+        </div>
+        <div class="form-field full">
+          <span>Outputs</span>
+          <div id="recipe-outputs-rows" style="display:flex; flex-direction:column; gap:6px;"></div>
+          <div class="form-actions" style="margin-top:6px;">
+            <button id="recipe-outputs-add" class="action-button" type="button">Add Output</button>
+          </div>
+        </div>
       </div>
 
       <h3>Skill Messages</h3>
@@ -2307,9 +2480,13 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
   `;
 
   const skillSelect = document.querySelector<HTMLSelectElement>('#recipe-skill-select');
+  const sortSelect = document.querySelector<HTMLSelectElement>('#recipe-sort-select');
   const stationSelect = document.querySelector<HTMLSelectElement>('#recipe-station-type');
   if (skillSelect) {
     skillSelect.value = skill;
+  }
+  if (sortSelect) {
+    sortSelect.value = state.recipeSortMode;
   }
   if (stationSelect) {
     stationSelect.value = stationType;
@@ -2317,7 +2494,21 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
 
   const listRoot = document.querySelector<HTMLDivElement>('#recipe-list');
   if (listRoot) {
-    const sorted = [...config.recipes].sort((a, b) => a.id.localeCompare(b.id));
+    const sorted = [...config.recipes].sort((a, b) => {
+      if (state.recipeSortMode === 'requiredLevel') {
+        if (a.requiredLevel !== b.requiredLevel) {
+          return a.requiredLevel - b.requiredLevel;
+        }
+        return a.name.localeCompare(b.name);
+      }
+
+      const nameComparison = a.name.localeCompare(b.name);
+      if (nameComparison !== 0) {
+        return nameComparison;
+      }
+
+      return a.requiredLevel - b.requiredLevel;
+    });
     for (const recipe of sorted) {
       const button = document.createElement('button');
       button.className = `list-button${recipe.id === state.selectedRecipeIdBySkill[skill] ? ' selected' : ''}`;
@@ -2335,6 +2526,12 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
     if (!state.selectedRecipeIdBySkill[state.selectedRecipeSkill]) {
       state.selectedRecipeIdBySkill[state.selectedRecipeSkill] = state.craftingConfigs[state.selectedRecipeSkill].recipes[0]?.id;
     }
+    render();
+  });
+
+  sortSelect?.addEventListener('change', () => {
+    const nextSort = String(sortSelect.value ?? 'name').trim();
+    state.recipeSortMode = nextSort === 'requiredLevel' ? 'requiredLevel' : 'name';
     render();
   });
 
@@ -2369,6 +2566,83 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
     render();
   });
 
+  const renderRecipeStackRows = (kind: 'inputs' | 'outputs'): void => {
+    const activeRecipe = getSelectedRecipe();
+    if (!activeRecipe) {
+      return;
+    }
+
+    const rowsRoot = document.querySelector<HTMLDivElement>(kind === 'inputs' ? '#recipe-inputs-rows' : '#recipe-outputs-rows');
+    if (!rowsRoot) {
+      return;
+    }
+
+    rowsRoot.innerHTML = '';
+    const stacks = kind === 'inputs' ? activeRecipe.inputs : activeRecipe.outputs;
+
+    if (!stacks.length) {
+      const emptyHint = document.createElement('div');
+      emptyHint.textContent = `No ${kind} yet.`;
+      emptyHint.style.opacity = '0.75';
+      rowsRoot.appendChild(emptyHint);
+      return;
+    }
+
+    stacks.forEach((stack, index) => {
+      const row = document.createElement('div');
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '1.4fr 0.7fr auto';
+      row.style.gap = '6px';
+      row.style.alignItems = 'center';
+
+      const itemIdInput = document.createElement('input');
+      itemIdInput.value = stack.itemId;
+      itemIdInput.placeholder = 'itemId';
+
+      const quantityInput = document.createElement('input');
+      quantityInput.value = String(stack.quantity);
+      quantityInput.placeholder = 'quantity';
+      quantityInput.type = 'number';
+      quantityInput.min = '1';
+
+      const removeButton = document.createElement('button');
+      removeButton.textContent = 'Remove';
+      removeButton.className = 'action-button';
+      removeButton.type = 'button';
+      removeButton.addEventListener('click', () => {
+        if (kind === 'inputs') {
+          activeRecipe.inputs = activeRecipe.inputs.filter((_, stackIndex) => stackIndex !== index);
+        } else {
+          activeRecipe.outputs = activeRecipe.outputs.filter((_, stackIndex) => stackIndex !== index);
+        }
+        renderRecipeStackRows(kind);
+      });
+
+      row.append(itemIdInput, quantityInput, removeButton);
+      rowsRoot.appendChild(row);
+    });
+  };
+
+  document.querySelector<HTMLButtonElement>('#recipe-inputs-add')?.addEventListener('click', () => {
+    const activeRecipe = getSelectedRecipe();
+    if (!activeRecipe) {
+      return;
+    }
+
+    activeRecipe.inputs.push({ itemId: '', quantity: 1 });
+    renderRecipeStackRows('inputs');
+  });
+
+  document.querySelector<HTMLButtonElement>('#recipe-outputs-add')?.addEventListener('click', () => {
+    const activeRecipe = getSelectedRecipe();
+    if (!activeRecipe) {
+      return;
+    }
+
+    activeRecipe.outputs.push({ itemId: '', quantity: 1 });
+    renderRecipeStackRows('outputs');
+  });
+
   document.querySelector<HTMLButtonElement>('#recipe-save-row')?.addEventListener('click', async () => {
     const currentSkill = state.selectedRecipeSkill;
     const currentConfig = state.craftingConfigs[currentSkill];
@@ -2388,11 +2662,21 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
       const targetSkill = CRAFTING_SKILL_BY_STATION[targetStation] ?? currentSkill;
       const targetConfig = state.craftingConfigs[targetSkill];
 
-      const inputsRaw = parseJsonField<unknown[]>('recipe inputs', document.querySelector<HTMLTextAreaElement>('#recipe-inputs')?.value ?? '[]', []);
-      const outputsRaw = parseJsonField<unknown[]>('recipe outputs', document.querySelector<HTMLTextAreaElement>('#recipe-outputs')?.value ?? '[]', []);
+      const parseRows = (selector: string): RecipeItemStack[] => {
+        const rows = Array.from(document.querySelectorAll<HTMLDivElement>(`${selector} > div`));
+        return rows
+          .map((row) => {
+            const inputs = row.querySelectorAll<HTMLInputElement>('input');
+            return normalizeRecipeItemStack({
+              itemId: String(inputs[0]?.value ?? '').trim(),
+              quantity: Math.max(1, Math.floor(forceNumber(String(inputs[1]?.value ?? '1'), 1))),
+            });
+          })
+          .filter((entry): entry is RecipeItemStack => entry !== null);
+      };
 
-      const inputs = inputsRaw.map((entry) => normalizeRecipeItemStack(entry)).filter((entry): entry is RecipeItemStack => entry !== null);
-      const outputs = outputsRaw.map((entry) => normalizeRecipeItemStack(entry)).filter((entry): entry is RecipeItemStack => entry !== null);
+      const inputs = parseRows('#recipe-inputs-rows');
+      const outputs = parseRows('#recipe-outputs-rows');
 
       if (inputs.length === 0) {
         throw new Error('Recipe requires at least one valid input item stack.');
@@ -2449,6 +2733,9 @@ function renderRecipesTab(workspace: HTMLDivElement): void {
       setStatus(`Could not write ${targetSkill}.json directly; downloaded fallback file: ${(error as Error).message}`);
     }
   });
+
+  renderRecipeStackRows('inputs');
+  renderRecipeStackRows('outputs');
 
   document.querySelector<HTMLButtonElement>('#recipe-save-all')?.addEventListener('click', async () => {
     try {
@@ -2657,6 +2944,7 @@ async function init(): Promise<void> {
           name: String(entry?.name ?? '').trim(),
           behavior: normalizeWorldObjectBehavior(entry?.behavior),
           blocksMovement: Boolean(entry?.blocksMovement),
+          renderLayer: normalizeWorldObjectRenderLayer(entry?.renderLayer),
           image: String(entry?.image ?? '').trim(),
           examineText: String(entry?.examineText ?? 'A world object.').trim(),
           tags: Array.isArray(entry?.tags)
@@ -2701,6 +2989,22 @@ async function init(): Promise<void> {
           questStartIds: Array.isArray(rawNpc?.questStartIds)
             ? rawNpc.questStartIds.map((entry: unknown) => String(entry ?? '').trim()).filter(Boolean)
             : [],
+          shop:
+            rawNpc?.shop && typeof rawNpc.shop === 'object' && !Array.isArray(rawNpc.shop)
+              ? {
+                  id: String((rawNpc.shop as Record<string, unknown>)?.id ?? '').trim(),
+                  name: String((rawNpc.shop as Record<string, unknown>)?.name ?? '').trim(),
+                  listings: Array.isArray((rawNpc.shop as Record<string, unknown>)?.listings)
+                    ? ((rawNpc.shop as Record<string, unknown>).listings as unknown[])
+                        .map((listing) => ({
+                          itemId: String((listing as Record<string, unknown>)?.itemId ?? '').trim(),
+                          buyPrice: Math.max(0, Math.floor(forceNumber(String((listing as Record<string, unknown>)?.buyPrice ?? 0), 0))),
+                          sellPrice: Math.max(0, Math.floor(forceNumber(String((listing as Record<string, unknown>)?.sellPrice ?? 0), 0))),
+                        }))
+                        .filter((listing) => listing.itemId.length > 0)
+                    : [],
+                }
+              : undefined,
           chunkX,
           chunkY,
         };

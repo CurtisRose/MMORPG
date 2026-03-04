@@ -13475,6 +13475,60 @@
           "name": "Fletching bench",
           "blocksMovement": true,
           "examineText": "A crafting bench for carving logs into bows and arrows."
+        },
+        {
+          "id": "flower_patch-1",
+          "objectTypeId": "flower_patch",
+          "tileX": 38,
+          "tileY": 38,
+          "name": "Flower Patch",
+          "blocksMovement": false,
+          "examineText": "A patch of colorful flowers."
+        },
+        {
+          "id": "flower_patch-2",
+          "objectTypeId": "flower_patch",
+          "tileX": 37,
+          "tileY": 39,
+          "name": "Flower Patch",
+          "blocksMovement": false,
+          "examineText": "A patch of colorful flowers."
+        },
+        {
+          "id": "flower_patch-3",
+          "objectTypeId": "flower_patch",
+          "tileX": 37,
+          "tileY": 40,
+          "name": "Flower Patch",
+          "blocksMovement": false,
+          "examineText": "A patch of colorful flowers."
+        },
+        {
+          "id": "flower_patch-4",
+          "objectTypeId": "flower_patch",
+          "tileX": 43,
+          "tileY": 41,
+          "name": "Flower Patch",
+          "blocksMovement": false,
+          "examineText": "A patch of colorful flowers."
+        },
+        {
+          "id": "flower_patch-5",
+          "objectTypeId": "flower_patch",
+          "tileX": 45,
+          "tileY": 40,
+          "name": "Flower Patch",
+          "blocksMovement": false,
+          "examineText": "A patch of colorful flowers."
+        },
+        {
+          "id": "flower_patch-6",
+          "objectTypeId": "flower_patch",
+          "tileX": 44,
+          "tileY": 38,
+          "name": "Flower Patch",
+          "blocksMovement": false,
+          "examineText": "A patch of colorful flowers."
         }
       ],
       "monsters": [

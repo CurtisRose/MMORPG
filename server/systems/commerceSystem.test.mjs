@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { buyFromShop, openBankForPlayer, sellToShop } from './commerceSystem.mjs';
+import { buyFromShop, openBankForPlayer, sellToShop, transferBankItem } from './commerceSystem.mjs';
 
 export function runCommerceSystemTests() {
   const player = {
@@ -56,4 +56,60 @@ export function runCommerceSystemTests() {
   assert.equal(goldAdded, 21);
   assert.equal(sellPlayer.lastActionText, 'Sold Logs x3');
   assert.equal(sellResult.chatText, '[Shop] Sold Logs x3.');
+
+  const bankPlayer = {
+    activeBankObjectId: 'obj-bank',
+    inventory: {
+      maxSlots: 28,
+      slots: [
+        { itemId: 'bronze_axe', quantity: 1, name: 'Bronze axe' },
+        { itemId: 'bronze_axe', quantity: 1, name: 'Bronze axe' },
+        { itemId: 'bronze_axe', quantity: 1, name: 'Bronze axe' },
+        { itemId: 'apple', quantity: 2, name: 'Apple' },
+      ],
+    },
+    bank: {
+      maxSlots: 112,
+      slots: [],
+    },
+    lastActionText: null,
+  };
+
+  const transferResult = transferBankItem(
+    bankPlayer,
+    { from: 'inventory', to: 'bank', slotIndex: 0, quantity: 3 },
+    {
+      getBankObjectById: () => ({ id: 'obj-bank' }),
+      isWithinObjectRange: () => true,
+      transferContainerSlot: (source, destination, slotIndex, quantity) => {
+        const slot = source.slots[slotIndex];
+        if (!slot) {
+          return null;
+        }
+
+        const moved = Math.max(1, Math.min(Number(quantity), Number(slot.quantity ?? 1)));
+        slot.quantity -= moved;
+        if (slot.quantity <= 0) {
+          source.slots.splice(slotIndex, 1);
+        }
+
+        const existing = destination.slots.find((entry) => entry.itemId === slot.itemId);
+        if (existing) {
+          existing.quantity += moved;
+        } else {
+          destination.slots.push({ itemId: slot.itemId, quantity: moved, name: slot.name });
+        }
+
+        return {
+          quantity: moved,
+          itemName: slot.name,
+        };
+      },
+    },
+  );
+
+  assert.equal(transferResult.ok, true);
+  assert.equal(bankPlayer.bank.slots.find((entry) => entry.itemId === 'bronze_axe')?.quantity, 3);
+  assert.equal(bankPlayer.inventory.slots.filter((entry) => entry.itemId === 'bronze_axe').length, 0);
+  assert.equal(bankPlayer.lastActionText, 'Deposited Bronze axe x3');
 }

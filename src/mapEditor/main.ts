@@ -10,10 +10,12 @@ const MAX_HISTORY_STEPS = 100;
 const CANONICAL_WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
 const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
 const WORLD_OBJECT_TYPES_URL = `${import.meta.env.BASE_URL}data/worldObjectTypes.json`;
+const TERRAIN_TILESETS_URL = `${import.meta.env.BASE_URL}data/terrainTilesets.json`;
 const TERRAIN_TILESET_URL = `${import.meta.env.BASE_URL}assets/terrain/terrain_tileset.png`;
 const QUEST_INDEX_URL = `${import.meta.env.BASE_URL}data/quests/index.json`;
 const PROJECT_WORLD_MAP_RELATIVE_PATH = 'public/data/worldMap.json';
 const PROJECT_TILE_TYPES_RELATIVE_PATH = 'public/data/tileTypes.json';
+const PROJECT_TERRAIN_TILESETS_RELATIVE_PATH = 'public/data/terrainTilesets.json';
 const DEBUG_LOG_MAX_LINES = 160;
 const SIDEBAR_WIDTH_STORAGE_KEY = 'mapEditor.sidebarWidth';
 const SIDEBAR_MIN_WIDTH = 220;
@@ -56,6 +58,7 @@ type WorldObjectPlacement = {
   respawnMs?: number;
   name?: string;
   blocksMovement?: boolean;
+  renderLayer?: 'entity' | 'foreground';
   examineText?: string;
 };
 
@@ -113,6 +116,7 @@ type EditorChunkData = {
   width: number;
   height: number;
   terrain: number[][];
+  terrainTilesetIndices: number[][];
   worldObjects: WorldObjectPlacement[];
   resources: ResourcePlacement[];
   monsters: MonsterPlacement[];
@@ -120,9 +124,17 @@ type EditorChunkData = {
   npcs: NpcPlacement[];
 };
 
+type TerrainTilesetDefinition = {
+  id: string;
+  label: string;
+  url: string;
+  sourceTileSize: number;
+};
+
 
 type ChunkSnapshot = {
   terrain: number[][];
+  terrainTilesetIndices: number[][];
   worldObjects: WorldObjectPlacement[];
   resources: ResourcePlacement[];
   monsters: MonsterPlacement[];
@@ -157,6 +169,7 @@ type WorldObjectTypeDefinition = {
   name: string;
   behavior: WorldObjectBehavior;
   blocksMovement: boolean;
+  renderLayer: 'entity' | 'foreground';
   image: string;
   examineText: string;
   tags: string[];
@@ -268,6 +281,7 @@ const DEFAULT_WORLD_OBJECT_TYPES: WorldObjectTypeDefinition[] = [
     name: entry.label,
     behavior: 'harvestable' as WorldObjectBehavior,
     blocksMovement: true,
+    renderLayer: 'entity' as const,
     image: '',
     examineText: `A ${entry.label.toLowerCase()}.`,
     tags: ['legacy-default'],
@@ -282,6 +296,7 @@ const DEFAULT_WORLD_OBJECT_TYPES: WorldObjectTypeDefinition[] = [
     name: entry.label,
     behavior: entry.id.includes('station') ? 'station' as WorldObjectBehavior : 'decorative' as WorldObjectBehavior,
     blocksMovement: entry.blocksMovement,
+    renderLayer: 'entity' as const,
     image: '',
     examineText: entry.examineText,
     tags: ['legacy-default'],
@@ -359,8 +374,9 @@ const state: {
   projectDirectoryHandle: any | null;
   projectDirectoryName: string | null;
   activeEditorTab: EditorTab;
-  terrainTilesetUrl: string;
-  terrainTilesetObjectUrl: string | null;
+  terrainTilesets: TerrainTilesetDefinition[];
+  selectedTerrainTilesetId: string;
+  terrainTilesetObjectUrlsById: Record<string, string | null>;
 } = {
   data: createChunkData(0, 0),
   chunks: new Map<string, EditorChunkData>(),
@@ -392,8 +408,16 @@ const state: {
   projectDirectoryHandle: null,
   projectDirectoryName: null,
   activeEditorTab: 'paint',
-  terrainTilesetUrl: TERRAIN_TILESET_URL,
-  terrainTilesetObjectUrl: null,
+  terrainTilesets: [
+    {
+      id: 'terrain-default',
+      label: 'Default',
+      url: TERRAIN_TILESET_URL,
+      sourceTileSize: TILE_SIZE,
+    },
+  ],
+  selectedTerrainTilesetId: 'terrain-default',
+  terrainTilesetObjectUrlsById: {},
 };
 
 state.chunks.set(state.activeChunkKey, state.data);
@@ -471,16 +495,8 @@ app.innerHTML = `
       </div>
       <div id="tileRow" class="tileset-panel">
         <div class="row">
-          <label for="tilesetFileInput">Tileset Image</label>
-          <input id="tilesetFileInput" type="file" accept="image/*" />
-        </div>
-        <div class="row">
-          <label for="tilesetUrlInput">Tileset URL</label>
-          <input id="tilesetUrlInput" type="text" placeholder="assets/terrain/terrain_tileset.png" />
-        </div>
-        <div class="row row-buttons tileset-actions">
-          <button id="tilesetLoadUrl" class="secondary" type="button">Load URL</button>
-          <button id="tilesetResetDefault" class="secondary" type="button">Use Default</button>
+          <label for="tilesetSelect">Active Tileset</label>
+          <select id="tilesetSelect"></select>
         </div>
         <div class="tileset-preview-wrap">
           <canvas id="tilesetPaletteCanvas"></canvas>
@@ -535,6 +551,41 @@ app.innerHTML = `
     </div>
 
     <div class="panel" data-editor-tab="paint">
+      <h3>Add Tileset</h3>
+      <div class="row">
+        <label for="tilesetCreateName">Name</label>
+        <input id="tilesetCreateName" type="text" maxlength="60" placeholder="Grassland" />
+      </div>
+      <div class="row">
+        <label for="tilesetCreateFile">Tileset Image</label>
+        <input id="tilesetCreateFile" type="file" accept="image/*" />
+      </div>
+      <div class="row">
+        <label for="tilesetCreateSourceTileSize">Pixel Size</label>
+        <select id="tilesetCreateSourceTileSize">
+          <option value="32">32 px</option>
+          <option value="48">48 px</option>
+        </select>
+      </div>
+      <div class="row row-buttons">
+        <button id="tilesetCreateSave" class="secondary" type="button">Save Tileset</button>
+      </div>
+      <div class="note">After saving, choose the tileset in the Layer panel and pick a tile from its palette.</div>
+    </div>
+
+    <div class="panel" data-editor-tab="paint">
+      <h3>Delete Tileset</h3>
+      <div class="row">
+        <label for="tilesetDeleteSelect">Tileset</label>
+        <select id="tilesetDeleteSelect"></select>
+      </div>
+      <div class="row row-buttons">
+        <button id="tilesetDeleteButton" class="secondary" type="button">Delete Tileset</button>
+      </div>
+      <div class="note">Deleting a tileset remaps any painted tiles using it to the default tileset.</div>
+    </div>
+
+    <div class="panel" data-editor-tab="paint">
       <h3>Selection</h3>
       <div class="note" id="selectionSummary">No tile selected.</div>
       <div id="selectionTerrainRow" style="display:none; margin-top:8px;">
@@ -572,6 +623,13 @@ app.innerHTML = `
         <div class="row">
           <label for="selectionObjectType">Object</label>
           <select id="selectionObjectType">${objectSelectOptions}</select>
+        </div>
+        <div class="row">
+          <label for="selectionObjectRenderLayer">Render Layer</label>
+          <select id="selectionObjectRenderLayer">
+            <option value="entity">entity</option>
+            <option value="foreground">foreground</option>
+          </select>
         </div>
         <div class="row row-buttons"><button id="selectionObjectUpdate" class="secondary">Update Object</button></div>
         <div class="row row-buttons"><button id="selectionObjectDelete" class="secondary">Delete Object</button></div>
@@ -862,10 +920,13 @@ const editorTabPaintButton = requireElement<HTMLButtonElement>('#editorTabPaint'
 const editorTabQuestsButton = requireElement<HTMLButtonElement>('#editorTabQuests', 'Quests tab button not found');
 const toolModeSelect = requireElement<HTMLSelectElement>('#toolMode', 'Tool mode select not found');
 const layerModeSelect = requireElement<HTMLSelectElement>('#layerMode', 'Layer mode select not found');
-const tilesetFileInput = requireElement<HTMLInputElement>('#tilesetFileInput', 'Tileset image file input not found');
-const tilesetUrlInput = requireElement<HTMLInputElement>('#tilesetUrlInput', 'Tileset URL input not found');
-const tilesetLoadUrlButton = requireElement<HTMLButtonElement>('#tilesetLoadUrl', 'Load tileset URL button not found');
-const tilesetResetDefaultButton = requireElement<HTMLButtonElement>('#tilesetResetDefault', 'Reset tileset button not found');
+const tilesetSelect = requireElement<HTMLSelectElement>('#tilesetSelect', 'Tileset select not found');
+const tilesetCreateNameInput = requireElement<HTMLInputElement>('#tilesetCreateName', 'Tileset create name input not found');
+const tilesetCreateFileInput = requireElement<HTMLInputElement>('#tilesetCreateFile', 'Tileset create file input not found');
+const tilesetCreateSourceTileSizeSelect = requireElement<HTMLSelectElement>('#tilesetCreateSourceTileSize', 'Tileset create size select not found');
+const tilesetCreateSaveButton = requireElement<HTMLButtonElement>('#tilesetCreateSave', 'Tileset create save button not found');
+const tilesetDeleteSelect = requireElement<HTMLSelectElement>('#tilesetDeleteSelect', 'Tileset delete select not found');
+const tilesetDeleteButton = requireElement<HTMLButtonElement>('#tilesetDeleteButton', 'Tileset delete button not found');
 const tilesetPaletteCanvas = requireElement<HTMLCanvasElement>('#tilesetPaletteCanvas', 'Tileset palette canvas not found');
 const tilesetSelectionSummary = requireElement<HTMLDivElement>('#tilesetSelectionSummary', 'Tileset selection summary not found');
 const tileTypeSelect = requireElement<HTMLSelectElement>('#tileType', 'Tile type select not found');
@@ -913,6 +974,7 @@ const selectionMonsterUpdateButton = requireElement<HTMLButtonElement>('#selecti
 const selectionMonsterDeleteButton = requireElement<HTMLButtonElement>('#selectionMonsterDelete', 'Selection monster delete button not found');
 const selectionObjectRow = requireElement<HTMLDivElement>('#selectionObjectRow', 'Selection object row not found');
 const selectionObjectTypeSelect = requireElement<HTMLSelectElement>('#selectionObjectType', 'Selection object type not found');
+const selectionObjectRenderLayerSelect = requireElement<HTMLSelectElement>('#selectionObjectRenderLayer', 'Selection object render layer not found');
 const selectionObjectUpdateButton = requireElement<HTMLButtonElement>('#selectionObjectUpdate', 'Selection object update button not found');
 const selectionObjectDeleteButton = requireElement<HTMLButtonElement>('#selectionObjectDelete', 'Selection object delete button not found');
 const selectionNpcRow = requireElement<HTMLDivElement>('#selectionNpcRow', 'Selection npc row not found');
@@ -1149,6 +1211,24 @@ async function writeProjectJsonFile(relativeFilePath: string, value: unknown): P
   await writable.close();
 }
 
+async function fileToDataUrl(file: File): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      if (!result.startsWith('data:')) {
+        reject(new Error('Failed to encode image as data URL.'));
+        return;
+      }
+      resolve(result);
+    };
+    reader.onerror = () => {
+      reject(new Error('Failed to read image file.'));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function appendDebugLog(label: string, details: string): void {
   const time = new Date().toISOString().slice(11, 23);
   const line = `${time} [${label}] ${details}`;
@@ -1209,6 +1289,11 @@ function normalizeWorldObjectBehavior(value: unknown): WorldObjectBehavior {
   return 'decorative';
 }
 
+function normalizeWorldObjectRenderLayer(value: unknown): 'entity' | 'foreground' {
+  const parsed = String(value ?? '').trim().toLowerCase();
+  return parsed === 'foreground' ? 'foreground' : 'entity';
+}
+
 function normalizeWorldObjectTypes(input: unknown): WorldObjectTypeDefinition[] {
   if (!Array.isArray(input)) {
     return [];
@@ -1228,6 +1313,7 @@ function normalizeWorldObjectTypes(input: unknown): WorldObjectTypeDefinition[] 
         name,
         behavior: normalizeWorldObjectBehavior(candidate?.behavior),
         blocksMovement: Boolean(candidate?.blocksMovement),
+        renderLayer: normalizeWorldObjectRenderLayer(candidate?.renderLayer),
         image: String(candidate?.image ?? '').trim(),
         examineText: String(candidate?.examineText ?? "It's an object."),
         tags: Array.isArray(candidate?.tags)
@@ -1303,6 +1389,9 @@ function normalizeWorldObjectPlacement(rawEntry: unknown, index: number): WorldO
     ...(Number.isFinite(Number(entry.respawnMs)) ? { respawnMs: Math.max(250, Math.floor(Number(entry.respawnMs))) } : {}),
     ...(typeof entry.name === 'string' && entry.name.trim() ? { name: entry.name.trim() } : {}),
     ...(typeof entry.blocksMovement === 'boolean' ? { blocksMovement: entry.blocksMovement } : {}),
+    ...(typeof entry.renderLayer === 'string' && entry.renderLayer.trim()
+      ? { renderLayer: normalizeWorldObjectRenderLayer(entry.renderLayer) }
+      : {}),
     ...(typeof entry.examineText === 'string' && entry.examineText.trim() ? { examineText: entry.examineText.trim() } : {}),
   };
 }
@@ -1407,7 +1496,7 @@ function resolveTileImageUrl(input: string): string {
     return '';
   }
 
-  if (/^https?:\/\//i.test(trimmed)) {
+  if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
     return trimmed;
   }
 
@@ -1434,29 +1523,120 @@ function setActiveEditorTab(nextTab: EditorTab): void {
   refreshEditorTabPanels();
 }
 
-function revokeCurrentObjectTilesetUrl(): void {
-  if (!state.terrainTilesetObjectUrl) {
+function revokeObjectTilesetUrlForId(tilesetId: string): void {
+  const existing = state.terrainTilesetObjectUrlsById[tilesetId];
+  if (!existing) {
+    return;
+  }
+
+  if (!String(existing).startsWith('blob:')) {
+    state.terrainTilesetObjectUrlsById[tilesetId] = null;
     return;
   }
 
   try {
-    URL.revokeObjectURL(state.terrainTilesetObjectUrl);
+    URL.revokeObjectURL(existing);
   } catch {
     return;
   } finally {
-    state.terrainTilesetObjectUrl = null;
+    state.terrainTilesetObjectUrlsById[tilesetId] = null;
   }
 }
 
-function setTerrainTilesetUrl(nextUrl: string, objectUrl: string | null = null): void {
-  state.terrainTilesetUrl = nextUrl;
-  state.terrainTilesetObjectUrl = objectUrl;
+function getActiveTerrainTilesetIndex(): number {
+  const foundIndex = state.terrainTilesets.findIndex((entry) => entry.id === state.selectedTerrainTilesetId);
+  return foundIndex >= 0 ? foundIndex : 0;
+}
+
+function getActiveTerrainTileset(): TerrainTilesetDefinition {
+  const index = getActiveTerrainTilesetIndex();
+  return state.terrainTilesets[index] ?? {
+    id: 'terrain-default',
+    label: 'Default',
+    url: TERRAIN_TILESET_URL,
+    sourceTileSize: TILE_SIZE,
+  };
+}
+
+function getTerrainTilesetByIndex(index: number): TerrainTilesetDefinition {
+  const normalized = Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0;
+  return state.terrainTilesets[normalized] ?? state.terrainTilesets[0] ?? {
+    id: 'terrain-default',
+    label: 'Default',
+    url: TERRAIN_TILESET_URL,
+    sourceTileSize: TILE_SIZE,
+  };
+}
+
+function refreshTerrainTilesetDeleteOptions(): void {
+  tilesetDeleteSelect.innerHTML = state.terrainTilesets
+    .map((entry, index) => `<option value="${entry.id}">${entry.label || `Tileset ${index + 1}`}</option>`)
+    .join('');
+
+  if (!state.terrainTilesets.length) {
+    tilesetDeleteButton.disabled = true;
+    return;
+  }
+
+  const selectedDeleteId = tilesetDeleteSelect.value;
+  if (state.terrainTilesets.some((entry) => entry.id === selectedDeleteId)) {
+    tilesetDeleteSelect.value = selectedDeleteId;
+  } else {
+    tilesetDeleteSelect.value = state.selectedTerrainTilesetId;
+  }
+
+  tilesetDeleteButton.disabled = state.terrainTilesets.length <= 1;
+}
+
+function refreshTerrainTilesetSelectOptions(): void {
+  tilesetSelect.innerHTML = state.terrainTilesets
+    .map((entry, index) => `<option value="${entry.id}">${entry.label || `Tileset ${index + 1}`}</option>`)
+    .join('');
+
+  const fallbackActive = state.terrainTilesets[0];
+  if (!fallbackActive) {
+    return;
+  }
+
+  if (!state.terrainTilesets.some((entry) => entry.id === state.selectedTerrainTilesetId)) {
+    state.selectedTerrainTilesetId = fallbackActive.id;
+  }
+  tilesetSelect.value = state.selectedTerrainTilesetId;
+  refreshTerrainTilesetDeleteOptions();
+}
+
+function setActiveTerrainTilesetById(tilesetId: string): void {
+  const found = state.terrainTilesets.find((entry) => entry.id === tilesetId) ?? state.terrainTilesets[0];
+  if (!found) {
+    return;
+  }
+
+  if (state.selectedTerrainTilesetId === found.id) {
+    refreshTerrainTilesetSelectOptions();
+    updateTilesetSelectionSummary();
+    return;
+  }
+
+  state.selectedTerrainTilesetId = found.id;
+  refreshTerrainTilesetSelectOptions();
+  updateTilesetSelectionSummary();
   drawTilesetPalette();
   drawGrid();
 }
 
-function getTerrainTilesetCacheKey(): string {
-  return state.terrainTilesetUrl;
+function normalizeTerrainTilesetSourceTileSize(value: unknown): number {
+  const normalized = Math.floor(Number(value));
+  if (normalized === 48) {
+    return 48;
+  }
+
+  return TILE_SIZE;
+}
+
+function updateTilesetSelectionSummary(): void {
+  const active = getActiveTerrainTileset();
+  const activeIndex = getActiveTerrainTilesetIndex();
+  tilesetSelectionSummary.textContent = `Tile: ${state.selectedTileType} · Set: ${active.label || active.id} (#${activeIndex}) · Sheet: ${active.sourceTileSize}px`;
 }
 
 function getTileImageForTileId(tileId: number): HTMLImageElement | null {
@@ -1486,8 +1666,8 @@ function getTileImageForTileId(tileId: number): HTMLImageElement | null {
   return null;
 }
 
-function getSharedTerrainTilesetImage(): HTMLImageElement | null {
-  const cacheKey = getTerrainTilesetCacheKey();
+function getTerrainTilesetImage(tileset: TerrainTilesetDefinition): HTMLImageElement | null {
+  const cacheKey = tileset.url;
   const cached = tileImageCache.get(cacheKey);
   if (typeof cached !== 'undefined') {
     return cached;
@@ -1507,6 +1687,10 @@ function getSharedTerrainTilesetImage(): HTMLImageElement | null {
   tileImageCache.set(cacheKey, null);
   image.src = cacheKey;
   return null;
+}
+
+function getSharedTerrainTilesetImage(): HTMLImageElement | null {
+  return getTerrainTilesetImage(getActiveTerrainTileset());
 }
 
 function ensureTileTypeOptionExists(tileId: number): void {
@@ -1563,7 +1747,7 @@ function syncSelectedTerrainTile(tileId: number, updateSelectionControl = true):
   if (updateSelectionControl) {
     selectionTerrainTypeSelect.value = String(state.selectedTileType);
   }
-  tilesetSelectionSummary.textContent = `Tile: ${state.selectedTileType}`;
+  updateTilesetSelectionSummary();
   syncTileBehaviorInputsFromSelection();
   drawTilesetPalette();
 }
@@ -1587,9 +1771,11 @@ function syncTileBehaviorInputsFromSelection(): void {
 
 function drawTilesetPalette(): void {
   const previewSize = TILESET_PALETTE_PREVIEW_SIZE;
+  const activeTileset = getActiveTerrainTileset();
   const tileset = getSharedTerrainTilesetImage();
+  const sourceTileSize = activeTileset.sourceTileSize;
 
-  if (!tileset || !tileset.complete || tileset.naturalWidth < TILE_SIZE || tileset.naturalHeight < TILE_SIZE) {
+  if (!tileset || !tileset.complete || tileset.naturalWidth < sourceTileSize || tileset.naturalHeight < sourceTileSize) {
     tilesetPaletteCanvas.width = previewSize * 6;
     tilesetPaletteCanvas.height = previewSize * 4;
     tilesetPaletteContext.fillStyle = '#0f141c';
@@ -1602,8 +1788,8 @@ function drawTilesetPalette(): void {
     return;
   }
 
-  const columns = Math.max(1, Math.floor(tileset.naturalWidth / TILE_SIZE));
-  const rows = Math.max(1, Math.floor(tileset.naturalHeight / TILE_SIZE));
+  const columns = Math.max(1, Math.floor(tileset.naturalWidth / sourceTileSize));
+  const rows = Math.max(1, Math.floor(tileset.naturalHeight / sourceTileSize));
   tilesetPaletteCanvas.width = columns * previewSize;
   tilesetPaletteCanvas.height = rows * previewSize;
   tilesetPaletteContext.imageSmoothingEnabled = false;
@@ -1615,10 +1801,10 @@ function drawTilesetPalette(): void {
       const destinationY = row * previewSize;
       tilesetPaletteContext.drawImage(
         tileset,
-        column * TILE_SIZE,
-        row * TILE_SIZE,
-        TILE_SIZE,
-        TILE_SIZE,
+        column * sourceTileSize,
+        row * sourceTileSize,
+        sourceTileSize,
+        sourceTileSize,
         destinationX,
         destinationY,
         previewSize,
@@ -2030,6 +2216,10 @@ function createGreenTerrainData(): number[][] {
   return rows;
 }
 
+function createTerrainTilesetIndexGrid(defaultTilesetIndex = 0): number[][] {
+  return Array.from({ length: MAP_HEIGHT_TILES }, () => Array.from({ length: MAP_WIDTH_TILES }, () => defaultTilesetIndex));
+}
+
 function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
   const defaultTerrain = chunkX === 0 && chunkY === 0
     ? generateTerrainData()
@@ -2090,6 +2280,7 @@ function createChunkData(chunkX: number, chunkY: number): EditorChunkData {
     width: MAP_WIDTH_TILES,
     height: MAP_HEIGHT_TILES,
     terrain: defaultTerrain,
+    terrainTilesetIndices: createTerrainTilesetIndexGrid(0),
     worldObjects,
     resources: legacyPlacements.resources,
     monsters,
@@ -2116,6 +2307,7 @@ function ensureChunk(chunkX: number, chunkY: number): EditorChunkData {
 function cloneChunkSnapshot(snapshot: ChunkSnapshot): ChunkSnapshot {
   return {
     terrain: snapshot.terrain.map((row) => [...row]),
+    terrainTilesetIndices: snapshot.terrainTilesetIndices.map((row) => [...row]),
     worldObjects: snapshot.worldObjects.map((entry) => ({ ...entry })),
     resources: snapshot.resources.map((entry) => ({ ...entry })),
     monsters: snapshot.monsters.map((entry) => ({ ...entry })),
@@ -2130,6 +2322,7 @@ function cloneChunkSnapshot(snapshot: ChunkSnapshot): ChunkSnapshot {
 function captureChunkSnapshot(chunk: EditorChunkData): ChunkSnapshot {
   return {
     terrain: chunk.terrain.map((row) => [...row]),
+    terrainTilesetIndices: chunk.terrainTilesetIndices.map((row) => [...row]),
     worldObjects: chunk.worldObjects.map((entry) => ({ ...entry })),
     resources: chunk.resources.map((entry) => ({ ...entry })),
     monsters: chunk.monsters.map((entry) => ({ ...entry })),
@@ -2143,6 +2336,7 @@ function captureChunkSnapshot(chunk: EditorChunkData): ChunkSnapshot {
 
 function applyChunkSnapshot(chunk: EditorChunkData, snapshot: ChunkSnapshot): void {
   chunk.terrain = snapshot.terrain.map((row) => [...row]);
+  chunk.terrainTilesetIndices = snapshot.terrainTilesetIndices.map((row) => [...row]);
   chunk.worldObjects = snapshot.worldObjects.map((entry) => ({ ...entry }));
   syncChunkLegacyPlacementsFromWorldObjects(chunk);
   chunk.monsters = snapshot.monsters.map((entry) => ({ ...entry }));
@@ -2341,6 +2535,21 @@ function getMonsterAt(tileX: number, tileY: number, chunk: EditorChunkData = sta
 
 function getObjectAt(tileX: number, tileY: number, chunk: EditorChunkData = state.data): ObjectPlacement | undefined {
   return chunk.objects.find((entry) => entry.tileX === tileX && entry.tileY === tileY);
+}
+
+function getWorldObjectPlacementAt(
+  tileX: number,
+  tileY: number,
+  chunk: EditorChunkData = state.data,
+): WorldObjectPlacement | undefined {
+  return chunk.worldObjects.find((entry) => {
+    if (entry.tileX !== tileX || entry.tileY !== tileY) {
+      return false;
+    }
+
+    const behavior = getWorldObjectTypeByIdFromList(state.worldObjectTypes, entry.objectTypeId)?.behavior ?? 'decorative';
+    return behavior !== 'harvestable' && behavior !== 'npc';
+  });
 }
 
 function getNpcAt(tileX: number, tileY: number, chunk: EditorChunkData = state.data): NpcPlacement | undefined {
@@ -3113,6 +3322,21 @@ function normalizeChunkFromParsed(
     throw new Error('Invalid terrain dimensions. Expected 80x80.');
   }
 
+  const tilesetCount = Math.max(1, state.terrainTilesets.length);
+  const rawTerrainTilesetIndices = (parsed as { terrainTilesetIndices?: unknown }).terrainTilesetIndices;
+  const isTerrainTilesetIndicesValid = Array.isArray(rawTerrainTilesetIndices)
+    && rawTerrainTilesetIndices.length === MAP_HEIGHT_TILES
+    && rawTerrainTilesetIndices.every((row) => Array.isArray(row) && row.length === MAP_WIDTH_TILES);
+  const terrainTilesetIndices = isTerrainTilesetIndicesValid
+    ? (rawTerrainTilesetIndices as unknown[]).map((row) => (row as unknown[]).map((entry) => {
+      const index = Math.floor(Number(entry));
+      if (!Number.isFinite(index)) {
+        return 0;
+      }
+      return Math.max(0, Math.min(tilesetCount - 1, index));
+    }))
+    : createTerrainTilesetIndexGrid(0);
+
   const rawWorldObjects = (parsed as Partial<EditorChunkData>).worldObjects;
   if (!Array.isArray(rawWorldObjects)) {
     throw new Error('Invalid chunk worldObjects. Legacy resources/objects chunk format is not supported.');
@@ -3154,6 +3378,7 @@ function normalizeChunkFromParsed(
     width: MAP_WIDTH_TILES,
     height: MAP_HEIGHT_TILES,
     terrain: parsed.terrain as number[][],
+    terrainTilesetIndices,
     worldObjects,
     resources: legacyPlacements.resources,
     monsters: Array.isArray(parsed.monsters) ? parsed.monsters as MonsterPlacement[] : [],
@@ -3176,6 +3401,133 @@ function normalizeChunkFromParsed(
         };
       }),
   };
+}
+
+function normalizeTerrainTilesetsFromParsed(parsedTilesets: unknown): TerrainTilesetDefinition[] {
+  if (!Array.isArray(parsedTilesets)) {
+    return [];
+  }
+
+  const normalized = parsedTilesets
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+
+      const candidate = entry as Record<string, unknown>;
+      const id = normalizeText(String(candidate.id ?? ''), `terrain-tileset-${index + 1}`);
+      const label = normalizeText(String(candidate.label ?? ''), `Tileset ${index + 1}`);
+      const rawUrl = normalizeText(String(candidate.url ?? ''));
+      if (!rawUrl) {
+        return null;
+      }
+
+      return {
+        id,
+        label,
+        url: resolveTileImageUrl(rawUrl),
+        sourceTileSize: normalizeTerrainTilesetSourceTileSize(candidate.sourceTileSize),
+      } as TerrainTilesetDefinition;
+    })
+    .filter((entry): entry is TerrainTilesetDefinition => entry !== null);
+
+  return normalized;
+}
+
+async function loadTerrainTilesetsIfAvailable(): Promise<void> {
+  try {
+    const response = await fetch(TERRAIN_TILESETS_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      appendDebugLog('terrain-tilesets', `Failed to fetch terrainTilesets.json (${response.status}); using current tilesets.`);
+      return;
+    }
+
+    const parsed = await response.json();
+    const normalized = normalizeTerrainTilesetsFromParsed(parsed);
+    if (!normalized.length) {
+      appendDebugLog('terrain-tilesets', 'terrainTilesets.json empty/invalid; using current tilesets.');
+      return;
+    }
+
+    for (const tilesetId of Object.keys(state.terrainTilesetObjectUrlsById)) {
+      revokeObjectTilesetUrlForId(tilesetId);
+    }
+
+    state.terrainTilesets = normalized;
+    if (!state.terrainTilesets.some((entry) => entry.id === state.selectedTerrainTilesetId)) {
+      state.selectedTerrainTilesetId = state.terrainTilesets[0].id;
+    }
+    state.terrainTilesetObjectUrlsById = {};
+    refreshTerrainTilesetSelectOptions();
+    updateTilesetSelectionSummary();
+    drawTilesetPalette();
+    drawGrid();
+  } catch (error) {
+    appendDebugLog('terrain-tilesets', `Exception: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function persistTerrainTilesets(options: { notifySuccess?: boolean } = {}): Promise<void> {
+  const notifySuccess = options.notifySuccess !== false;
+  const payload = state.terrainTilesets.map((entry) => ({
+    id: entry.id,
+    label: entry.label,
+    url: entry.url,
+    sourceTileSize: normalizeTerrainTilesetSourceTileSize(entry.sourceTileSize),
+  }));
+
+  if (supportsFileSystemAccess()) {
+    try {
+      await writeProjectJsonFile(PROJECT_TERRAIN_TILESETS_RELATIVE_PATH, payload);
+      updateProjectFolderStatusLabel();
+      if (notifySuccess) {
+        window.alert(`Tilesets saved to ${PROJECT_TERRAIN_TILESETS_RELATIVE_PATH}.`);
+      }
+      return;
+    } catch (error) {
+      appendDebugLog('terrain-tilesets-save', `Local folder save failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const body = JSON.stringify(payload, null, 2);
+  try {
+    const response = await fetch(TERRAIN_TILESETS_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (response.ok) {
+      if (notifySuccess) {
+        window.alert('Tilesets saved to terrainTilesets.json!');
+      }
+      return;
+    }
+
+    const postResponse = await fetch(TERRAIN_TILESETS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (postResponse.ok) {
+      if (notifySuccess) {
+        window.alert('Tilesets saved to terrainTilesets.json!');
+      }
+      return;
+    }
+
+    throw new Error('Server did not accept PUT/POST');
+  } catch {
+    const blob = new Blob([body], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'terrainTilesets.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    window.alert(`Could not save directly to server. Downloaded terrainTilesets.json instead. Upload it manually to ${TERRAIN_TILESETS_URL}.`);
+  }
 }
 
 function normalizeQuestZonesFromParsed(parsedZones: unknown): QuestZonePlacement[] {
@@ -3221,6 +3573,17 @@ async function loadCanonicalWorldMapIfAvailable(): Promise<void> {
     }
 
     const parsed = await response.json();
+    const parsedTilesets = normalizeTerrainTilesetsFromParsed((parsed as { terrainTilesets?: unknown }).terrainTilesets);
+    if (parsedTilesets.length > 0) {
+      for (const tilesetId of Object.keys(state.terrainTilesetObjectUrlsById)) {
+        revokeObjectTilesetUrlForId(tilesetId);
+      }
+      state.terrainTilesets = parsedTilesets;
+      state.selectedTerrainTilesetId = parsedTilesets[0].id;
+      state.terrainTilesetObjectUrlsById = {};
+      refreshTerrainTilesetSelectOptions();
+      updateTilesetSelectionSummary();
+    }
     state.questZones = normalizeQuestZonesFromParsed(parsed?.questZones);
     refreshZoneEditorOptions();
     setZoneEditorFormFromZone(null);
@@ -3308,10 +3671,13 @@ function updateSelectionPanel(): void {
   const { worldTileX, worldTileY } = state.selectedTile;
   const mapped = ensureChunkVisibleByWorldTile(worldTileX, worldTileY);
   const terrainId = mapped.chunk.terrain[mapped.localTileY]?.[mapped.localTileX] ?? 0;
+  const terrainTilesetIndex = mapped.chunk.terrainTilesetIndices[mapped.localTileY]?.[mapped.localTileX] ?? 0;
+  const terrainTileset = getTerrainTilesetByIndex(terrainTilesetIndex);
   const terrainLabel = state.tileTypes.find((entry) => entry.id === terrainId)?.label ?? `Tile ${terrainId}`;
   const resource = getResourceAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const monster = getMonsterAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const object = getObjectAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
+  const placedObject = getWorldObjectPlacementAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const npc = getNpcAt(mapped.localTileX, mapped.localTileY, mapped.chunk);
   const activeZone = findQuestZoneAtTile(worldTileX, worldTileY);
 
@@ -3319,7 +3685,7 @@ function updateSelectionPanel(): void {
     `Chunk: (${mapped.chunkX}, ${mapped.chunkY})`,
     `Local: (${mapped.localTileX}, ${mapped.localTileY})`,
     `World: (${worldTileX}, ${worldTileY})`,
-    `Terrain: ${terrainLabel}`,
+    `Terrain: ${terrainLabel} · Tileset: ${terrainTileset.label || terrainTileset.id} (#${terrainTilesetIndex})`,
     `Resource: ${resource ? resource.resourceId : 'None'}`,
     `Monster: ${monster ? `${monster.minionTypeId} (T${monster.tier})` : 'None'}`,
     `Object: ${object ? object.objectTypeId : 'None'}`,
@@ -3331,6 +3697,10 @@ function updateSelectionPanel(): void {
   if (state.layer === 'terrain') {
     selectionTerrainRow.style.display = 'block';
     selectionTerrainTypeSelect.value = String(terrainId);
+    const tilesetById = state.terrainTilesets[terrainTilesetIndex]?.id;
+    if (tilesetById) {
+      setActiveTerrainTilesetById(tilesetById);
+    }
   } else if (state.layer === 'resources') {
     selectionResourceRow.style.display = 'block';
     if (resource) {
@@ -3361,7 +3731,16 @@ function updateSelectionPanel(): void {
     }
   } else if (state.layer === 'objects') {
     selectionObjectRow.style.display = 'block';
-    selectionObjectTypeSelect.value = object?.objectTypeId ?? (resolveSelectedWorldObjectTypeForLayer('objects')?.id ?? '');
+    const selectedObjectType = resolveSelectedWorldObjectTypeForLayer('objects');
+    selectionObjectTypeSelect.value = object?.objectTypeId ?? (selectedObjectType?.id ?? '');
+    const selectedPlacementType = object?.objectTypeId
+      ? getWorldObjectTypeById(object.objectTypeId)
+      : selectedObjectType;
+    selectionObjectRenderLayerSelect.value = normalizeWorldObjectRenderLayer(
+      placedObject?.renderLayer
+      ?? selectedPlacementType?.renderLayer
+      ?? 'entity',
+    );
     if (object?.objectTypeId) {
       state.selectedWorldObjectTypeId = object.objectTypeId;
     }
@@ -3500,6 +3879,31 @@ function drawTileHighlight(
   drawingContext.restore();
 }
 
+function drawForegroundObjectBadge(
+  drawingContext: CanvasRenderingContext2D,
+  pixelX: number,
+  pixelY: number,
+  tileSize: number,
+): void {
+  const badgeWidth = Math.max(9, Math.floor(tileSize * 0.42));
+  const badgeHeight = Math.max(7, Math.floor(tileSize * 0.3));
+  const badgeX = pixelX + tileSize - badgeWidth - 1;
+  const badgeY = pixelY + 1;
+
+  drawingContext.save();
+  drawingContext.fillStyle = 'rgba(45, 45, 52, 0.86)';
+  drawingContext.fillRect(badgeX, badgeY, badgeWidth, badgeHeight);
+  drawingContext.strokeStyle = 'rgba(250, 250, 255, 0.8)';
+  drawingContext.lineWidth = 1;
+  drawingContext.strokeRect(badgeX + 0.5, badgeY + 0.5, badgeWidth - 1, badgeHeight - 1);
+  drawingContext.fillStyle = '#f4f6ff';
+  drawingContext.font = `${Math.max(6, Math.floor(tileSize * 0.18))}px monospace`;
+  drawingContext.textAlign = 'center';
+  drawingContext.textBaseline = 'middle';
+  drawingContext.fillText('FG', badgeX + badgeWidth * 0.5, badgeY + badgeHeight * 0.5 + 0.5);
+  drawingContext.restore();
+}
+
 function drawGrid(): void {
   const tileSize = state.tilePixelSize;
   const questPreview = getQuestPreviewContext();
@@ -3531,35 +3935,38 @@ function drawGrid(): void {
   const height = heightInChunks * MAP_HEIGHT_TILES;
   canvas.width = width * tileSize;
   canvas.height = height * tileSize;
-  const sharedTileset = getSharedTerrainTilesetImage();
   for (const entry of chunkEntries) {
     const chunkOffsetTileX = (entry.chunkX - minChunkX) * MAP_WIDTH_TILES;
     const chunkOffsetTileY = (entry.chunkY - minChunkY) * MAP_HEIGHT_TILES;
     for (let y = 0; y < MAP_HEIGHT_TILES; y += 1) {
       for (let x = 0; x < MAP_WIDTH_TILES; x += 1) {
         const tileId = entry.chunk.terrain[y]?.[x] ?? 0;
+        const terrainTilesetIndex = entry.chunk.terrainTilesetIndices[y]?.[x] ?? 0;
+        const terrainTileset = getTerrainTilesetByIndex(terrainTilesetIndex);
+        const terrainTilesetImage = getTerrainTilesetImage(terrainTileset);
         const pixelX = (chunkOffsetTileX + x) * tileSize;
         const pixelY = (chunkOffsetTileY + y) * tileSize;
         context.fillStyle = getTileColor(tileId);
         context.fillRect(pixelX, pixelY, tileSize, tileSize);
 
         const tilesetHasFrame = Boolean(
-          sharedTileset
-          && sharedTileset.complete
-          && sharedTileset.naturalWidth >= TILE_SIZE
-          && sharedTileset.naturalHeight >= TILE_SIZE,
+          terrainTilesetImage
+          && terrainTilesetImage.complete
+          && terrainTilesetImage.naturalWidth >= terrainTileset.sourceTileSize
+          && terrainTilesetImage.naturalHeight >= terrainTileset.sourceTileSize,
         );
-        if (tilesetHasFrame && sharedTileset) {
-          const tilesPerRow = Math.max(1, Math.floor(sharedTileset.naturalWidth / TILE_SIZE));
-          const tileRows = Math.max(1, Math.floor(sharedTileset.naturalHeight / TILE_SIZE));
+        if (tilesetHasFrame && terrainTilesetImage) {
+          const sourceTileSize = terrainTileset.sourceTileSize;
+          const tilesPerRow = Math.max(1, Math.floor(terrainTilesetImage.naturalWidth / sourceTileSize));
+          const tileRows = Math.max(1, Math.floor(terrainTilesetImage.naturalHeight / sourceTileSize));
           const tileCount = tilesPerRow * tileRows;
           const boundedTileId = tileId >= 0 && tileId < tileCount ? tileId : 0;
           context.drawImage(
-            sharedTileset,
-            (boundedTileId % tilesPerRow) * TILE_SIZE,
-            Math.floor(boundedTileId / tilesPerRow) * TILE_SIZE,
-            TILE_SIZE,
-            TILE_SIZE,
+            terrainTilesetImage,
+            (boundedTileId % tilesPerRow) * sourceTileSize,
+            Math.floor(boundedTileId / tilesPerRow) * sourceTileSize,
+            sourceTileSize,
+            sourceTileSize,
             pixelX,
             pixelY,
             tileSize,
@@ -3656,7 +4063,24 @@ function drawGrid(): void {
       const pixelY = (chunkOffsetTileY + object.tileY) * tileSize;
       const centerX = (chunkOffsetTileX + object.tileX) * tileSize + tileSize * 0.5;
       const centerY = (chunkOffsetTileY + object.tileY) * tileSize + tileSize * 0.5;
+      const placedObject = entry.chunk.worldObjects.find((candidate) => {
+        if (
+          candidate.tileX !== object.tileX
+          || candidate.tileY !== object.tileY
+          || candidate.objectTypeId !== object.objectTypeId
+        ) {
+          return false;
+        }
+
+        const behavior = getWorldObjectTypeByIdFromList(state.worldObjectTypes, candidate.objectTypeId)?.behavior ?? 'decorative';
+        return behavior !== 'harvestable' && behavior !== 'npc';
+      });
+      const objectType = getWorldObjectTypeByIdFromList(state.worldObjectTypes, object.objectTypeId);
+      const renderLayer = normalizeWorldObjectRenderLayer(placedObject?.renderLayer ?? objectType?.renderLayer ?? 'entity');
       drawEditorEntityIcon(context, getObjectIcon(object.objectTypeId), centerX, centerY, tileSize);
+      if (renderLayer === 'foreground') {
+        drawForegroundObjectBadge(context, pixelX, pixelY, tileSize);
+      }
       if (questPreview.targetObjectIds.has(object.id) || questPreview.targetObjectTypeIds.has(object.objectTypeId)) {
         drawTileHighlight(context, pixelX, pixelY, tileSize, 'rgba(255, 176, 90, 0.95)');
       }
@@ -3924,7 +4348,13 @@ function addResourceWorldObjectAt(tileX: number, tileY: number, selectedType: Wo
   syncChunkLegacyPlacementsFromWorldObjects(state.data);
 }
 
-function addObjectWorldObjectAt(tileX: number, tileY: number, objectType: WorldObjectTypeDefinition, id?: string): void {
+function addObjectWorldObjectAt(
+  tileX: number,
+  tileY: number,
+  objectType: WorldObjectTypeDefinition,
+  id?: string,
+  renderLayerOverride?: 'entity' | 'foreground',
+): void {
   state.data.worldObjects.push({
     id: id ?? nextObjectId(objectType.id),
     objectTypeId: objectType.id,
@@ -3932,6 +4362,7 @@ function addObjectWorldObjectAt(tileX: number, tileY: number, objectType: WorldO
     tileY,
     name: objectType.name,
     blocksMovement: objectType.blocksMovement,
+    ...(renderLayerOverride ? { renderLayer: normalizeWorldObjectRenderLayer(renderLayerOverride) } : {}),
     examineText: objectType.examineText,
   });
   syncChunkLegacyPlacementsFromWorldObjects(state.data);
@@ -3950,8 +4381,10 @@ function placeAt(tileX: number, tileY: number, erase: boolean): void {
   if (state.layer === 'terrain') {
     if (erase) {
       state.data.terrain[localTileY][localTileX] = 0;
+      state.data.terrainTilesetIndices[localTileY][localTileX] = getActiveTerrainTilesetIndex();
     } else {
       state.data.terrain[localTileY][localTileX] = state.selectedTileType;
+      state.data.terrainTilesetIndices[localTileY][localTileX] = getActiveTerrainTilesetIndex();
     }
   } else if (state.layer === 'resources') {
     removeResourceAt(localTileX, localTileY);
@@ -4348,13 +4781,15 @@ tileBehaviorSaveButton.addEventListener('click', () => {
 });
 
 tilesetPaletteCanvas.addEventListener('click', (event) => {
+  const activeTileset = getActiveTerrainTileset();
   const tileset = getSharedTerrainTilesetImage();
-  if (!tileset || !tileset.complete || tileset.naturalWidth < TILE_SIZE || tileset.naturalHeight < TILE_SIZE) {
+  const sourceTileSize = activeTileset.sourceTileSize;
+  if (!tileset || !tileset.complete || tileset.naturalWidth < sourceTileSize || tileset.naturalHeight < sourceTileSize) {
     return;
   }
 
-  const columns = Math.max(1, Math.floor(tileset.naturalWidth / TILE_SIZE));
-  const rows = Math.max(1, Math.floor(tileset.naturalHeight / TILE_SIZE));
+  const columns = Math.max(1, Math.floor(tileset.naturalWidth / sourceTileSize));
+  const rows = Math.max(1, Math.floor(tileset.naturalHeight / sourceTileSize));
   const paletteRect = tilesetPaletteCanvas.getBoundingClientRect();
   const clickX = event.clientX - paletteRect.left;
   const clickY = event.clientY - paletteRect.top;
@@ -4369,34 +4804,113 @@ tilesetPaletteCanvas.addEventListener('click', (event) => {
   syncSelectedTerrainTile(tileId);
 });
 
-tilesetLoadUrlButton.addEventListener('click', () => {
-  const rawUrl = normalizeText(tilesetUrlInput.value);
-  if (!rawUrl) {
-    return;
-  }
-
-  const resolvedUrl = resolveTileImageUrl(rawUrl);
-  revokeCurrentObjectTilesetUrl();
-  setTerrainTilesetUrl(resolvedUrl, null);
+tilesetSelect.addEventListener('change', () => {
+  setActiveTerrainTilesetById(tilesetSelect.value);
 });
 
-tilesetResetDefaultButton.addEventListener('click', () => {
-  revokeCurrentObjectTilesetUrl();
-  tilesetFileInput.value = '';
-  tilesetUrlInput.value = TERRAIN_TILESET_URL;
-  setTerrainTilesetUrl(TERRAIN_TILESET_URL, null);
-});
-
-tilesetFileInput.addEventListener('change', () => {
-  const selectedFile = tilesetFileInput.files?.[0];
+tilesetCreateSaveButton.addEventListener('click', async () => {
+  const selectedFile = tilesetCreateFileInput.files?.[0];
   if (!selectedFile) {
+    window.alert('Choose a tileset image before saving.');
     return;
   }
 
-  revokeCurrentObjectTilesetUrl();
-  const objectUrl = URL.createObjectURL(selectedFile);
-  tilesetUrlInput.value = selectedFile.name;
-  setTerrainTilesetUrl(objectUrl, objectUrl);
+  const normalizedName = normalizeText(
+    tilesetCreateNameInput.value,
+    selectedFile.name.replace(/\.[^.]+$/u, ''),
+  );
+  const sourceTileSize = normalizeTerrainTilesetSourceTileSize(tilesetCreateSourceTileSizeSelect.value);
+  let imageDataUrl = '';
+  try {
+    imageDataUrl = await fileToDataUrl(selectedFile);
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : 'Failed to load tileset image.');
+    return;
+  }
+
+  const baseId = normalizeText(
+    normalizedName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, '-')
+      .replace(/^-+|-+$/gu, ''),
+    `terrain-tileset-${Date.now()}`,
+  );
+  let nextId = baseId;
+  let suffix = 2;
+  while (state.terrainTilesets.some((entry) => entry.id === nextId)) {
+    nextId = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+
+  state.terrainTilesets.push({
+    id: nextId,
+    label: normalizedName,
+    url: imageDataUrl,
+    sourceTileSize,
+  });
+  state.terrainTilesetObjectUrlsById[nextId] = null;
+
+  refreshTerrainTilesetSelectOptions();
+  updateTilesetSelectionSummary();
+  drawTilesetPalette();
+  drawGrid();
+  await persistTerrainTilesets({ notifySuccess: false });
+
+  tilesetCreateNameInput.value = '';
+  tilesetCreateFileInput.value = '';
+  window.alert(`Tileset '${normalizedName}' saved. Select it in Layer to paint.`);
+});
+
+tilesetDeleteButton.addEventListener('click', () => {
+  if (state.terrainTilesets.length <= 1) {
+    window.alert('At least one tileset must remain.');
+    return;
+  }
+
+  const targetId = String(tilesetDeleteSelect.value ?? '').trim();
+  if (!targetId) {
+    return;
+  }
+
+  const targetIndex = state.terrainTilesets.findIndex((entry) => entry.id === targetId);
+  if (targetIndex < 0) {
+    return;
+  }
+
+  const targetLabel = state.terrainTilesets[targetIndex].label || targetId;
+  const confirmed = window.confirm(`Delete tileset '${targetLabel}'?`);
+  if (!confirmed) {
+    return;
+  }
+
+  const removed = state.terrainTilesets.splice(targetIndex, 1)[0];
+  if (removed) {
+    revokeObjectTilesetUrlForId(removed.id);
+    delete state.terrainTilesetObjectUrlsById[removed.id];
+  }
+
+  for (const chunk of state.chunks.values()) {
+    chunk.terrainTilesetIndices = chunk.terrainTilesetIndices.map((row) => row.map((value) => {
+      const index = Math.floor(Number(value) || 0);
+      if (index === targetIndex) {
+        return 0;
+      }
+      if (index > targetIndex) {
+        return index - 1;
+      }
+      return Math.max(0, index);
+    }));
+  }
+
+  if (state.selectedTerrainTilesetId === targetId) {
+    state.selectedTerrainTilesetId = state.terrainTilesets[0].id;
+  }
+
+  refreshTerrainTilesetSelectOptions();
+  updateTilesetSelectionSummary();
+  drawTilesetPalette();
+  drawGrid();
+  void persistTerrainTilesets({ notifySuccess: false });
 });
 
 resourceTypeSelect.addEventListener('change', () => {
@@ -4434,6 +4948,7 @@ tileSizeInput.addEventListener('input', () => {
 resetDefaultButton.addEventListener('click', () => {
   mutateActiveChunk(() => {
     state.data.terrain = generateTerrainData();
+    state.data.terrainTilesetIndices = createTerrainTilesetIndexGrid(getActiveTerrainTilesetIndex());
     drawGrid();
   });
 });
@@ -4473,6 +4988,7 @@ selectionTerrainApplyButton.addEventListener('click', () => {
     state.data.terrain[mapped.localTileY][mapped.localTileX] = Number.isFinite(tileType)
       ? Math.floor(tileType)
       : 0;
+    state.data.terrainTilesetIndices[mapped.localTileY][mapped.localTileX] = getActiveTerrainTilesetIndex();
     drawGrid();
   });
 });
@@ -4564,6 +5080,7 @@ selectionObjectUpdateButton.addEventListener('click', () => {
 
   const mapped = ensureChunkVisibleByWorldTile(state.selectedTile.worldTileX, state.selectedTile.worldTileY);
   const existing = getObjectAt(mapped.localTileX, mapped.localTileY);
+  const existingPlacement = getWorldObjectPlacementAt(mapped.localTileX, mapped.localTileY);
   const objectType = getWorldObjectTypeById(selectionObjectTypeSelect.value)
     ?? resolveSelectedWorldObjectTypeForLayer('objects');
   if (!objectType) {
@@ -4571,10 +5088,17 @@ selectionObjectUpdateButton.addEventListener('click', () => {
   }
 
   state.selectedWorldObjectTypeId = objectType.id;
+  const selectedRenderLayer = normalizeWorldObjectRenderLayer(selectionObjectRenderLayerSelect.value);
 
   mutateActiveChunk(() => {
     removeObjectAt(mapped.localTileX, mapped.localTileY);
-    addObjectWorldObjectAt(mapped.localTileX, mapped.localTileY, objectType, existing?.id ?? nextObjectId(objectType.id));
+    addObjectWorldObjectAt(
+      mapped.localTileX,
+      mapped.localTileY,
+      objectType,
+      existingPlacement?.id ?? existing?.id ?? nextObjectId(objectType.id),
+      selectedRenderLayer,
+    );
     drawGrid();
   });
 });
@@ -5062,6 +5586,12 @@ exportButton.addEventListener('click', async () => {
     version: WORLD_DATA_VERSION,
     chunkWidth: MAP_WIDTH_TILES,
     chunkHeight: MAP_HEIGHT_TILES,
+    terrainTilesets: state.terrainTilesets.map((entry) => ({
+      id: entry.id,
+      label: entry.label,
+      url: entry.url,
+      sourceTileSize: entry.sourceTileSize,
+    })),
     questZones: state.questZones
       .filter((zone) => referencedQuestZoneIds.has(zone.id))
       .map((zone) => ({
@@ -5086,6 +5616,7 @@ exportButton.addEventListener('click', async () => {
         width: chunk.width,
         height: chunk.height,
         terrain: chunk.terrain.map((row) => [...row]),
+        terrainTilesetIndices: chunk.terrainTilesetIndices.map((row) => [...row]),
         worldObjects: chunkWorldObjects.map((entry) => ({ ...entry })),
         monsters: [...chunk.monsters],
         npcs: chunk.npcs.map((npc) => ({
@@ -5205,7 +5736,7 @@ window.addEventListener('keydown', (event) => {
 refreshLayerRows();
 refreshWorldObjectTypeSelectOptions();
 refreshEditorTabPanels();
-tilesetUrlInput.value = TERRAIN_TILESET_URL;
+refreshTerrainTilesetSelectOptions();
 syncSelectedTerrainTile(state.selectedTileType);
 loadSavedSidebarWidth();
 drawGrid();
@@ -5214,10 +5745,13 @@ scheduleVisibleChunkLoading();
 updateStatus();
 refreshZoneEditorOptions();
 setZoneEditorFormFromZone(null);
-void loadCanonicalWorldMapIfAvailable();
-void loadTileTypesIfAvailable();
-void loadWorldObjectTypesIfAvailable();
-void loadQuestIndexIfAvailable();
+void (async () => {
+  await loadTerrainTilesetsIfAvailable();
+  await loadCanonicalWorldMapIfAvailable();
+  await loadTileTypesIfAvailable();
+  await loadWorldObjectTypesIfAvailable();
+  await loadQuestIndexIfAvailable();
+})();
 
 window.addEventListener('focus', () => {
   void loadTileTypesIfAvailable();
@@ -5225,7 +5759,9 @@ window.addEventListener('focus', () => {
 });
 
 window.addEventListener('beforeunload', () => {
-  revokeCurrentObjectTilesetUrl();
+  for (const tilesetId of Object.keys(state.terrainTilesetObjectUrlsById)) {
+    revokeObjectTilesetUrlForId(tilesetId);
+  }
 });
 
 document.addEventListener('visibilitychange', () => {

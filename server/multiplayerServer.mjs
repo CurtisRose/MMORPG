@@ -735,6 +735,7 @@ function normalizeWorldResourceEntry(entry, index, width, height, tileX, tileY) 
 
 function normalizeWorldObjectEntry(entry, index, width, height, tileX, tileY) {
   const objectTypeId = String(entry?.objectTypeId ?? 'object');
+  const hasRenderLayer = typeof entry?.renderLayer === 'string' && String(entry.renderLayer).trim().length > 0;
 
   return {
     id: String(entry?.id ?? `object-${index + 1}`),
@@ -743,6 +744,7 @@ function normalizeWorldObjectEntry(entry, index, width, height, tileX, tileY) {
     tileX: clamp(Math.floor(Number(tileX ?? entry?.tileX ?? 0)), 0, width - 1),
     tileY: clamp(Math.floor(Number(tileY ?? entry?.tileY ?? 0)), 0, height - 1),
     blocksMovement: Boolean(entry?.blocksMovement),
+    ...(hasRenderLayer ? { renderLayer: normalizeWorldObjectRenderLayer(entry?.renderLayer) } : {}),
     examineText: String(entry?.examineText ?? "It's an object."),
   };
 }
@@ -894,6 +896,9 @@ function normalizeWorldMapData(raw) {
                 typeof worldObjectEntry.blocksMovement === 'boolean'
                   ? worldObjectEntry.blocksMovement
                   : Boolean(definition?.blocksMovement),
+              ...(typeof worldObjectEntry.renderLayer === 'string'
+                ? { renderLayer: normalizeWorldObjectRenderLayer(worldObjectEntry.renderLayer) }
+                : {}),
               examineText: worldObjectEntry.examineText || definition?.examineText || "It's an object.",
             },
             objects.length,
@@ -959,6 +964,22 @@ function normalizeWorldMapData(raw) {
         examineText: String(entry?.examineText ?? "It's someone."),
         talkText: String(entry?.talkText ?? 'Hello there.'),
         questStartIds: normalizeQuestStringList(entry?.questStartIds),
+        shop:
+          entry?.shop && typeof entry.shop === 'object' && !Array.isArray(entry.shop)
+            ? {
+                id: String(entry.shop.id ?? '').trim(),
+                name: String(entry.shop.name ?? '').trim(),
+                listings: Array.isArray(entry.shop.listings)
+                  ? entry.shop.listings
+                      .map((listing) => ({
+                        itemId: String(listing?.itemId ?? '').trim(),
+                        buyPrice: Math.max(0, Math.floor(Number(listing?.buyPrice ?? 0) || 0)),
+                        sellPrice: Math.max(0, Math.floor(Number(listing?.sellPrice ?? 0) || 0)),
+                      }))
+                      .filter((listing) => listing.itemId.length > 0)
+                  : [],
+              }
+            : null,
       });
     }
 
@@ -1060,6 +1081,11 @@ function normalizeWorldObjectBehavior(value) {
   return 'decorative';
 }
 
+function normalizeWorldObjectRenderLayer(value) {
+  const renderLayer = String(value ?? '').trim().toLowerCase();
+  return renderLayer === 'foreground' ? 'foreground' : 'entity';
+}
+
 function loadWorldObjectTypeDefinitions() {
   if (!existsSync(WORLD_OBJECT_TYPES_PATH)) {
     return {};
@@ -1087,6 +1113,7 @@ function loadWorldObjectTypeDefinitions() {
       name: String(entry?.name ?? id).trim() || id,
       behavior: normalizeWorldObjectBehavior(entry?.behavior),
       blocksMovement: Boolean(entry?.blocksMovement),
+      renderLayer: normalizeWorldObjectRenderLayer(entry?.renderLayer),
       image: String(entry?.image ?? '').trim(),
       examineText: String(entry?.examineText ?? '').trim(),
       behaviorConfig:
@@ -1809,105 +1836,79 @@ function getNpcByType(npcType) {
 
 const SHOPKEEPER_NPC = getNpcByType('shopkeeper');
 
-const SHOP_DEFINITIONS = {
-  generalStore: {
-    id: 'shop-general-store',
-    npcId: SHOPKEEPER_NPC?.id ?? 'npc-shopkeeper-bob',
-    name: 'Bob\'s General Store',
-    listings: [
-      {
-        itemId: 'birch_logs',
-        name: getItemDefinition('birch_logs')?.name ?? 'Birch logs',
-        buyPrice: 10,
-        sellPrice: 4,
-      },
-      {
-        itemId: 'copper_ore',
-        name: getItemDefinition('copper_ore')?.name ?? 'Copper ore',
-        buyPrice: 16,
-        sellPrice: 7,
-      },
-      {
-        itemId: 'tin_ore',
-        name: getItemDefinition('tin_ore')?.name ?? 'Tin ore',
-        buyPrice: 16,
-        sellPrice: 7,
-      },
-      {
-        itemId: 'tinderbox',
-        name: getItemDefinition('tinderbox')?.name ?? 'Tinderbox',
-        buyPrice: 20,
-        sellPrice: 8,
-      },
-      {
-        itemId: 'bronze_axe',
-        name: getItemDefinition('bronze_axe')?.name ?? 'Bronze axe',
-        buyPrice: 50,
-        sellPrice: 22,
-      },
-      {
-        itemId: 'bronze_pickaxe',
-        name: getItemDefinition('bronze_pickaxe')?.name ?? 'Bronze pickaxe',
-        buyPrice: 50,
-        sellPrice: 22,
-      },
-      {
-        itemId: 'bronze_helmet',
-        name: getItemDefinition('bronze_helmet')?.name ?? 'Bronze helmet',
-        buyPrice: 70,
-        sellPrice: 30,
-      },
-      {
-        itemId: 'bronze_platebody',
-        name: getItemDefinition('bronze_platebody')?.name ?? 'Bronze platebody',
-        buyPrice: 120,
-        sellPrice: 52,
-      },
-      {
-        itemId: 'bronze_platelegs',
-        name: getItemDefinition('bronze_platelegs')?.name ?? 'Bronze platelegs',
-        buyPrice: 95,
-        sellPrice: 42,
-      },
-      {
-        itemId: 'leather_gloves',
-        name: getItemDefinition('leather_gloves')?.name ?? 'Leather gloves',
-        buyPrice: 35,
-        sellPrice: 15,
-      },
-      {
-        itemId: 'leather_boots',
-        name: getItemDefinition('leather_boots')?.name ?? 'Leather boots',
-        buyPrice: 35,
-        sellPrice: 15,
-      },
-      {
-        itemId: 'wooden_shield',
-        name: getItemDefinition('wooden_shield')?.name ?? 'Wooden shield',
-        buyPrice: 55,
-        sellPrice: 24,
-      },
-      {
-        itemId: 'copper_amulet',
-        name: getItemDefinition('copper_amulet')?.name ?? 'Copper amulet',
-        buyPrice: 90,
-        sellPrice: 39,
-      },
-      {
-        itemId: 'copper_ring',
-        name: getItemDefinition('copper_ring')?.name ?? 'Copper ring',
-        buyPrice: 45,
-        sellPrice: 19,
-      },
-      {
-        itemId: 'apple',
-        name: getItemDefinition('apple')?.name ?? 'Apple',
-        buyPrice: 5,
-        sellPrice: 2,
-      },
-    ],
-  },
-};
+const DEFAULT_GENERAL_STORE_LISTINGS = [
+  { itemId: 'birch_logs', buyPrice: 10, sellPrice: 4 },
+  { itemId: 'copper_ore', buyPrice: 16, sellPrice: 7 },
+  { itemId: 'tin_ore', buyPrice: 16, sellPrice: 7 },
+  { itemId: 'tinderbox', buyPrice: 20, sellPrice: 8 },
+  { itemId: 'bronze_axe', buyPrice: 50, sellPrice: 22 },
+  { itemId: 'bronze_pickaxe', buyPrice: 50, sellPrice: 22 },
+  { itemId: 'bronze_helmet', buyPrice: 70, sellPrice: 30 },
+  { itemId: 'bronze_platebody', buyPrice: 120, sellPrice: 52 },
+  { itemId: 'bronze_platelegs', buyPrice: 95, sellPrice: 42 },
+  { itemId: 'leather_gloves', buyPrice: 35, sellPrice: 15 },
+  { itemId: 'leather_boots', buyPrice: 35, sellPrice: 15 },
+  { itemId: 'wooden_shield', buyPrice: 55, sellPrice: 24 },
+  { itemId: 'copper_amulet', buyPrice: 90, sellPrice: 39 },
+  { itemId: 'copper_ring', buyPrice: 45, sellPrice: 19 },
+  { itemId: 'apple', buyPrice: 5, sellPrice: 2 },
+];
+
+function normalizeShopListings(rawListings) {
+  if (!Array.isArray(rawListings)) {
+    return [];
+  }
+
+  return rawListings
+    .map((listing) => {
+      const itemId = String(listing?.itemId ?? '').trim();
+      if (!itemId) {
+        return null;
+      }
+
+      return {
+        itemId,
+        name: getItemDefinition(itemId)?.name ?? formatIdentifierForUi(itemId, 'Item'),
+        buyPrice: Math.max(0, Math.floor(Number(listing?.buyPrice ?? 0) || 0)),
+        sellPrice: Math.max(0, Math.floor(Number(listing?.sellPrice ?? 0) || 0)),
+      };
+    })
+    .filter((entry) => entry !== null);
+}
+
+function buildShopDefinitions() {
+  const shops = {};
+
+  for (const npc of Object.values(NPC_DEFINITIONS)) {
+    const rawShop = npc?.shop;
+    if (!rawShop || typeof rawShop !== 'object') {
+      continue;
+    }
+
+    const shopId = String(rawShop.id ?? '').trim() || `shop-${npc.id}`;
+    const listings = normalizeShopListings(rawShop.listings);
+    shops[shopId] = {
+      id: shopId,
+      npcId: npc.id,
+      name: String(rawShop.name ?? '').trim() || `${npc.name}'s Shop`,
+      listings,
+    };
+  }
+
+  if (!Object.keys(shops).length && SHOPKEEPER_NPC) {
+    const fallbackId = 'shop-general-store';
+    shops[fallbackId] = {
+      id: fallbackId,
+      npcId: SHOPKEEPER_NPC.id,
+      name: "Bob's General Store",
+      listings: normalizeShopListings(DEFAULT_GENERAL_STORE_LISTINGS),
+    };
+  }
+
+  return shops;
+}
+
+const SHOP_DEFINITIONS = buildShopDefinitions();
 
 const CRAFTING_STATIONS = {
   smelting_station: {
@@ -5085,6 +5086,7 @@ function getShopSnapshot() {
       listings: shop.listings.map((listing) => ({
         itemId: listing.itemId,
         name: getItemDefinition(listing.itemId)?.name ?? listing.name,
+        image: String(getItemDefinition(listing.itemId)?.image ?? '').trim(),
         buyPrice: listing.buyPrice,
         sellPrice: listing.sellPrice,
       })),
@@ -5147,8 +5149,7 @@ function handleShopOpen(player, npcId) {
 
 function handleShopBuy(player, message) {
   return buyFromShop(player, message, {
-    resolveShopById: (shopId) =>
-      SHOP_DEFINITIONS.generalStore.id === shopId ? SHOP_DEFINITIONS.generalStore : null,
+    resolveShopById: (shopId) => SHOP_DEFINITIONS[String(shopId ?? '')] ?? null,
     getNpcById,
     isWithinNpcRange,
     canSpendPlayerGold,
@@ -5159,8 +5160,7 @@ function handleShopBuy(player, message) {
 
 function handleShopSell(player, message) {
   return sellToShop(player, message, {
-    resolveShopById: (shopId) =>
-      SHOP_DEFINITIONS.generalStore.id === shopId ? SHOP_DEFINITIONS.generalStore : null,
+    resolveShopById: (shopId) => SHOP_DEFINITIONS[String(shopId ?? '')] ?? null,
     getNpcById,
     isWithinNpcRange,
     getInventoryItemCount,
@@ -6318,9 +6318,11 @@ function getObjectSnapshot() {
       objectTypeId: object.objectTypeId,
       name: object.name,
       image: String(definition?.image ?? ''),
+      behavior: normalizeWorldObjectBehavior(definition?.behavior),
       tileX: object.tileX,
       tileY: object.tileY,
       blocksMovement: object.blocksMovement,
+      renderLayer: normalizeWorldObjectRenderLayer(object.renderLayer || definition?.renderLayer),
       examineText: object.examineText,
     };
   }

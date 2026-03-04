@@ -4,6 +4,7 @@
     "name": "Bank Building",
     "behavior": "bank",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/world-objects/tinderbox.png",
     "examineText": "A sturdy building that houses the bank chest.",
     "tags": [
@@ -17,6 +18,7 @@
     "name": "Bank Chest",
     "behavior": "bank",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/objects/bank_chest.png",
     "examineText": "A secure chest for storing valuables.",
     "tags": [
@@ -30,6 +32,7 @@
     "name": "Birch Tree",
     "behavior": "harvestable",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/world-objects/birch_tree.png",
     "examineText": "A healthy birch tree.",
     "tags": [
@@ -47,6 +50,7 @@
     "name": "Copper Rock",
     "behavior": "harvestable",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/world-objects/copper_rock.png",
     "examineText": "A rock with copper ore veins.",
     "tags": [
@@ -64,6 +68,7 @@
     "name": "Fletching Station",
     "behavior": "station",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/objects/fletching_station.png",
     "examineText": "A crafting bench for carving logs into bows and arrows.",
     "tags": [
@@ -79,6 +84,7 @@
     "name": "Flower Patch",
     "behavior": "decorative",
     "blocksMovement": false,
+    "renderLayer": "entity",
     "image": "/assets/objects/flower_patch.png",
     "examineText": "A patch of colorful flowers.",
     "tags": [
@@ -92,6 +98,7 @@
     "name": "Iron Rock",
     "behavior": "harvestable",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/world-objects/iron_rock.png",
     "examineText": "A dense rock with iron ore.",
     "tags": [
@@ -109,6 +116,7 @@
     "name": "Oak Tree",
     "behavior": "harvestable",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/world-objects/oak_tree.png",
     "examineText": "A sturdy oak tree.",
     "tags": [
@@ -126,6 +134,7 @@
     "name": "Smelting Station",
     "behavior": "station",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/objects/smelting_station.png",
     "examineText": "A blazing furnace used to smelt ores into bars.",
     "tags": [
@@ -141,6 +150,7 @@
     "name": "Smithing Station",
     "behavior": "station",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/objects/smithing_station.png",
     "examineText": "A sturdy anvil for shaping bars into equipment.",
     "tags": [
@@ -156,6 +166,7 @@
     "name": "Stone Wall",
     "behavior": "decorative",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/objects/stone_wall.png",
     "examineText": "A solid wall of stone.",
     "tags": [
@@ -168,6 +179,7 @@
     "name": "Tin Rock",
     "behavior": "harvestable",
     "blocksMovement": true,
+    "renderLayer": "entity",
     "image": "/assets/world-objects/tin_rock.png",
     "examineText": "A rock with tin ore deposits.",
     "tags": [

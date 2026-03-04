@@ -128,6 +128,8 @@ export interface WorldObjectState {
   objectTypeId: string;
   name: string;
   image?: string;
+  behavior?: 'decorative' | 'harvestable' | 'station' | 'bank' | 'shop' | 'npc';
+  renderLayer?: 'entity' | 'foreground';
   tileX: number;
   tileY: number;
   blocksMovement: boolean;
@@ -180,6 +182,7 @@ export interface NpcState {
 export interface ShopListingState {
   itemId: string;
   name: string;
+  image?: string;
   buyPrice: number;
   sellPrice: number;
 }

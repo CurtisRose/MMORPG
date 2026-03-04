@@ -1,0 +1,8 @@
+[
+  {
+    "id": "terrain-default",
+    "label": "Default",
+    "url": "/assets/terrain/terrain_tileset.png",
+    "sourceTileSize": 32
+  }
+]

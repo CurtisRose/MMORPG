@@ -88,12 +88,17 @@ const MINIMAP_COLLAPSED_SIZE_PX = 28;
 const MINIMAP_REDRAW_INTERVAL_MS = 90;
 const HEALTH_BAR_WIDTH = 26;
 const HEALTH_BAR_HEIGHT = 4;
+const WORLD_DEPTH_BASE = 2;
+const WORLD_DEPTH_Y_SCALE = 0.01;
+const WORLD_DEPTH_FOREGROUND = 45;
 const DEBUG_HUD_VISIBLE_BY_DEFAULT =
   String(import.meta.env.VITE_DEBUG_HUD ?? 'false').toLowerCase() === 'true';
 const DEBUG_INTERACTION_TRACE =
   String(import.meta.env.VITE_DEBUG_INTERACTION ?? 'true').toLowerCase() === 'true';
 const WORLD_MAP_URL = `${import.meta.env.BASE_URL}data/worldMap.json`;
 const TILE_TYPES_URL = `${import.meta.env.BASE_URL}data/tileTypes.json`;
+const TERRAIN_TILESET_CONFIG_URL = `${import.meta.env.BASE_URL}data/terrainTileset.json`;
+const DEFAULT_TERRAIN_TILESET_URL = `${import.meta.env.BASE_URL}assets/terrain/terrain_tileset.png`;
 const PLAYER_APPEARANCE_URL = `${import.meta.env.BASE_URL}data/playerAppearance.json`;
 
 type TerrainTileDefinition = {
@@ -111,6 +116,19 @@ type TerrainTileBehavior = {
 
 type PlayerAppearanceConfig = {
   image?: string;
+};
+
+type TerrainTilesetRuntimeDefinition = {
+  id: string;
+  label: string;
+  url: string;
+  sourceTileSize: number;
+};
+
+type TerrainRuntimeData = {
+  terrain: number[][];
+  terrainTilesetIndices: number[][];
+  terrainTilesets: TerrainTilesetRuntimeDefinition[];
 };
 
 const RESOURCE_MINIMAP_COLORS: Record<string, number> = {
@@ -139,6 +157,44 @@ function createFilledTerrainGrid(width: number, height: number, fill: number): n
   return Array.from({ length: height }, () => Array.from({ length: width }, () => fill));
 }
 
+function normalizeTerrainTilesetSourceTileSize(value: unknown): number {
+  const parsed = Math.floor(Number(value));
+  return parsed === 48 ? 48 : TILE_SIZE;
+}
+
+function normalizeTerrainTilesets(value: unknown): TerrainTilesetRuntimeDefinition[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+
+      const candidate = entry as Record<string, unknown>;
+      const id = String(candidate.id ?? '').trim() || `terrain-tileset-${index + 1}`;
+      const label = String(candidate.label ?? '').trim() || `Tileset ${index + 1}`;
+      const url = String(candidate.url ?? '').trim();
+      if (!url) {
+        return null;
+      }
+
+      return {
+        id,
+        label,
+        url,
+        sourceTileSize: normalizeTerrainTilesetSourceTileSize(candidate.sourceTileSize),
+      } satisfies TerrainTilesetRuntimeDefinition;
+    })
+    .filter((entry): entry is TerrainTilesetRuntimeDefinition => entry !== null);
+}
+
+function createFilledTerrainTilesetIndexGrid(width: number, height: number, fill: number): number[][] {
+  return Array.from({ length: height }, () => Array.from({ length: width }, () => fill));
+}
+
 function isRectangularTerrainGrid(value: unknown): value is number[][] {
   if (!Array.isArray(value) || value.length === 0) {
     return false;
@@ -156,28 +212,53 @@ function isRectangularTerrainGrid(value: unknown): value is number[][] {
   );
 }
 
-function extractTerrainFromWorldMap(raw: unknown): number[][] | null {
+function extractTerrainRuntimeDataFromWorldMap(raw: unknown): TerrainRuntimeData | null {
   if (!raw || typeof raw !== 'object') {
     return null;
   }
 
   const mapData = raw as {
     terrain?: unknown;
+    terrainTilesetIndices?: unknown;
+    terrainTilesets?: unknown;
     chunkWidth?: unknown;
     chunkHeight?: unknown;
     chunks?: Array<{
       chunkX?: number;
       chunkY?: number;
       terrain?: unknown;
+      terrainTilesetIndices?: unknown;
     }>;
   };
 
+  const terrainTilesets = normalizeTerrainTilesets(mapData.terrainTilesets);
+
   if (isRectangularTerrainGrid(mapData.terrain)) {
-    return toTerrainGrid(mapData.terrain);
+    const terrain = toTerrainGrid(mapData.terrain);
+    const height = terrain.length;
+    const width = terrain[0]?.length ?? 0;
+    const terrainTilesetIndices = isRectangularTerrainGrid(mapData.terrainTilesetIndices)
+      && mapData.terrainTilesetIndices.length === height
+      && mapData.terrainTilesetIndices.every((row) => row.length === width)
+      ? toTerrainGrid(mapData.terrainTilesetIndices)
+      : createFilledTerrainTilesetIndexGrid(width, height, 0);
+    return {
+      terrain,
+      terrainTilesetIndices,
+      terrainTilesets,
+    };
   }
 
   if (isValidTerrainGrid(mapData.terrain)) {
-    return toTerrainGrid(mapData.terrain);
+    const terrain = toTerrainGrid(mapData.terrain);
+    const terrainTilesetIndices = isValidTerrainGrid(mapData.terrainTilesetIndices)
+      ? toTerrainGrid(mapData.terrainTilesetIndices)
+      : createFilledTerrainTilesetIndexGrid(MAP_WIDTH_TILES, MAP_HEIGHT_TILES, 0);
+    return {
+      terrain,
+      terrainTilesetIndices,
+      terrainTilesets,
+    };
   }
 
   if (!Array.isArray(mapData.chunks)) {
@@ -192,10 +273,15 @@ function extractTerrainFromWorldMap(raw: unknown): number[][] | null {
       const chunkX = Number(entry?.chunkX);
       const chunkY = Number(entry?.chunkY);
       const terrain = entry?.terrain;
+      const terrainTilesetIndices = entry?.terrainTilesetIndices;
 
       const isChunkTerrainValid = Array.isArray(terrain)
         && terrain.length === chunkHeight
         && terrain.every((row) => Array.isArray(row) && row.length === chunkWidth);
+
+      const hasValidTerrainTilesetIndices = Array.isArray(terrainTilesetIndices)
+        && terrainTilesetIndices.length === chunkHeight
+        && terrainTilesetIndices.every((row) => Array.isArray(row) && row.length === chunkWidth);
 
       if (!Number.isFinite(chunkX) || !Number.isFinite(chunkY) || !isChunkTerrainValid) {
         return null;
@@ -205,9 +291,12 @@ function extractTerrainFromWorldMap(raw: unknown): number[][] | null {
         chunkX: Math.trunc(chunkX),
         chunkY: Math.trunc(chunkY),
         terrain: terrain as number[][],
+        terrainTilesetIndices: hasValidTerrainTilesetIndices
+          ? (terrainTilesetIndices as number[][])
+          : createFilledTerrainTilesetIndexGrid(chunkWidth, chunkHeight, 0),
       };
     })
-    .filter((entry): entry is { chunkX: number; chunkY: number; terrain: number[][] } => entry !== null);
+    .filter((entry): entry is { chunkX: number; chunkY: number; terrain: number[][]; terrainTilesetIndices: number[][] } => entry !== null);
 
   if (validChunks.length > 0) {
     const minChunkX = Math.min(...validChunks.map((entry) => entry.chunkX));
@@ -217,6 +306,7 @@ function extractTerrainFromWorldMap(raw: unknown): number[][] | null {
     const worldWidthTiles = (maxChunkX - minChunkX + 1) * chunkWidth;
     const worldHeightTiles = (maxChunkY - minChunkY + 1) * chunkHeight;
     const stitchedTerrain = createFilledTerrainGrid(worldWidthTiles, worldHeightTiles, 0);
+    const stitchedTerrainTilesetIndices = createFilledTerrainTilesetIndexGrid(worldWidthTiles, worldHeightTiles, 0);
 
     for (const chunk of validChunks) {
       const tileOffsetX = (chunk.chunkX - minChunkX) * chunkWidth;
@@ -225,21 +315,45 @@ function extractTerrainFromWorldMap(raw: unknown): number[][] | null {
       for (let localY = 0; localY < chunkHeight; localY += 1) {
         for (let localX = 0; localX < chunkWidth; localX += 1) {
           stitchedTerrain[tileOffsetY + localY][tileOffsetX + localX] = Number(chunk.terrain[localY][localX]);
+          stitchedTerrainTilesetIndices[tileOffsetY + localY][tileOffsetX + localX] = Math.max(
+            0,
+            Math.floor(Number(chunk.terrainTilesetIndices[localY][localX]) || 0),
+          );
         }
       }
     }
 
-    return stitchedTerrain;
+    return {
+      terrain: stitchedTerrain,
+      terrainTilesetIndices: stitchedTerrainTilesetIndices,
+      terrainTilesets,
+    };
   }
 
   const preferredChunk = mapData.chunks.find((entry) => entry?.chunkX === 0 && entry?.chunkY === 0);
   if (preferredChunk && isValidTerrainGrid(preferredChunk.terrain)) {
-    return toTerrainGrid(preferredChunk.terrain);
+    const terrain = toTerrainGrid(preferredChunk.terrain);
+    const terrainTilesetIndices = isValidTerrainGrid(preferredChunk.terrainTilesetIndices)
+      ? toTerrainGrid(preferredChunk.terrainTilesetIndices)
+      : createFilledTerrainTilesetIndexGrid(MAP_WIDTH_TILES, MAP_HEIGHT_TILES, 0);
+    return {
+      terrain,
+      terrainTilesetIndices,
+      terrainTilesets,
+    };
   }
 
   const firstValidChunk = mapData.chunks.find((entry) => isValidTerrainGrid(entry?.terrain));
   if (firstValidChunk && isValidTerrainGrid(firstValidChunk.terrain)) {
-    return toTerrainGrid(firstValidChunk.terrain);
+    const terrain = toTerrainGrid(firstValidChunk.terrain);
+    const terrainTilesetIndices = isValidTerrainGrid(firstValidChunk.terrainTilesetIndices)
+      ? toTerrainGrid(firstValidChunk.terrainTilesetIndices)
+      : createFilledTerrainTilesetIndexGrid(MAP_WIDTH_TILES, MAP_HEIGHT_TILES, 0);
+    return {
+      terrain,
+      terrainTilesetIndices,
+      terrainTilesets,
+    };
   }
 
   return null;
@@ -337,6 +451,8 @@ export class WorldScene extends Phaser.Scene {
   private playerAppearance: PlayerAppearanceConfig = {
     image: '',
   };
+  private terrainTilesetIndices: number[][] = [];
+  private terrainTilesets: TerrainTilesetRuntimeDefinition[] = [];
   private shopDefinitions: Record<string, ShopState> = {};
   private contextMenuElement: HTMLDivElement | null = null;
   private contextMenuCloseListener: ((event: PointerEvent) => void) | null = null;
@@ -499,12 +615,31 @@ export class WorldScene extends Phaser.Scene {
     this.sceneReady = false;
     this.input.mouse?.disableContextMenu();
 
-    const [terrainData, terrainTileBehaviors, playerAppearance] = await Promise.all([
-      this.loadTerrainData(),
+    const [terrainRuntimeData, terrainTileBehaviors, terrainTilesetSourceTileSize, playerAppearance] = await Promise.all([
+      this.loadTerrainRuntimeData(),
       this.loadTerrainTileBehaviors(),
+      this.loadTerrainTilesetSourceTileSize(),
       this.loadPlayerAppearanceConfig(),
     ]);
-    this.terrainData = terrainData;
+    this.terrainData = terrainRuntimeData.terrain;
+    this.terrainTilesetIndices = terrainRuntimeData.terrainTilesetIndices;
+    this.terrainTilesets = terrainRuntimeData.terrainTilesets.length > 0
+      ? terrainRuntimeData.terrainTilesets
+      : [{
+        id: TERRAIN_TEXTURE_KEY,
+        label: 'Default',
+        url: DEFAULT_TERRAIN_TILESET_URL,
+        sourceTileSize: terrainTilesetSourceTileSize,
+      }];
+    const maxTilesetIndex = Math.max(0, this.terrainTilesets.length - 1);
+    this.terrainTilesetIndices = this.terrainTilesetIndices.map((row) => row.map((entry) => {
+      const index = Math.floor(Number(entry));
+      if (!Number.isFinite(index)) {
+        return 0;
+      }
+
+      return Math.max(0, Math.min(maxTilesetIndex, index));
+    }));
     this.blockedTerrainTileIds = new Set<number>(
       Array.from(terrainTileBehaviors.entries())
         .filter(([, behavior]) => behavior.walkable === false)
@@ -516,31 +651,64 @@ export class WorldScene extends Phaser.Scene {
     this.playerAppearance = playerAppearance;
     this.worldHeightTiles = this.terrainData.length;
     this.worldWidthTiles = this.terrainData[0]?.length ?? MAP_WIDTH_TILES;
+    await this.ensureTerrainTilesetsLoaded();
     const terrainMap = this.make.tilemap({
       data: this.terrainData,
       tileWidth: TILE_SIZE,
       tileHeight: TILE_SIZE,
     });
 
-    const terrainTileset = terrainMap.addTilesetImage(
-      TERRAIN_TEXTURE_KEY,
-      TERRAIN_TEXTURE_KEY,
-      TILE_SIZE,
-      TILE_SIZE,
-      0,
-      0,
-    );
+    let createdTerrainLayerCount = 0;
+    for (let tilesetIndex = 0; tilesetIndex < this.terrainTilesets.length; tilesetIndex += 1) {
+      const tilesetDefinition = this.terrainTilesets[tilesetIndex];
+      const textureKey = this.getTerrainTilesetTextureKey(tilesetIndex);
+      const terrainTileset = terrainMap.addTilesetImage(
+        textureKey,
+        textureKey,
+        tilesetDefinition.sourceTileSize,
+        tilesetDefinition.sourceTileSize,
+        0,
+        0,
+      );
 
-    if (!terrainTileset) {
-      throw new Error('Failed to create terrain tileset.');
+      if (!terrainTileset) {
+        continue;
+      }
+
+      const layerName = `terrain-${tilesetIndex}`;
+      const terrainLayer = terrainMap.createBlankLayer(
+        layerName,
+        terrainTileset,
+        0,
+        0,
+        this.worldWidthTiles,
+        this.worldHeightTiles,
+        TILE_SIZE,
+        TILE_SIZE,
+      );
+
+      if (!terrainLayer) {
+        continue;
+      }
+
+      for (let tileY = 0; tileY < this.worldHeightTiles; tileY += 1) {
+        for (let tileX = 0; tileX < this.worldWidthTiles; tileX += 1) {
+          if ((this.terrainTilesetIndices[tileY]?.[tileX] ?? 0) !== tilesetIndex) {
+            continue;
+          }
+
+          const tileId = this.terrainData[tileY]?.[tileX] ?? 0;
+          terrainLayer.putTileAt(tileId, tileX, tileY);
+        }
+      }
+
+      terrainLayer.setCollision(Array.from(this.blockedTerrainTileIds));
+      createdTerrainLayerCount += 1;
     }
 
-    const terrainLayer = terrainMap.createLayer(0, terrainTileset, 0, 0);
-    if (!terrainLayer) {
-      throw new Error('Failed to create terrain layer.');
+    if (createdTerrainLayerCount === 0) {
+      throw new Error('Failed to create terrain layers.');
     }
-
-    terrainLayer.setCollision(Array.from(this.blockedTerrainTileIds));
 
     this.player = this.add.sprite(
       this.worldWidthTiles * TILE_SIZE * 0.5,
@@ -618,22 +786,90 @@ export class WorldScene extends Phaser.Scene {
     this.events.on(Phaser.Scenes.Events.DESTROY, this.shutdown, this);
   }
 
-  private async loadTerrainData(): Promise<number[][]> {
+  private async loadTerrainRuntimeData(): Promise<TerrainRuntimeData> {
     try {
       const response = await fetch(WORLD_MAP_URL, { cache: 'no-store' });
       if (!response.ok) {
-        return generateTerrainData();
+        const generatedTerrain = generateTerrainData();
+        return {
+          terrain: generatedTerrain,
+          terrainTilesetIndices: createFilledTerrainTilesetIndexGrid(
+            generatedTerrain[0]?.length ?? MAP_WIDTH_TILES,
+            generatedTerrain.length,
+            0,
+          ),
+          terrainTilesets: [],
+        };
       }
 
       const raw = await response.json() as unknown;
-      const terrain = extractTerrainFromWorldMap(raw);
-      if (!terrain) {
-        return generateTerrainData();
+      const runtimeData = extractTerrainRuntimeDataFromWorldMap(raw);
+      if (!runtimeData) {
+        const generatedTerrain = generateTerrainData();
+        return {
+          terrain: generatedTerrain,
+          terrainTilesetIndices: createFilledTerrainTilesetIndexGrid(
+            generatedTerrain[0]?.length ?? MAP_WIDTH_TILES,
+            generatedTerrain.length,
+            0,
+          ),
+          terrainTilesets: [],
+        };
       }
 
-      return terrain;
+      return runtimeData;
     } catch {
-      return generateTerrainData();
+      const generatedTerrain = generateTerrainData();
+      return {
+        terrain: generatedTerrain,
+        terrainTilesetIndices: createFilledTerrainTilesetIndexGrid(
+          generatedTerrain[0]?.length ?? MAP_WIDTH_TILES,
+          generatedTerrain.length,
+          0,
+        ),
+        terrainTilesets: [],
+      };
+    }
+  }
+
+  private getTerrainTilesetTextureKey(tilesetIndex: number): string {
+    if (tilesetIndex <= 0) {
+      return TERRAIN_TEXTURE_KEY;
+    }
+
+    return `${TERRAIN_TEXTURE_KEY}-${tilesetIndex}`;
+  }
+
+  private async loadImageElement(imageUrl: string): Promise<HTMLImageElement> {
+    return await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.decoding = 'async';
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error(`Failed to load image: ${imageUrl}`));
+      image.src = imageUrl;
+    });
+  }
+
+  private async ensureTerrainTilesetsLoaded(): Promise<void> {
+    for (let tilesetIndex = 0; tilesetIndex < this.terrainTilesets.length; tilesetIndex += 1) {
+      const textureKey = this.getTerrainTilesetTextureKey(tilesetIndex);
+      if (this.textures.exists(textureKey)) {
+        continue;
+      }
+
+      const tilesetUrl = this.resolveRuntimeAssetUrl(this.terrainTilesets[tilesetIndex].url);
+      if (!tilesetUrl) {
+        continue;
+      }
+
+      try {
+        const image = await this.loadImageElement(tilesetUrl);
+        this.textures.addImage(textureKey, image);
+      } catch {
+        if (textureKey !== TERRAIN_TEXTURE_KEY && this.textures.exists(TERRAIN_TEXTURE_KEY)) {
+          continue;
+        }
+      }
     }
   }
 
@@ -693,6 +929,21 @@ export class WorldScene extends Phaser.Scene {
       };
     } catch {
       return { image: '' };
+    }
+  }
+
+  private async loadTerrainTilesetSourceTileSize(): Promise<number> {
+    try {
+      const response = await fetch(TERRAIN_TILESET_CONFIG_URL, { cache: 'no-store' });
+      if (!response.ok) {
+        return TILE_SIZE;
+      }
+
+      const raw = await response.json() as { sourceTileSize?: unknown };
+      const parsed = Math.floor(Number(raw?.sourceTileSize));
+      return parsed === 48 ? 48 : TILE_SIZE;
+    } catch {
+      return TILE_SIZE;
     }
   }
 
@@ -816,6 +1067,7 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.updatePlayerSmoothing(delta);
+    this.refreshWorldDepths();
 
     if (
       this.contextMenuElement &&
@@ -834,6 +1086,55 @@ export class WorldScene extends Phaser.Scene {
 
     this.renderActionStatus();
     this.renderDebugHud();
+  }
+
+  private getWorldEntityDepth(worldY: number, bias = 0): number {
+    return WORLD_DEPTH_BASE + worldY * WORLD_DEPTH_Y_SCALE + bias;
+  }
+
+  private resolveObjectRenderLayer(objectState: WorldObjectState): 'entity' | 'foreground' {
+    const renderLayer = String((objectState as { renderLayer?: unknown }).renderLayer ?? '').trim().toLowerCase();
+    return renderLayer === 'foreground' ? 'foreground' : 'entity';
+  }
+
+  private refreshWorldDepths(): void {
+    const localPlayerDepth = this.getWorldEntityDepth(this.player.y);
+    this.player.setDepth(localPlayerDepth);
+
+    for (const remotePlayer of this.remotePlayers.values()) {
+      remotePlayer.sprite.setDepth(this.getWorldEntityDepth(remotePlayer.sprite.y));
+    }
+
+    for (const enemyVisual of this.worldEnemies.values()) {
+      enemyVisual.sprite.setDepth(this.getWorldEntityDepth(enemyVisual.sprite.y));
+    }
+
+    for (const nodeVisual of this.worldNodes.values()) {
+      nodeVisual.sprite.setDepth(this.getWorldEntityDepth(nodeVisual.sprite.y));
+    }
+
+    for (const npcVisual of this.worldNpcs.values()) {
+      npcVisual.sprite.setDepth(this.getWorldEntityDepth(npcVisual.sprite.y));
+    }
+
+    for (const objectVisual of this.worldObjects.values()) {
+      const renderLayer = this.resolveObjectRenderLayer(objectVisual.state);
+      if (renderLayer === 'foreground') {
+        objectVisual.sprite.setDepth(WORLD_DEPTH_FOREGROUND);
+      } else {
+        let objectDepth = this.getWorldEntityDepth(objectVisual.sprite.y);
+        if (objectVisual.state.blocksMovement === false) {
+          objectDepth = Math.min(objectDepth, localPlayerDepth - 0.001);
+        }
+
+        objectVisual.sprite.setDepth(objectDepth);
+      }
+    }
+
+    for (const [npcId, marker] of this.npcQuestMarkers.entries()) {
+      const npcDepth = this.worldNpcs.get(npcId)?.sprite.depth ?? WORLD_DEPTH_BASE;
+      marker.setDepth(Math.max(npcDepth + 0.1, 7));
+    }
   }
 
   private initMinimap(): void {
@@ -2136,6 +2437,13 @@ export class WorldScene extends Phaser.Scene {
         blocksMovement: clickedObject.state.blocksMovement,
         tile: { x: tileX, y: tileY },
       });
+
+      if (!clickedObject.state.blocksMovement) {
+        this.showTileClickFeedback(tileX, tileY, 'walk');
+        this.performWalkTo(tileX, tileY);
+        return;
+      }
+
       this.showTileClickFeedback(tileX, tileY, 'interact');
 
       this.useWorldObject(clickedObject.state.id);
@@ -2197,6 +2505,13 @@ export class WorldScene extends Phaser.Scene {
       label: `${tileType} tile`,
     });
 
+    options.push({
+      label: 'Walk here',
+      onSelect: () => {
+        this.performWalkTo(tileX, tileY);
+      },
+    });
+
     if (nodeAtTile) {
       const name = nodeAtTile.state.resourceName;
 
@@ -2216,6 +2531,10 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (npcAtTile) {
+      const npcHasShop = Object.values(this.shopDefinitions).some(
+        (shop) => shop.npcId === npcAtTile.state.id,
+      );
+
       options.push({
         label: `Talk-to ${npcAtTile.state.name}`,
         onSelect: () => {
@@ -2223,12 +2542,14 @@ export class WorldScene extends Phaser.Scene {
         },
       });
 
-      options.push({
-        label: `Trade with ${npcAtTile.state.name}`,
-        onSelect: () => {
-          this.tradeWithNpc(npcAtTile.state.id);
-        },
-      });
+      if (npcHasShop) {
+        options.push({
+          label: `Trade with ${npcAtTile.state.name}`,
+          onSelect: () => {
+            this.tradeWithNpc(npcAtTile.state.id);
+          },
+        });
+      }
 
       options.push({
         label: `Examine ${npcAtTile.state.name}`,
@@ -2255,12 +2576,15 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (objectAtTile) {
-      options.push({
-        label: `Use ${objectAtTile.state.name}`,
-        onSelect: () => {
-          this.useWorldObject(objectAtTile.state.id);
-        },
-      });
+      const objectBehavior = String(objectAtTile.state.behavior ?? '').trim().toLowerCase();
+      if (objectBehavior !== 'decorative') {
+        options.push({
+          label: `Use ${objectAtTile.state.name}`,
+          onSelect: () => {
+            this.useWorldObject(objectAtTile.state.id);
+          },
+        });
+      }
 
       options.push({
         label: `Examine ${objectAtTile.state.name}`,
@@ -2305,13 +2629,6 @@ export class WorldScene extends Phaser.Scene {
         },
       });
     }
-
-    options.push({
-      label: 'Walk here',
-      onSelect: () => {
-        this.performWalkTo(tileX, tileY);
-      },
-    });
 
     this.showContextMenu(pointer, options);
   }
@@ -3515,6 +3832,27 @@ export class WorldScene extends Phaser.Scene {
         }
       });
       this.questDialogueOptionsRowElement?.append(button);
+    }
+
+    const dialogueNpcId = String(this.questDialogueState.npcId ?? '').trim();
+    const npcShop = Object.values(this.shopDefinitions).find((shop) => shop.npcId === dialogueNpcId) ?? null;
+    if (dialogueNpcId && npcShop) {
+      const openShopButton = document.createElement('button');
+      openShopButton.textContent = 'Open shop';
+      openShopButton.style.background = 'rgba(64, 58, 41, 0.95)';
+      openShopButton.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      openShopButton.style.color = '#f0e5c1';
+      openShopButton.style.fontFamily = 'monospace';
+      openShopButton.style.fontSize = '12px';
+      openShopButton.style.padding = '4px 8px';
+      openShopButton.style.cursor = 'pointer';
+      openShopButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeQuestDialogue();
+        this.tradeWithNpc(dialogueNpcId);
+      });
+      this.questDialogueOptionsRowElement.append(openShopButton);
     }
   }
 
@@ -4978,6 +5316,14 @@ export class WorldScene extends Phaser.Scene {
             {
               label: `Move all ${slot.name}`,
               onSelect: () => {
+                if (from === 'inventory' && this.localPlayerState) {
+                  const totalMatching = this.localPlayerState.inventory.slots
+                    .filter((entry) => entry.itemId === slot.itemId)
+                    .reduce((total, entry) => total + Math.max(0, entry.quantity), 0);
+                  this.multiplayerClient.sendBankTransfer(from, to, index, Math.max(1, totalMatching));
+                  return;
+                }
+
                 this.multiplayerClient.sendBankTransfer(from, to, index, slot.quantity);
               },
             },
@@ -5059,9 +5405,38 @@ export class WorldScene extends Phaser.Scene {
       row.style.gap = '6px';
       row.style.marginBottom = '4px';
 
+      const ownedQuantity = this.localPlayerState.inventory.slots
+        .filter((slot) => slot.itemId === listing.itemId)
+        .reduce((total, slot) => total + Math.max(0, slot.quantity), 0);
+
+      const icon = document.createElement('img');
+      icon.alt = listing.name;
+      icon.width = 18;
+      icon.height = 18;
+      icon.style.width = '18px';
+      icon.style.height = '18px';
+      icon.style.objectFit = 'contain';
+      icon.style.imageRendering = 'pixelated';
+      icon.style.border = '1px solid rgba(150, 138, 102, 0.9)';
+      icon.style.background = 'rgba(20, 20, 20, 0.5)';
+      icon.style.padding = '1px';
+      icon.src = listing.image
+        ? this.resolveRuntimeAssetUrl(listing.image)
+        : this.getInventoryItemIcon(listing.itemId);
+      icon.addEventListener('error', () => {
+        icon.src = this.getInventoryItemIcon(listing.itemId);
+      });
+
       const label = document.createElement('div');
       label.textContent = `${listing.name} (B:${listing.buyPrice} / S:${listing.sellPrice})`;
       label.style.flex = '1';
+
+      const ownedText = document.createElement('div');
+      ownedText.textContent = `You: ${ownedQuantity}`;
+      ownedText.style.minWidth = '56px';
+      ownedText.style.textAlign = 'right';
+      ownedText.style.color = '#d8cba0';
+      ownedText.style.fontSize = '11px';
 
       const buyButton = document.createElement('button');
       buyButton.textContent = 'Buy';
@@ -5078,14 +5453,20 @@ export class WorldScene extends Phaser.Scene {
       sellButton.textContent = 'Sell';
       sellButton.style.fontFamily = 'monospace';
       sellButton.style.fontSize = '11px';
-      sellButton.style.cursor = 'pointer';
+      const canSell = ownedQuantity > 0;
+      sellButton.disabled = !canSell;
+      sellButton.style.cursor = canSell ? 'pointer' : 'default';
+      sellButton.style.opacity = canSell ? '1' : '0.45';
       sellButton.addEventListener('pointerdown', (event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (!canSell) {
+          return;
+        }
         this.multiplayerClient.sendShopSell(shop.id, listing.itemId, 1);
       });
 
-      row.append(label, buyButton, sellButton);
+      row.append(icon, label, ownedText, buyButton, sellButton);
       this.shopContentElement.appendChild(row);
     }
 

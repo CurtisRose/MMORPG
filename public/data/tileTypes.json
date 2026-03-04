@@ -1,50 +1,78 @@
 [
   {
     "id": 0,
-    "label": "Grass",
-    "color": "#4f8f4a",
     "walkable": true,
     "moveSpeedMultiplier": 1,
     "damagePerSecond": 0
   },
   {
     "id": 1,
-    "label": "Dirt",
-    "color": "#7c6642",
     "walkable": true,
     "moveSpeedMultiplier": 1,
     "damagePerSecond": 0
   },
   {
     "id": 2,
-    "label": "Water",
-    "color": "#355f9c",
     "walkable": false,
     "moveSpeedMultiplier": 0.35,
     "damagePerSecond": 0
   },
   {
     "id": 3,
-    "label": "Sand",
-    "color": "#b9a56d",
     "walkable": true,
     "moveSpeedMultiplier": 0.85,
     "damagePerSecond": 0
   },
   {
     "id": 4,
-    "label": "Stone",
-    "color": "#4f8f4a",
-    "image": "/assets/terrain/terrain_tileset.png",
     "walkable": true,
     "moveSpeedMultiplier": 1,
     "damagePerSecond": 1
   },
   {
     "id": 5,
-    "label": "Stone Brick",
-    "color": "#222833",
-    "image": "",
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 6,
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 19,
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 21,
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 35,
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 49,
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 70,
+    "walkable": true,
+    "moveSpeedMultiplier": 1,
+    "damagePerSecond": 0
+  },
+  {
+    "id": 98,
     "walkable": true,
     "moveSpeedMultiplier": 1,
     "damagePerSecond": 0

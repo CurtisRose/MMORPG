@@ -13,7 +13,7 @@ export function openBankForPlayer(player, objectId, deps) {
 export function transferBankItem(player, message, deps) {
   const from = message.from === 'bank' ? 'bank' : 'inventory';
   const to = message.to === 'bank' ? 'bank' : 'inventory';
-  const slotIndex = message.slotIndex;
+  const slotIndex = Math.floor(Number(message.slotIndex));
   const requestedQuantity = Number(message.quantity ?? 1);
   const quantity = Number.isFinite(requestedQuantity)
     ? Math.max(1, Math.floor(requestedQuantity))
@@ -33,22 +33,57 @@ export function transferBankItem(player, message, deps) {
 
   const sourceContainer = from === 'bank' ? player.bank : player.inventory;
   const destinationContainer = to === 'bank' ? player.bank : player.inventory;
-  const transferResult = deps.transferContainerSlot(
+  const sourceSlot = sourceContainer.slots[slotIndex] ?? null;
+  if (!sourceSlot) {
+    return { ok: false, reason: '[Bank] Could not move that item.' };
+  }
+
+  let movedQuantity = 0;
+  let movedItemName = '';
+
+  const transferSingleSlot = (targetIndex, targetQuantity) => deps.transferContainerSlot(
     sourceContainer,
     destinationContainer,
-    slotIndex,
-    quantity,
+    targetIndex,
+    targetQuantity,
     {
       forceDestinationStacking: to === 'bank',
     },
   );
 
-  if (!transferResult) {
+  if (from === 'inventory' && to === 'bank') {
+    let remaining = quantity;
+    const sourceItemId = String(sourceSlot.itemId ?? '');
+
+    while (remaining > 0) {
+      const nextIndex = sourceContainer.slots.findIndex((entry) => entry.itemId === sourceItemId);
+      if (nextIndex === -1) {
+        break;
+      }
+
+      const transferResult = transferSingleSlot(nextIndex, remaining);
+      if (!transferResult) {
+        break;
+      }
+
+      movedQuantity += transferResult.quantity;
+      movedItemName = transferResult.itemName;
+      remaining -= transferResult.quantity;
+    }
+  } else {
+    const transferResult = transferSingleSlot(slotIndex, quantity);
+    if (transferResult) {
+      movedQuantity = transferResult.quantity;
+      movedItemName = transferResult.itemName;
+    }
+  }
+
+  if (movedQuantity <= 0) {
     return { ok: false, reason: '[Bank] Could not move that item.' };
   }
 
-  const quantityText = transferResult.quantity > 1 ? ` x${transferResult.quantity}` : '';
-  player.lastActionText = `${from === 'inventory' ? 'Deposited' : 'Withdrew'} ${transferResult.itemName}${quantityText}`;
+  const quantityText = movedQuantity > 1 ? ` x${movedQuantity}` : '';
+  player.lastActionText = `${from === 'inventory' ? 'Deposited' : 'Withdrew'} ${movedItemName}${quantityText}`;
   return { ok: true };
 }
 
